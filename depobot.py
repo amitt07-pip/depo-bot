@@ -1067,26 +1067,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallets = db.get_all_wallets(user_id)
     wallet_count = len(wallets) if wallets else 0
 
+    total_usdt_value = Decimal("0")
+    for wallet in (wallets or []):
+        network = wallet["network"]
+        address = wallet["address"]
+        for token_key, token_info in TOKENS.items():
+            if network in token_info.get("networks", {}):
+                net_info = token_info["networks"][network]
+                if net_info.get("native"):
+                    continue
+                if token_key in ["USDT", "USDC"]:
+                    try:
+                        balance = await BalanceChecker.get_token_balance(
+                            network, address, token_key
+                        )
+                        if balance:
+                            total_usdt_value += Decimal(str(balance))
+                    except Exception:
+                        pass
+
+    divider = "\u2501" * 24
     welcome_text = (
-        "\U0001F3E6 *VM CRYPTO BOT*\n"
-        + "\u2501" * 24 + "\n\n"
-        + f"\U0001F44B Welcome back, *{user_name}*!\n\n"
-        + "\U0001F4CA *Portfolio Overview*\n"
-        + f"    \U0001F4B0 Wallets: *{wallet_count}*\n"
-        + f"    \U0001F517 Networks: *{len(NETWORKS)}*\n"
-        + f"    \U0001F4B5 Tokens: *{len(TOKENS)}*\n\n"
-        + "\U0001F310 *Available Networks*\n"
-    )
-
-    for key, info in NETWORKS.items():
-        welcome_text += f"    {info['icon']} {info['name']}\n"
-
-    welcome_text += (
-        "\n\U0001F6E1 *Security Status*\n"
-        "    \U0001F7E2 Live Monitoring: Active\n"
-        "    \U0001F512 Encryption: AES-256\n\n"
-        + "\u2501" * 24 + "\n"
-        + "\U0001F447 *Choose an option below:*"
+        f"\U0001F3E6 *VM CRYPTO BOT*\n"
+        f"{divider}\n\n"
+        f"\U0001F44B Welcome back, *{user_name}*!\n\n"
+        f"\U0001F4CA *Portfolio Overview*\n"
+        f"    \U0001F4B0 Wallets: *{wallet_count}*\n"
+        f"    \U0001F4B5 Est. Value: *{total_usdt_value:.2f} USDT*\n\n"
+        f"\U0001F6E1 *Security Status*\n"
+        f"    \U0001F7E2 Live Monitoring: Active\n"
+        f"    \U0001F512 Encryption: AES-256\n\n"
+        f"{divider}\n"
+        f"\U0001F447 *Choose an option below:*"
     )
 
     await update.message.reply_text(
@@ -1100,10 +1112,11 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    divider = "\u2501" * 24
     menu_text = (
-        "\U0001F3E6 *VM CRYPTO BOT*\n"
-        "\u2501" * 24 + "\n\n"
-        "\U0001F447 *Choose an option below:*"
+        f"\U0001F3E6 *VM CRYPTO BOT*\n"
+        f"{divider}\n\n"
+        f"\U0001F447 *Choose an option below:*"
     )
 
     await query.edit_message_text(
@@ -1120,13 +1133,14 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     wallets = db.get_all_wallets(user_id)
 
+    divider = "\u2501" * 24
     if not wallets:
         text = (
-            "\U0001F4B0 *My Wallets*\n"
-            "\u2501" * 24 + "\n\n"
-            "\U0001F4ED *No wallets found*\n\n"
-            "Create your first wallet to get started!\n"
-            "Tap the button below \U0001F447"
+            f"\U0001F4B0 *My Wallets*\n"
+            f"{divider}\n\n"
+            f"\U0001F4ED *No wallets found*\n\n"
+            f"Create your first wallet to get started!\n"
+            f"Tap the button below \U0001F447"
         )
         keyboard = [
             [InlineKeyboardButton(
@@ -1144,9 +1158,9 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = (
-        "\U0001F4B0 *My Wallets*\n"
-        + "\u2501" * 24 + "\n\n"
-        + f"\U0001F4CA Total: *{len(wallets)}* wallet(s)\n\n"
+        f"\U0001F4B0 *My Wallets*\n"
+        f"{divider}\n\n"
+        f"\U0001F4CA Total: *{len(wallets)}* wallet(s)\n\n"
     )
     keyboard = []
 
@@ -1199,9 +1213,10 @@ async def show_wallet_details(
         return
 
     info = NETWORKS[network]
+    divider = "\u2501" * 24
     await query.edit_message_text(
         f"{info['icon']} *{info['name']} Wallet*\n"
-        f"\u2501" * 24 + "\n\n"
+        f"{divider}\n\n"
         f"\U0001F4CD *Address*\n"
         f"    `{wallet['address']}`\n\n"
         f"\U0001F4B0 *Balance*\n"
@@ -1796,15 +1811,43 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.edit_message_text(
-            f"\u23f3 *Fetching {info['name']} balance...*",
+            f"\u23f3 *Fetching {info['name']} balances...*",
             parse_mode="Markdown"
         )
 
         balance_info = await BalanceChecker.get_balance(
             network, wallet["address"]
         )
-        balance_str = balance_info.get("balance", "Error")
-        symbol = balance_info.get("symbol", info["symbol"])
+        native_balance = balance_info.get("balance", "Error")
+        native_symbol = balance_info.get("symbol", info["symbol"])
+
+        divider = "\u2501" * 24
+        text = (
+            f"{info['icon']} *{info['name']} Balances*\n"
+            f"{divider}\n\n"
+            f"\U0001F4B0 *Native:* `{native_balance} {native_symbol}`\n"
+        )
+
+        for token_key, token_info in TOKENS.items():
+            if network in token_info.get("networks", {}):
+                net_info = token_info["networks"][network]
+                if net_info.get("native"):
+                    continue
+                try:
+                    token_bal = await BalanceChecker.get_token_balance(
+                        network, wallet["address"], token_key
+                    )
+                    if token_bal is not None:
+                        text += (
+                            f"{token_info['icon']} *{token_info['symbol']}:* "
+                            f"`{token_bal:.4f} {token_info['symbol']}`\n"
+                        )
+                except Exception:
+                    pass
+
+        text += (
+            f"\n\U0001F4CD *Address:*\n`{wallet['address']}`"
+        )
 
         keyboard = [
             [
@@ -1828,9 +1871,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         await query.edit_message_text(
-            f"{info['icon']} *{info['name']} Balance*\n\n"
-            f"\U0001F4B0 *Balance:* `{balance_str} {symbol}`\n\n"
-            f"\U0001F4CD *Address:*\n`{wallet['address']}`",
+            text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -2233,32 +2274,33 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    divider = "\u2501" * 24
     help_text = (
-        "\U0001F4D6 *Help & Guide*\n"
-        "\u2501" * 24 + "\n\n"
-        "\U0001F4B0 *My Wallets*\n"
-        "    View and manage your wallets\n\n"
-        "\U0001F4E5 *Deposit*\n"
-        "    Get deposit addresses\n\n"
-        "\U0001F4CA *Balances*\n"
-        "    Check wallet balances\n\n"
-        "\U0001F4E4 *Withdraw*\n"
-        "    Send funds externally\n\n"
-        "\u2795 *Generate*\n"
-        "    Create new wallets\n\n"
-        "\u2501" * 24 + "\n"
-        "\U0001F310 *Networks*\n"
+        f"\U0001F4D6 *Help & Guide*\n"
+        f"{divider}\n\n"
+        f"\U0001F4B0 *My Wallets*\n"
+        f"    View and manage your wallets\n\n"
+        f"\U0001F4E5 *Deposit*\n"
+        f"    Get deposit addresses\n\n"
+        f"\U0001F4CA *Balances*\n"
+        f"    Check wallet balances\n\n"
+        f"\U0001F4E4 *Withdraw*\n"
+        f"    Send funds externally\n\n"
+        f"\u2795 *Generate*\n"
+        f"    Create new wallets\n\n"
+        f"{divider}\n"
+        f"\U0001F310 *Networks*\n"
     )
 
     for key, info in NETWORKS.items():
         help_text += f"    {info['icon']} {info['name']} ({info['symbol']})\n"
 
     help_text += (
-        "\n\u2501" * 24 + "\n"
-        "\U0001F512 *Security*\n"
-        "    \U0001F7E2 AES-256 Encryption\n"
-        "    \U0001F7E2 Secure Key Storage\n"
-        "    \U0001F7E2 Live Monitoring"
+        f"\n{divider}\n"
+        f"\U0001F512 *Security*\n"
+        f"    \U0001F7E2 AES-256 Encryption\n"
+        f"    \U0001F7E2 Secure Key Storage\n"
+        f"    \U0001F7E2 Live Monitoring"
     )
 
     await query.edit_message_text(
