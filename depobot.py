@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+ALLOWED_USER_ID = 7338429782
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 
 NETWORKS = {
