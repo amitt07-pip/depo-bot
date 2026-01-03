@@ -2690,8 +2690,7 @@ async def handle_text_commands(
     context: ContextTypes.DEFAULT_TYPE
 ):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_authorized(user_id, chat_id):
+    if not is_authorized(user_id):
         return
 
     text = update.message.text.lower().strip()
