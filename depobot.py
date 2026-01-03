@@ -1078,11 +1078,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 if token_key in ["USDT", "USDC"]:
                     try:
-                        balance = await BalanceChecker.get_token_balance(
-                            network, address, token_key
+                        result = await BalanceChecker.get_token_balance(
+                            token_key, network, address
                         )
-                        if balance:
-                            total_usdt_value += Decimal(str(balance))
+                        if result and "balance" in result and not result.get("error"):
+                            bal_str = result["balance"]
+                            if bal_str and float(bal_str) > 0:
+                                total_usdt_value += Decimal(bal_str)
                     except Exception:
                         pass
 
@@ -1721,13 +1723,29 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
 
+    keyboard.append([InlineKeyboardButton(
+        "\U0001F4B5 \u2501\u2501 TOKENS \u2501\u2501 \U0001F4B5",
+        callback_data="ignore"
+    )])
+
+    for token_key, token_info in TOKENS.items():
+        if not token_info.get("networks", {}).get(
+            list(token_info.get("networks", {}).keys())[0], {}
+        ).get("native", False):
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{token_info['icon']} {token_info['symbol']}",
+                    callback_data=f"token_balance_{token_key}"
+                )
+            ])
+
     keyboard.append([
         InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
     ])
 
     await query.edit_message_text(
         "\U0001F4CA *Check Balances*\n\n"
-        "Select a network or check all balances:",
+        "Select a network or token:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1834,14 +1852,16 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if net_info.get("native"):
                     continue
                 try:
-                    token_bal = await BalanceChecker.get_token_balance(
-                        network, wallet["address"], token_key
+                    result = await BalanceChecker.get_token_balance(
+                        token_key, network, wallet["address"]
                     )
-                    if token_bal is not None:
-                        text += (
-                            f"{token_info['icon']} *{token_info['symbol']}:* "
-                            f"`{token_bal:.4f} {token_info['symbol']}`\n"
-                        )
+                    if result and "balance" in result and not result.get("error"):
+                        bal_str = result["balance"]
+                        if bal_str and float(bal_str) > 0:
+                            text += (
+                                f"{token_info['icon']} *{token_info['symbol']}:* "
+                                f"`{bal_str} {token_info['symbol']}`\n"
+                            )
                 except Exception:
                     pass
 
@@ -2357,6 +2377,50 @@ async def show_token_networks(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def show_token_balance_networks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split("_")[2]
+    token_info = TOKENS.get(token)
+
+    if not token_info:
+        await query.edit_message_text(
+            "\u26a0\ufe0f Token not found",
+            reply_markup=get_back_button("menu_balance")
+        )
+        return
+
+    keyboard = []
+    for network in token_info.get("networks", {}).keys():
+        net_info = NETWORKS.get(network)
+        if net_info:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{net_info['icon']} {net_info['name']}",
+                    callback_data=f"tokenbal_{token}_{network}"
+                )
+            ])
+
+    keyboard.append([
+        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_balance")
+    ])
+
+    text = (
+        f"{token_info['icon']} *{token_info['name']}*\n\n"
+        f"Select a network to check your {token_info['symbol']} balance:"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def check_token_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Fetching token balance...")
@@ -2650,6 +2714,9 @@ def main():
         CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$")
     )
     application.add_handler(
+        CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^ignore$")
+    )
+    application.add_handler(
         CallbackQueryHandler(show_balance_menu, pattern="^menu_balance$")
     )
     application.add_handler(
@@ -2669,6 +2736,12 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_token_networks, pattern=r"^token_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            show_token_balance_networks,
+            pattern=r"^token_balance_[A-Z]+$"
+        )
     )
     application.add_handler(
         CallbackQueryHandler(check_token_balance, pattern=r"^tokenbal_[A-Z]+_[A-Z]+$")
