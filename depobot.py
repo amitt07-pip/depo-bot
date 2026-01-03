@@ -2083,17 +2083,16 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 None, address, None, "failed"
             )
 
+            error_msg = str(result.get('error', 'Unknown error'))
             await query.edit_message_text(
-                f"\u274c *Withdrawal Failed*\n\n"
-                f"Error: {result.get('error')}",
-                parse_mode="Markdown",
+                f"\u274c Withdrawal Failed\n\nError: {error_msg}",
                 reply_markup=get_back_button("menu_withdraw")
             )
     except Exception as e:
         logger.error(f"Withdrawal error: {e}")
+        error_msg = str(e)
         await query.edit_message_text(
-            f"\u274c *Withdrawal Error*\n\n{str(e)}",
-            parse_mode="Markdown",
+            f"\u274c Withdrawal Error\n\n{error_msg}",
             reply_markup=get_back_button("menu_withdraw")
         )
 
