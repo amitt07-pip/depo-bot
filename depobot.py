@@ -1117,6 +1117,138 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "\U0001F6AB *You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    args = context.args
+    if not args or len(args) < 2:
+        usage_text = (
+            "\U0001F4E4 *Send Command Usage*\n"
+            "\u2501" * 24 + "\n\n"
+            "\U0001F4DD *Format:* `/send <token> <network>`\n\n"
+            "\U0001F4A1 *Examples:*\n"
+            "    `/send USDT BSC`\n"
+            "    `/send USDC ETH`\n"
+            "    `/send ETH ETH`\n"
+            "    `/send BNB BSC`\n"
+            "    `/send SOL SOLANA`\n"
+            "    `/send TRX TRON`\n"
+            "    `/send LTC LTC`\n\n"
+            "\U0001F4B5 *Available Tokens:*\n"
+            "    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC\n\n"
+            "\U0001F310 *Available Networks:*\n"
+            "    ETH, BSC, POLYGON, SOLANA, TRON, LTC"
+        )
+        await update.message.reply_text(usage_text, parse_mode="Markdown")
+        return
+
+    token = args[0].upper()
+    network = args[1].upper()
+
+    token_aliases = {
+        "ETHEREUM": "ETH",
+        "BITCOIN": "BTC",
+        "LITECOIN": "LTC",
+        "SOLANA": "SOL",
+        "TRON": "TRX",
+        "POLYGON": "MATIC",
+        "BNB": "BNB",
+        "BINANCE": "BNB",
+    }
+    network_aliases = {
+        "ETHEREUM": "ETH",
+        "BINANCE": "BSC",
+        "BNB": "BSC",
+        "BNBCHAIN": "BSC",
+        "POLY": "POLYGON",
+        "SOL": "SOLANA",
+        "TRX": "TRON",
+        "LITECOIN": "LTC",
+    }
+
+    token = token_aliases.get(token, token)
+    network = network_aliases.get(network, network)
+
+    if network not in NETWORKS:
+        await update.message.reply_text(
+            f"\u274C *Invalid Network*\n\n"
+            f"Network `{network}` is not supported.\n\n"
+            f"\U0001F310 *Available Networks:*\n"
+            f"    ETH, BSC, POLYGON, SOLANA, TRON, LTC",
+            parse_mode="Markdown"
+        )
+        return
+
+    if token not in TOKENS:
+        await update.message.reply_text(
+            f"\u274C *Invalid Token*\n\n"
+            f"Token `{token}` is not supported.\n\n"
+            f"\U0001F4B5 *Available Tokens:*\n"
+            f"    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC",
+            parse_mode="Markdown"
+        )
+        return
+
+    token_info = TOKENS[token]
+    if network not in token_info.get("networks", {}):
+        available_networks = list(token_info.get("networks", {}).keys())
+        await update.message.reply_text(
+            f"\u274C *Token Not Available on Network*\n\n"
+            f"`{token}` is not available on `{network}`.\n\n"
+            f"\U0001F310 *{token} is available on:*\n"
+            f"    {', '.join(available_networks)}",
+            parse_mode="Markdown"
+        )
+        return
+
+    wallet = db.get_wallet(user_id, network)
+    if not wallet:
+        await update.message.reply_text(
+            f"\u274C *No Wallet Found*\n\n"
+            f"You don't have a wallet for `{network}` yet.\n\n"
+            f"\U0001F4A1 Use the menu to generate a wallet first:\n"
+            f"    /start \u2192 Generate Wallet \u2192 {NETWORKS[network]['name']}",
+            parse_mode="Markdown"
+        )
+        return
+
+    address = wallet["address"]
+    network_info = NETWORKS[network]
+    token_icon = token_info.get("icon", "\U0001F4B0")
+    network_icon = network_info.get("icon", "\U0001F310")
+
+    divider = "\u2501" * 24
+    response_text = (
+        f"\U0001F4E4 *Deposit Address*\n"
+        f"{divider}\n\n"
+        f"{token_icon} *Token:* {token}\n"
+        f"{network_icon} *Network:* {network_info['name']}\n\n"
+        f"\U0001F4CB *Address:*\n"
+        f"`{address}`\n\n"
+        f"\u26A0\uFE0F *Important:* Only send {token} on {network_info['name']} network!"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F50D View on Explorer",
+            url=f"{network_info['explorer']}/address/{address}"
+        )],
+        [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
+    ]
+
+    await update.message.reply_text(
+        response_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
@@ -2714,6 +2846,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", start))
+    application.add_handler(CommandHandler("send", send_command))
 
     application.add_handler(withdraw_handler)
 
