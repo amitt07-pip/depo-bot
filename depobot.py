@@ -838,14 +838,22 @@ class WithdrawalHandler:
 db = WalletDatabase()
 
 
-def is_authorized(user_id: int, chat_id: int = None) -> bool:
+def is_authorized(user_id: int) -> bool:
     if ALLOWED_USER_ID == 0:
         return True
-    if user_id == ALLOWED_USER_ID:
-        return True
-    if chat_id and chat_id == ALLOWED_CHAT_ID:
-        return True
-    return False
+    return user_id == ALLOWED_USER_ID
+
+
+async def check_callback_auth(update: Update) -> bool:
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_authorized(user_id):
+        await query.answer(
+            "You are not authorised to use the bot!",
+            show_alert=True
+        )
+        return False
+    return True
 
 
 def get_friendly_error(error) -> str:
@@ -1054,11 +1062,9 @@ def format_address(address: str) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_authorized(user_id, chat_id):
+    if not is_authorized(user_id):
         await update.message.reply_text(
-            "\U0001F6AB *Access Denied*\n\n"
-            "You are not authorised to use this bot!",
+            "\U0001F6AB *You are not authorised to use the bot!*",
             parse_mode="Markdown"
         )
         return
@@ -1111,6 +1117,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1129,6 +1137,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1198,6 +1208,8 @@ async def show_wallet_details(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1230,6 +1242,8 @@ async def show_wallet_details(
 
 
 async def refresh_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer("Fetching balance...")
 
@@ -1271,6 +1285,8 @@ async def show_generate_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1289,6 +1305,8 @@ async def show_generate_menu(
 
 
 async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1329,6 +1347,8 @@ async def confirm_generate_wallet(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1395,6 +1415,8 @@ async def do_generate_wallet(query, network: str, user_id: int):
 
 
 async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1414,6 +1436,8 @@ async def show_deposit_address(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1491,6 +1515,8 @@ async def show_token_deposit_networks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1530,6 +1556,8 @@ async def show_token_deposit_address(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1601,6 +1629,8 @@ async def show_token_withdraw_networks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1640,6 +1670,8 @@ async def show_token_withdraw_info(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer("Checking token balance...")
 
@@ -1705,6 +1737,8 @@ async def show_token_withdraw_info(
 
 
 async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1752,6 +1786,8 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer("Fetching balances...")
 
@@ -1901,6 +1937,8 @@ async def show_withdraw_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -1917,6 +1955,8 @@ async def show_withdraw_menu(
 
 
 async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
 
@@ -2229,6 +2269,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
 
@@ -2248,6 +2290,8 @@ async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_explorer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -2291,6 +2335,8 @@ async def show_explorer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -2331,6 +2377,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_tokens_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -2352,6 +2400,8 @@ async def show_tokens_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_token_networks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -2381,6 +2431,8 @@ async def show_token_balance_networks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer()
 
@@ -2422,6 +2474,8 @@ async def show_token_balance_networks(
 
 
 async def check_token_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
     query = update.callback_query
     await query.answer("Fetching token balance...")
 
