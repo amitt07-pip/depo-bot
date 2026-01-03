@@ -848,6 +848,55 @@ def is_authorized(user_id: int, chat_id: int = None) -> bool:
     return False
 
 
+def get_friendly_error(error) -> str:
+    error_str = str(error).lower() if error else ""
+
+    if "insufficient funds" in error_str or "balance 0" in error_str:
+        return (
+            "Insufficient balance! Your wallet doesn't have enough funds "
+            "to cover the transaction and gas fees.\n\n"
+            "Please deposit more funds first."
+        )
+    if "transfer amount exceeds balance" in error_str or "exceeds balance" in error_str:
+        return (
+            "Insufficient token balance! The amount you're trying to send "
+            "exceeds your available balance.\n\n"
+            "Please reduce the amount or deposit more tokens."
+        )
+    if "nonce too low" in error_str or "replacement transaction" in error_str:
+        return (
+            "A previous transaction is still pending on the network.\n\n"
+            "Please wait a moment and try again."
+        )
+    if "execution reverted" in error_str or "revert" in error_str:
+        return (
+            "Transaction was rejected by the network.\n\n"
+            "Please double-check the token and network, then try again."
+        )
+    if "rate limit" in error_str or "429" in error_str or "too many requests" in error_str:
+        return (
+            "Network is currently busy.\n\n"
+            "Please try again in a minute."
+        )
+    if "invalid address" in error_str or "checksum" in error_str:
+        return (
+            "Invalid wallet address!\n\n"
+            "Please check the address format and try again."
+        )
+    if "timeout" in error_str or "timed out" in error_str:
+        return (
+            "Network request timed out.\n\n"
+            "Please check your connection and try again."
+        )
+    if "connection" in error_str or "network" in error_str:
+        return (
+            "Unable to connect to the network.\n\n"
+            "Please try again later."
+        )
+
+    return "Something went wrong. Please try again later."
+
+
 def get_main_menu_keyboard():
     keyboard = [
         [
@@ -1007,7 +1056,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_authorized(user_id, chat_id):
         await update.message.reply_text(
-            "*You are not authorised to use the bot!*",
+            "\U0001F6AB *Access Denied*\n\n"
+            "You are not authorised to use this bot!",
             parse_mode="Markdown"
         )
         return
@@ -1017,26 +1067,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallet_count = len(wallets) if wallets else 0
 
     welcome_text = (
-        f"\U0001F3E6 *VM CRYPTO BOT*\n"
-        f"{'=' * 28}\n\n"
-        f"\U0001F44B Hello, *{user_name}*!\n\n"
-        f"\U0001F4BC *Your Portfolio:*\n"
-        f"   \U0001F4B0 Wallets: `{wallet_count}`\n"
-        f"   \U0001F517 Networks: `{len(NETWORKS)}`\n"
-        f"   \U0001F4B5 Tokens: `{len(TOKENS)}`\n\n"
-        f"{'=' * 28}\n"
-        f"\U0001F310 *Supported Networks:*\n"
+        "\U0001F3E6 *VM CRYPTO BOT*\n"
+        + "\u2501" * 24 + "\n\n"
+        + f"\U0001F44B Welcome back, *{user_name}*!\n\n"
+        + "\U0001F4CA *Portfolio Overview*\n"
+        + f"    \U0001F4B0 Wallets: *{wallet_count}*\n"
+        + f"    \U0001F517 Networks: *{len(NETWORKS)}*\n"
+        + f"    \U0001F4B5 Tokens: *{len(TOKENS)}*\n\n"
+        + "\U0001F310 *Available Networks*\n"
     )
 
     for key, info in NETWORKS.items():
-        welcome_text += f"   {info['icon']} {info['name']}\n"
+        welcome_text += f"    {info['icon']} {info['name']}\n"
 
     welcome_text += (
-        f"\n{'=' * 28}\n"
-        f"\U0001F514 *Live Monitoring:* Active\n"
-        f"\U0001F512 *Security:* AES-256 Encrypted\n"
-        f"{'=' * 28}\n\n"
-        f"\U0001F447 *Select an option:*"
+        "\n\U0001F6E1 *Security Status*\n"
+        "    \U0001F7E2 Live Monitoring: Active\n"
+        "    \U0001F512 Encryption: AES-256\n\n"
+        + "\u2501" * 24 + "\n"
+        + "\U0001F447 *Choose an option below:*"
     )
 
     await update.message.reply_text(
@@ -1051,8 +1100,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     menu_text = (
-        "\U0001F3E6 *VM Crypto Bot*\n\n"
-        "\U0001F447 *Select an option:*"
+        "\U0001F3E6 *VM CRYPTO BOT*\n"
+        "\u2501" * 24 + "\n\n"
+        "\U0001F447 *Choose an option below:*"
     )
 
     await query.edit_message_text(
@@ -1071,13 +1121,15 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not wallets:
         text = (
-            "\U0001F4B0 *My Wallets*\n\n"
-            "\u26a0\ufe0f You don't have any wallets yet.\n\n"
-            "Tap *Generate Wallet* to create your first wallet!"
+            "\U0001F4B0 *My Wallets*\n"
+            "\u2501" * 24 + "\n\n"
+            "\U0001F4ED *No wallets found*\n\n"
+            "Create your first wallet to get started!\n"
+            "Tap the button below \U0001F447"
         )
         keyboard = [
             [InlineKeyboardButton(
-                "\u2795 Generate Wallet", callback_data="menu_generate"
+                "\u2795 Create Wallet", callback_data="menu_generate"
             )],
             [InlineKeyboardButton(
                 "\U0001F3E0 Main Menu", callback_data="main_menu"
@@ -1090,7 +1142,11 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = "\U0001F4B0 *My Wallets*\n\n"
+    text = (
+        "\U0001F4B0 *My Wallets*\n"
+        + "\u2501" * 24 + "\n\n"
+        + f"\U0001F4CA Total: *{len(wallets)}* wallet(s)\n\n"
+    )
     keyboard = []
 
     for wallet in wallets:
@@ -1098,11 +1154,11 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = NETWORKS[network]
         text += (
             f"{info['icon']} *{info['name']}*\n"
-            f"`{wallet['address']}`\n\n"
+            f"    `{format_address(wallet['address'])}`\n\n"
         )
         keyboard.append([
             InlineKeyboardButton(
-                f"{info['icon']} {info['name']} Details",
+                f"{info['icon']} {info['name']}",
                 callback_data=f"wallet_{network}"
             )
         ])
@@ -1134,17 +1190,22 @@ async def show_wallet_details(
 
     if not wallet:
         await query.edit_message_text(
-            f"\u26a0\ufe0f No wallet found for {NETWORKS[network]['name']}",
+            f"\U0001F6AB *Wallet Not Found*\n\n"
+            f"No wallet exists for {NETWORKS[network]['name']}",
+            parse_mode="Markdown",
             reply_markup=get_back_button("menu_wallets")
         )
         return
 
     info = NETWORKS[network]
     await query.edit_message_text(
-        f"{info['icon']} *{info['name']} Wallet*\n\n"
-        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
-        f"\U0001F4B0 *Balance:* Tap refresh to check\n\n"
-        f"\U0001F517 *Symbol:* {info['symbol']}",
+        f"{info['icon']} *{info['name']} Wallet*\n"
+        f"\u2501" * 24 + "\n\n"
+        f"\U0001F4CD *Address*\n"
+        f"    `{wallet['address']}`\n\n"
+        f"\U0001F4B0 *Balance*\n"
+        f"    Tap refresh to check\n\n"
+        f"\U0001F517 *Network*: {info['symbol']}",
         parse_mode="Markdown",
         reply_markup=get_wallet_card_keyboard(network)
     )
@@ -2083,16 +2144,20 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 None, address, None, "failed"
             )
 
-            error_msg = str(result.get('error', 'Unknown error'))
+            raw_error = result.get('error', 'Unknown error')
+            logger.error(f"Withdrawal failed: {raw_error}")
+            friendly_msg = get_friendly_error(raw_error)
             await query.edit_message_text(
-                f"\u274c Withdrawal Failed\n\nError: {error_msg}",
+                f"\u274c *Withdrawal Failed*\n\n{friendly_msg}",
+                parse_mode="Markdown",
                 reply_markup=get_back_button("menu_withdraw")
             )
     except Exception as e:
         logger.error(f"Withdrawal error: {e}")
-        error_msg = str(e)
+        friendly_msg = get_friendly_error(e)
         await query.edit_message_text(
-            f"\u274c Withdrawal Error\n\n{error_msg}",
+            f"\u274c *Withdrawal Error*\n\n{friendly_msg}",
+            parse_mode="Markdown",
             reply_markup=get_back_button("menu_withdraw")
         )
 
@@ -2168,29 +2233,31 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     help_text = (
-        "\u2753 *Help & Information*\n\n"
+        "\U0001F4D6 *Help & Guide*\n"
+        "\u2501" * 24 + "\n\n"
         "\U0001F4B0 *My Wallets*\n"
-        "View all your generated wallets and their details.\n\n"
+        "    View and manage your wallets\n\n"
         "\U0001F4E5 *Deposit*\n"
-        "Get your deposit address for any network.\n\n"
+        "    Get deposit addresses\n\n"
         "\U0001F4CA *Balances*\n"
-        "Check your wallet balances across all networks.\n\n"
+        "    Check wallet balances\n\n"
         "\U0001F4E4 *Withdraw*\n"
-        "Send funds to an external address.\n\n"
-        "\u2795 *Generate Wallet*\n"
-        "Create a new wallet for any supported network.\n\n"
-        "==============================\n\n"
-        "\U0001F517 *Supported Networks:*\n"
+        "    Send funds externally\n\n"
+        "\u2795 *Generate*\n"
+        "    Create new wallets\n\n"
+        "\u2501" * 24 + "\n"
+        "\U0001F310 *Networks*\n"
     )
 
     for key, info in NETWORKS.items():
-        help_text += f"  {info['icon']} {info['name']} ({info['symbol']})\n"
+        help_text += f"    {info['icon']} {info['name']} ({info['symbol']})\n"
 
     help_text += (
-        "\n==============================\n\n"
-        "\U0001F512 *Security:*\n"
-        "All private keys are encrypted with AES-256.\n"
-        "Never share your encryption key with anyone."
+        "\n\u2501" * 24 + "\n"
+        "\U0001F512 *Security*\n"
+        "    \U0001F7E2 AES-256 Encryption\n"
+        "    \U0001F7E2 Secure Key Storage\n"
+        "    \U0001F7E2 Live Monitoring"
     )
 
     await query.edit_message_text(
