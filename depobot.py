@@ -379,13 +379,14 @@ class WalletGenerator:
     def generate_ltc_wallet() -> tuple:
         import hashlib
         import secrets
+        from Crypto.Hash import RIPEMD160
         private_key = secrets.token_bytes(32)
         from ecdsa import SigningKey, SECP256k1
         sk = SigningKey.from_string(private_key, curve=SECP256k1)
         vk = sk.get_verifying_key()
         public_key = b'\x04' + vk.to_string()
         sha256_hash = hashlib.sha256(public_key).digest()
-        ripemd160 = hashlib.new('ripemd160')
+        ripemd160 = RIPEMD160.new()
         ripemd160.update(sha256_hash)
         pubkey_hash = ripemd160.digest()
         version = b'\x30'
