@@ -94,6 +94,51 @@ NETWORKS = {
 }
 
 TOKENS = {
+    "ETH": {
+        "name": "Ethereum",
+        "symbol": "ETH",
+        "icon": "\u26aa",
+        "native": True,
+        "networks": {
+            "ETH": {"native": True, "decimals": 18}
+        }
+    },
+    "BNB": {
+        "name": "BNB",
+        "symbol": "BNB",
+        "icon": "\U0001F7E1",
+        "native": True,
+        "networks": {
+            "BSC": {"native": True, "decimals": 18}
+        }
+    },
+    "MATIC": {
+        "name": "Polygon",
+        "symbol": "MATIC",
+        "icon": "\U0001F7E3",
+        "native": True,
+        "networks": {
+            "POLYGON": {"native": True, "decimals": 18}
+        }
+    },
+    "SOL": {
+        "name": "Solana",
+        "symbol": "SOL",
+        "icon": "\U0001F7E2",
+        "native": True,
+        "networks": {
+            "SOLANA": {"native": True, "decimals": 9}
+        }
+    },
+    "TRX": {
+        "name": "Tron",
+        "symbol": "TRX",
+        "icon": "\U0001F534",
+        "native": True,
+        "networks": {
+            "TRON": {"native": True, "decimals": 6}
+        }
+    },
     "USDT": {
         "name": "Tether USD",
         "symbol": "USDT",
@@ -554,6 +599,9 @@ class BalanceChecker:
         network_info = NETWORKS.get(network)
 
         try:
+            if network_token.get("native"):
+                return await BalanceChecker.get_balance(network, address)
+
             if network_info["type"] == "evm":
                 return await BalanceChecker.get_evm_balance(
                     network, address, network_token["address"]
@@ -959,8 +1007,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_authorized(user_id, chat_id):
         await update.message.reply_text(
-            "\u26d4 Access Denied\n\n"
-            "You are not authorized to use this bot."
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
         )
         return
 
@@ -969,7 +1017,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallet_count = len(wallets) if wallets else 0
 
     welcome_text = (
-        f"\U0001F3E6 *DEPO WALLET BOT*\n"
+        f"\U0001F3E6 *VM CRYPTO BOT*\n"
         f"{'=' * 28}\n\n"
         f"\U0001F44B Hello, *{user_name}*!\n\n"
         f"\U0001F4BC *Your Portfolio:*\n"
@@ -1003,7 +1051,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     menu_text = (
-        "\U0001F3E6 *Depo Wallet Bot*\n\n"
+        "\U0001F3E6 *VM Crypto Bot*\n\n"
         "\U0001F447 *Select an option:*"
     )
 
@@ -1549,10 +1597,13 @@ async def show_token_withdraw_info(
     )
     balance_str = balance_info.get("balance", "0")
 
+    network_token = token_info["networks"][network]
+    is_native = network_token.get("native", False)
+
     context.user_data["withdraw_network"] = network
     context.user_data["withdraw_balance"] = balance_str
     context.user_data["withdraw_token"] = token
-    context.user_data["withdraw_token_address"] = token_info["networks"][network]["address"]
+    context.user_data["withdraw_token_address"] = None if is_native else network_token["address"]
 
     keyboard = [
         [InlineKeyboardButton(
