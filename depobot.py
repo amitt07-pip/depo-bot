@@ -888,6 +888,25 @@ def get_network_keyboard(action: str):
             row = []
     if row:
         keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton(
+        "\U0001F4B5 ━━━ TOKENS ━━━ \U0001F4B5",
+        callback_data="noop"
+    )])
+
+    token_row = []
+    for token_key, token_info in TOKENS.items():
+        btn = InlineKeyboardButton(
+            f"{token_info['icon']} {token_info['symbol']}",
+            callback_data=f"{action}_token_{token_key}"
+        )
+        token_row.append(btn)
+        if len(token_row) == 2:
+            keyboard.append(token_row)
+            token_row = []
+    if token_row:
+        keyboard.append(token_row)
+
     keyboard.append([
         InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
     ])
@@ -1336,6 +1355,217 @@ async def show_deposit_address(
         f"\u2139\ufe0f Tap the address to copy it.\n\n"
         f"\u26a0\ufe0f *Important:* Only send {info['symbol']} "
         f"and {info['name']} tokens to this address!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_token_deposit_networks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split("_")[2]
+    token_info = TOKENS.get(token)
+
+    if not token_info:
+        await query.edit_message_text(
+            "\u26a0\ufe0f Token not found.",
+            reply_markup=get_back_button("menu_deposit")
+        )
+        return
+
+    keyboard = []
+    for network_key in token_info["networks"].keys():
+        network_info = NETWORKS.get(network_key, {})
+        btn = InlineKeyboardButton(
+            f"{network_info.get('icon', '')} {network_info.get('name', network_key)}",
+            callback_data=f"tokendep_{token}_{network_key}"
+        )
+        keyboard.append([btn])
+
+    keyboard.append([InlineKeyboardButton(
+        "\U0001F519 Back",
+        callback_data="menu_deposit"
+    )])
+
+    await query.edit_message_text(
+        f"{token_info['icon']} *Deposit {token_info['symbol']}*\n\n"
+        f"Select the network to deposit {token_info['symbol']}:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_token_deposit_address(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    token = parts[1]
+    network = parts[2]
+
+    token_info = TOKENS.get(token)
+    network_info = NETWORKS.get(network)
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"\u2795 Generate {network_info['name']} Wallet",
+                callback_data=f"gen_{network}"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data=f"deposit_token_{token}"
+            )]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *No Wallet Found*\n\n"
+            f"You need a {network_info['name']} wallet to receive {token_info['symbol']}.\n"
+            f"Generate one first.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if network == "SOLANA":
+        explorer_url = f"{network_info['explorer']}/account/{wallet['address']}"
+    elif network == "TRON":
+        explorer_url = f"{network_info['explorer']}/#/address/{wallet['address']}"
+    else:
+        explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F310 View on Explorer",
+            url=explorer_url
+        )],
+        [InlineKeyboardButton(
+            "\U0001F519 Back",
+            callback_data=f"deposit_token_{token}"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F3E0 Main Menu",
+            callback_data="main_menu"
+        )]
+    ]
+
+    await query.edit_message_text(
+        f"{token_info['icon']} *Deposit {token_info['symbol']}*\n\n"
+        f"{network_info['icon']} *Network:* {network_info['name']}\n\n"
+        f"\U0001F4CD *Your Deposit Address:*\n"
+        f"`{wallet['address']}`\n\n"
+        f"\u2139\ufe0f Tap the address to copy it.\n\n"
+        f"\u26a0\ufe0f *Important:* Only send {token_info['symbol']} "
+        f"({network_info['name']} network) to this address!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_token_withdraw_networks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split("_")[2]
+    token_info = TOKENS.get(token)
+
+    if not token_info:
+        await query.edit_message_text(
+            "\u26a0\ufe0f Token not found.",
+            reply_markup=get_back_button("menu_withdraw")
+        )
+        return
+
+    keyboard = []
+    for network_key in token_info["networks"].keys():
+        network_info = NETWORKS.get(network_key, {})
+        btn = InlineKeyboardButton(
+            f"{network_info.get('icon', '')} {network_info.get('name', network_key)}",
+            callback_data=f"tokenwd_{token}_{network_key}"
+        )
+        keyboard.append([btn])
+
+    keyboard.append([InlineKeyboardButton(
+        "\U0001F519 Back",
+        callback_data="menu_withdraw"
+    )])
+
+    await query.edit_message_text(
+        f"{token_info['icon']} *Withdraw {token_info['symbol']}*\n\n"
+        f"Select the network to withdraw {token_info['symbol']}:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_token_withdraw_info(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer("Checking token balance...")
+
+    parts = query.data.split("_")
+    token = parts[1]
+    network = parts[2]
+
+    token_info = TOKENS.get(token)
+    network_info = NETWORKS.get(network)
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"\u2795 Generate {network_info['name']} Wallet",
+                callback_data=f"gen_{network}"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data=f"withdraw_token_{token}"
+            )]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *No Wallet Found*\n\n"
+            f"You need a {network_info['name']} wallet to withdraw {token_info['symbol']}.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    balance_info = await BalanceChecker.get_token_balance(
+        token, network, wallet["address"]
+    )
+    balance_str = balance_info.get("balance", "0")
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F519 Back",
+            callback_data=f"withdraw_token_{token}"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F3E0 Main Menu",
+            callback_data="main_menu"
+        )]
+    ]
+
+    await query.edit_message_text(
+        f"{token_info['icon']} *Withdraw {token_info['symbol']}*\n\n"
+        f"{network_info['icon']} *Network:* {network_info['name']}\n"
+        f"\U0001F4B0 *Balance:* `{balance_str} {token_info['symbol']}`\n\n"
+        f"\u26a0\ufe0f *Note:* Token withdrawals require manual processing.\n"
+        f"Contact support to withdraw tokens.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2191,6 +2421,33 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_deposit_address, pattern=r"^deposit_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            show_token_deposit_networks,
+            pattern=r"^deposit_token_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            show_token_deposit_address,
+            pattern=r"^tokendep_[A-Z]+_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            show_token_withdraw_networks,
+            pattern=r"^withdraw_token_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            show_token_withdraw_info,
+            pattern=r"^tokenwd_[A-Z]+_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$")
     )
     application.add_handler(
         CallbackQueryHandler(show_balance_menu, pattern="^menu_balance$")
