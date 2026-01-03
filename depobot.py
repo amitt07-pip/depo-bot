@@ -2707,75 +2707,120 @@ async def check_wallet_transactions(application):
     if not wallets:
         return
 
+    async def send_balance_notification(
+        network, address, symbol, old_balance, new_balance, token_name=None
+    ):
+        old_val = Decimal(old_balance) if old_balance else Decimal("0")
+        new_val = Decimal(new_balance) if new_balance else Decimal("0")
+
+        if new_val == old_val:
+            return
+
+        diff = new_val - old_val
+        network_info = NETWORKS.get(network, {})
+        icon = network_info.get("icon", "")
+        token_icon = TOKENS.get(symbol, {}).get("icon", icon) if token_name else icon
+
+        if diff > 0:
+            msg = (
+                f"\U0001F4E5 *Incoming Transaction Detected!*\n\n"
+                f"{token_icon} *Asset:* {symbol}\n"
+                f"\U0001F310 *Network:* {network_info.get('name', network)}\n"
+                f"\U0001F4B0 *Amount:* `+{diff} {symbol}`\n"
+                f"\U0001F4CA *New Balance:* `{new_balance} {symbol}`\n\n"
+                f"\U0001F4CD *Wallet:*\n`{address}`"
+            )
+        else:
+            msg = (
+                f"\U0001F4E4 *Outgoing Transaction Detected!*\n\n"
+                f"{token_icon} *Asset:* {symbol}\n"
+                f"\U0001F310 *Network:* {network_info.get('name', network)}\n"
+                f"\U0001F4B8 *Amount:* `{diff} {symbol}`\n"
+                f"\U0001F4CA *New Balance:* `{new_balance} {symbol}`\n\n"
+                f"\U0001F4CD *Wallet:*\n`{address}`"
+            )
+
+        keyboard = [[
+            InlineKeyboardButton(
+                "\U0001F50D View Details",
+                callback_data=f"wallet_{network}"
+            ),
+            InlineKeyboardButton(
+                "\U0001F517 Explorer",
+                url=f"{network_info.get('explorer', '')}/address/{address}"
+            )
+        ]]
+
+        try:
+            await application.bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            if ALLOWED_CHAT_ID:
+                await application.bot.send_message(
+                    chat_id=ALLOWED_CHAT_ID,
+                    text=msg,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception as e:
+            logger.error(f"Error sending transaction notification: {e}")
+
     for wallet in wallets:
         network = wallet["network"]
         address = wallet["address"]
-        cache_key = f"{network}_{address}"
 
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
             current_balance = balance_info.get("balance", "0")
             symbol = balance_info.get("symbol", network)
+            cache_key = f"{network}:{address}:NATIVE"
 
             if cache_key in wallet_balances_cache:
                 old_balance = wallet_balances_cache[cache_key]
-                old_val = Decimal(old_balance) if old_balance else Decimal("0")
-                new_val = Decimal(current_balance) if current_balance else Decimal("0")
-
-                if new_val != old_val:
-                    diff = new_val - old_val
-                    network_info = NETWORKS.get(network, {})
-                    icon = network_info.get("icon", "")
-
-                    if diff > 0:
-                        msg = (
-                            f"\U0001F4E5 *Incoming Transaction Detected!*\n\n"
-                            f"{icon} *Network:* {network_info.get('name', network)}\n"
-                            f"\U0001F4B0 *Amount:* `+{diff} {symbol}`\n"
-                            f"\U0001F4CA *New Balance:* `{current_balance} {symbol}`\n\n"
-                            f"\U0001F4CD *Wallet:*\n`{address}`"
-                        )
-                    else:
-                        msg = (
-                            f"\U0001F4E4 *Outgoing Transaction Detected!*\n\n"
-                            f"{icon} *Network:* {network_info.get('name', network)}\n"
-                            f"\U0001F4B8 *Amount:* `{diff} {symbol}`\n"
-                            f"\U0001F4CA *New Balance:* `{current_balance} {symbol}`\n\n"
-                            f"\U0001F4CD *Wallet:*\n`{address}`"
-                        )
-
-                    keyboard = [[
-                        InlineKeyboardButton(
-                            "\U0001F50D View Details",
-                            callback_data=f"wallet_{network}"
-                        ),
-                        InlineKeyboardButton(
-                            "\U0001F517 Explorer",
-                            url=f"{network_info.get('explorer', '')}/address/{address}"
-                        )
-                    ]]
-
-                    try:
-                        await application.bot.send_message(
-                            chat_id=ALLOWED_USER_ID,
-                            text=msg,
-                            parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-                        if ALLOWED_CHAT_ID:
-                            await application.bot.send_message(
-                                chat_id=ALLOWED_CHAT_ID,
-                                text=msg,
-                                parse_mode="Markdown",
-                                reply_markup=InlineKeyboardMarkup(keyboard)
-                            )
-                    except Exception as e:
-                        logger.error(f"Error sending transaction notification: {e}")
+                await send_balance_notification(
+                    network, address, symbol, old_balance, current_balance
+                )
 
             wallet_balances_cache[cache_key] = current_balance
 
         except Exception as e:
-            logger.error(f"Error checking balance for {network}: {e}")
+            logger.error(f"Error checking native balance for {network}: {e}")
+
+        for token_key in ["USDT", "USDC"]:
+            token_info = TOKENS.get(token_key, {})
+            if network not in token_info.get("networks", {}):
+                continue
+
+            network_token = token_info["networks"][network]
+            if network_token.get("native"):
+                continue
+
+            try:
+                token_balance_info = await BalanceChecker.get_token_balance(
+                    token_key, network, address
+                )
+
+                if token_balance_info.get("error"):
+                    continue
+
+                current_token_balance = token_balance_info.get("balance", "0")
+                token_symbol = token_balance_info.get("symbol", token_key)
+                token_cache_key = f"{network}:{address}:{token_key}"
+
+                if token_cache_key in wallet_balances_cache:
+                    old_token_balance = wallet_balances_cache[token_cache_key]
+                    await send_balance_notification(
+                        network, address, token_symbol,
+                        old_token_balance, current_token_balance, token_key
+                    )
+
+                wallet_balances_cache[token_cache_key] = current_token_balance
+
+            except Exception as e:
+                logger.error(f"Error checking {token_key} balance on {network}: {e}")
 
 
 async def transaction_monitor_loop(application):
