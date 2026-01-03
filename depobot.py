@@ -13,6 +13,9 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
 from eth_account import Account
@@ -40,15 +43,17 @@ NETWORKS = {
         "chain_id": 1,
         "symbol": "ETH",
         "explorer": "https://etherscan.io",
-        "type": "evm"
+        "type": "evm",
+        "icon": "\u26aa"
     },
     "BSC": {
-        "name": "Binance Smart Chain",
+        "name": "BNB Chain",
         "rpc": "https://bsc-dataseed.binance.org",
         "chain_id": 56,
         "symbol": "BNB",
         "explorer": "https://bscscan.com",
-        "type": "evm"
+        "type": "evm",
+        "icon": "\U0001F7E1"
     },
     "POLYGON": {
         "name": "Polygon",
@@ -56,21 +61,24 @@ NETWORKS = {
         "chain_id": 137,
         "symbol": "MATIC",
         "explorer": "https://polygonscan.com",
-        "type": "evm"
+        "type": "evm",
+        "icon": "\U0001F7E3"
     },
     "SOLANA": {
         "name": "Solana",
         "rpc": "https://api.mainnet-beta.solana.com",
         "symbol": "SOL",
         "explorer": "https://solscan.io",
-        "type": "solana"
+        "type": "solana",
+        "icon": "\U0001F7E2"
     },
     "TRON": {
         "name": "Tron",
         "rpc": "https://api.trongrid.io",
         "symbol": "TRX",
         "explorer": "https://tronscan.org",
-        "type": "tron"
+        "type": "tron",
+        "icon": "\U0001F534"
     }
 }
 
@@ -107,6 +115,10 @@ ERC20_ABI = [
         "type": "function"
     }
 ]
+
+WITHDRAW_AMOUNT, WITHDRAW_ADDRESS, WITHDRAW_CONFIRM = range(3)
+
+pending_withdrawals = {}
 
 
 class WalletDatabase:
@@ -575,363 +587,1036 @@ def is_authorized(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
 
+def get_main_menu_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "\U0001F4B0 My Wallets", callback_data="menu_wallets"
+            ),
+            InlineKeyboardButton(
+                "\U0001F4E5 Deposit", callback_data="menu_deposit"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "\U0001F4CA Balances", callback_data="menu_balance"
+            ),
+            InlineKeyboardButton(
+                "\U0001F4E4 Withdraw", callback_data="menu_withdraw"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "\u2795 Generate Wallet", callback_data="menu_generate"
+            ),
+            InlineKeyboardButton(
+                "\u2753 Help", callback_data="menu_help"
+            )
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_network_keyboard(action: str):
+    keyboard = []
+    row = []
+    for i, (key, info) in enumerate(NETWORKS.items()):
+        btn = InlineKeyboardButton(
+            f"{info['icon']} {info['name']}",
+            callback_data=f"{action}_{key}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_back_button(callback_data: str = "main_menu"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("\U0001F519 Back", callback_data=callback_data)]
+    ])
+
+
+def get_wallet_card_keyboard(network: str):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "\U0001F504 Refresh",
+                callback_data=f"refresh_{network}"
+            ),
+            InlineKeyboardButton(
+                "\U0001F4E5 Deposit",
+                callback_data=f"deposit_{network}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "\U0001F4E4 Withdraw",
+                callback_data=f"withdraw_{network}"
+            ),
+            InlineKeyboardButton(
+                "\U0001F310 Explorer",
+                callback_data=f"explorer_{network}"
+            )
+        ],
+        [
+            InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def format_address(address: str) -> str:
+    if len(address) > 20:
+        return f"{address[:8]}...{address[-6:]}"
+    return address
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    welcome_text = """
-Welcome to Depo Bot - Your Virtual Wallet
-
-Available Commands:
-/generate <network> - Generate a new wallet for a network
-/balance [network] - Check your wallet balances
-/deposit - Show your deposit addresses
-/withdraw <network> <amount> <address> [token] - Withdraw funds
-
-Supported Networks:
-- ETH (Ethereum)
-- BSC (Binance Smart Chain)
-- POLYGON (Polygon)
-- SOLANA (Solana)
-- TRON (Tron)
-
-Example:
-/generate ETH
-/balance ETH
-/withdraw ETH 0.1 0x123...abc
-"""
-    await update.message.reply_text(welcome_text)
-
-
-async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    if not context.args:
-        networks_list = ", ".join(NETWORKS.keys())
-        await update.message.reply_text(
-            f"Please specify a network.\nUsage: /generate <network>\n"
-            f"Available networks: {networks_list}"
-        )
-        return
-
-    network = context.args[0].upper()
-    if network not in NETWORKS:
-        networks_list = ", ".join(NETWORKS.keys())
-        await update.message.reply_text(
-            f"Unsupported network: {network}\n"
-            f"Available networks: {networks_list}"
-        )
-        return
-
     user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "\u26d4 Access Denied\n\n"
+            "You are not authorized to use this bot."
+        )
+        return
+
+    welcome_text = (
+        "\U0001F3E6 *Welcome to Depo Wallet Bot*\n\n"
+        "Your personal multi-chain crypto wallet manager.\n\n"
+        "\U0001F517 *Supported Networks:*\n"
+    )
+
+    for key, info in NETWORKS.items():
+        welcome_text += f"  {info['icon']} {info['name']} ({info['symbol']})\n"
+
+    welcome_text += (
+        "\n\U0001F447 *Select an option below to get started:*"
+    )
+
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode="Markdown",
+        reply_markup=get_main_menu_keyboard()
+    )
+
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    menu_text = (
+        "\U0001F3E6 *Depo Wallet Bot*\n\n"
+        "\U0001F447 *Select an option:*"
+    )
+
+    await query.edit_message_text(
+        menu_text,
+        parse_mode="Markdown",
+        reply_markup=get_main_menu_keyboard()
+    )
+
+
+async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    wallets = db.get_all_wallets(user_id)
+
+    if not wallets:
+        text = (
+            "\U0001F4B0 *My Wallets*\n\n"
+            "\u26a0\ufe0f You don't have any wallets yet.\n\n"
+            "Tap *Generate Wallet* to create your first wallet!"
+        )
+        keyboard = [
+            [InlineKeyboardButton(
+                "\u2795 Generate Wallet", callback_data="menu_generate"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F3E0 Main Menu", callback_data="main_menu"
+            )]
+        ]
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    text = "\U0001F4B0 *My Wallets*\n\n"
+    keyboard = []
+
+    for wallet in wallets:
+        network = wallet["network"]
+        info = NETWORKS[network]
+        text += (
+            f"{info['icon']} *{info['name']}*\n"
+            f"`{wallet['address']}`\n\n"
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{info['icon']} {info['name']} Details",
+                callback_data=f"wallet_{network}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("\u2795 Add Wallet", callback_data="menu_generate")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_wallet_details(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        await query.edit_message_text(
+            f"\u26a0\ufe0f No wallet found for {NETWORKS[network]['name']}",
+            reply_markup=get_back_button("menu_wallets")
+        )
+        return
+
+    info = NETWORKS[network]
+    await query.edit_message_text(
+        f"{info['icon']} *{info['name']} Wallet*\n\n"
+        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
+        f"\U0001F4B0 *Balance:* Tap refresh to check\n\n"
+        f"\U0001F517 *Symbol:* {info['symbol']}",
+        parse_mode="Markdown",
+        reply_markup=get_wallet_card_keyboard(network)
+    )
+
+
+async def refresh_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Fetching balance...")
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        await query.edit_message_text(
+            f"\u26a0\ufe0f No wallet found for {NETWORKS[network]['name']}",
+            reply_markup=get_back_button("menu_wallets")
+        )
+        return
+
+    info = NETWORKS[network]
+
+    await query.edit_message_text(
+        f"{info['icon']} *{info['name']} Wallet*\n\n"
+        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
+        f"\u23f3 *Fetching balance...*",
+        parse_mode="Markdown"
+    )
+
+    balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    balance_str = balance_info.get("balance", "Error")
+    symbol = balance_info.get("symbol", info["symbol"])
+
+    await query.edit_message_text(
+        f"{info['icon']} *{info['name']} Wallet*\n\n"
+        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
+        f"\U0001F4B0 *Balance:* `{balance_str} {symbol}`\n\n"
+        f"\U0001F517 *Network:* {info['name']}",
+        parse_mode="Markdown",
+        reply_markup=get_wallet_card_keyboard(network)
+    )
+
+
+async def show_generate_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    text = (
+        "\u2795 *Generate New Wallet*\n\n"
+        "Select a network to generate a new wallet:\n\n"
+        "\u26a0\ufe0f *Note:* If you already have a wallet for a network, "
+        "generating a new one will replace it."
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_network_keyboard("gen")
+    )
+
+
+async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    info = NETWORKS[network]
+
     existing = db.get_wallet(user_id, network)
     if existing:
-        await update.message.reply_text(
-            f"You already have a {NETWORKS[network]['name']} wallet:\n"
-            f"Address: `{existing['address']}`\n\n"
-            f"Use /deposit to see all your addresses.",
-            parse_mode="Markdown"
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "\u2705 Yes, Replace",
+                    callback_data=f"confirmgen_{network}"
+                ),
+                InlineKeyboardButton(
+                    "\u274c Cancel",
+                    callback_data="menu_generate"
+                )
+            ]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *Warning*\n\n"
+            f"You already have a {info['name']} wallet:\n"
+            f"`{existing['address']}`\n\n"
+            f"Generating a new wallet will *replace* this one.\n"
+            f"Make sure you have withdrawn all funds first!\n\n"
+            f"Do you want to continue?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
-    await update.message.reply_text(f"Generating {NETWORKS[network]['name']} wallet...")
+    await do_generate_wallet(query, network, user_id)
+
+
+async def confirm_generate_wallet(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+
+    await do_generate_wallet(query, network, user_id)
+
+
+async def do_generate_wallet(query, network: str, user_id: int):
+    info = NETWORKS[network]
+
+    await query.edit_message_text(
+        f"\u23f3 *Generating {info['name']} wallet...*",
+        parse_mode="Markdown"
+    )
 
     try:
         address, private_key = WalletGenerator.generate_wallet(network)
         encrypted_key = CryptoUtils.encrypt_private_key(private_key)
         db.save_wallet(user_id, network, address, encrypted_key)
 
-        explorer = NETWORKS[network]["explorer"]
-        if network == "SOLANA":
-            explorer_url = f"{explorer}/account/{address}"
-        elif network == "TRON":
-            explorer_url = f"{explorer}/#/address/{address}"
-        else:
-            explorer_url = f"{explorer}/address/{address}"
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "\U0001F4CA Check Balance",
+                    callback_data=f"refresh_{network}"
+                ),
+                InlineKeyboardButton(
+                    "\U0001F4E5 Deposit",
+                    callback_data=f"deposit_{network}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "\u2795 Generate Another",
+                    callback_data="menu_generate"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "\U0001F3E0 Main Menu",
+                    callback_data="main_menu"
+                )
+            ]
+        ]
 
-        await update.message.reply_text(
-            f"Wallet generated successfully!\n\n"
-            f"Network: {NETWORKS[network]['name']}\n"
-            f"Address: `{address}`\n\n"
-            f"Explorer: {explorer_url}\n\n"
-            f"Your private key has been securely encrypted and stored.",
-            parse_mode="Markdown"
+        await query.edit_message_text(
+            f"\u2705 *Wallet Generated Successfully!*\n\n"
+            f"{info['icon']} *Network:* {info['name']}\n\n"
+            f"\U0001F4CD *Your Address:*\n`{address}`\n\n"
+            f"\U0001F512 Your private key has been securely encrypted.\n\n"
+            f"\U0001F447 *What would you like to do next?*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
         logger.error(f"Error generating wallet: {e}")
-        await update.message.reply_text(f"Error generating wallet: {str(e)}")
-
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    user_id = update.effective_user.id
-    token_address = None
-
-    if context.args:
-        network = context.args[0].upper()
-        if len(context.args) > 1:
-            token_address = context.args[1]
-
-        if network not in NETWORKS:
-            networks_list = ", ".join(NETWORKS.keys())
-            await update.message.reply_text(
-                f"Unsupported network: {network}\n"
-                f"Available networks: {networks_list}"
-            )
-            return
-
-        wallet = db.get_wallet(user_id, network)
-        if not wallet:
-            await update.message.reply_text(
-                f"No wallet found for {NETWORKS[network]['name']}.\n"
-                f"Use /generate {network} to create one."
-            )
-            return
-
-        await update.message.reply_text(f"Checking {NETWORKS[network]['name']} balance...")
-
-        balance_info = await BalanceChecker.get_balance(
-            network, wallet["address"], token_address
+        await query.edit_message_text(
+            f"\u274c *Error generating wallet*\n\n{str(e)}",
+            parse_mode="Markdown",
+            reply_markup=get_back_button("menu_generate")
         )
 
-        if "error" in balance_info:
-            await update.message.reply_text(
-                f"Error checking balance: {balance_info['error']}"
-            )
-            return
 
-        await update.message.reply_text(
-            f"Network: {NETWORKS[network]['name']}\n"
-            f"Address: `{wallet['address']}`\n"
-            f"Balance: {balance_info['balance']} {balance_info['symbol']}",
-            parse_mode="Markdown"
-        )
-    else:
-        wallets = db.get_all_wallets(user_id)
-        if not wallets:
-            await update.message.reply_text(
-                "No wallets found. Use /generate <network> to create one."
-            )
-            return
-
-        await update.message.reply_text("Checking all balances...")
-
-        response = "Your Wallet Balances:\n\n"
-        for wallet in wallets:
-            balance_info = await BalanceChecker.get_balance(
-                wallet["network"], wallet["address"]
-            )
-            balance_str = balance_info.get("balance", "Error")
-            symbol = balance_info.get("symbol", "")
-            response += (
-                f"{NETWORKS[wallet['network']]['name']}:\n"
-                f"  Address: `{wallet['address']}`\n"
-                f"  Balance: {balance_str} {symbol}\n\n"
-            )
-
-        await update.message.reply_text(response, parse_mode="Markdown")
-
-
-async def deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    user_id = update.effective_user.id
-    wallets = db.get_all_wallets(user_id)
-
-    if not wallets:
-        await update.message.reply_text(
-            "No wallets found. Use /generate <network> to create one.\n\n"
-            "Available networks: " + ", ".join(NETWORKS.keys())
-        )
-        return
-
-    response = "Your Deposit Addresses:\n\n"
-    for wallet in wallets:
-        network_info = NETWORKS[wallet["network"]]
-        if wallet["network"] == "SOLANA":
-            explorer_url = f"{network_info['explorer']}/account/{wallet['address']}"
-        elif wallet["network"] == "TRON":
-            explorer_url = f"{network_info['explorer']}/#/address/{wallet['address']}"
-        else:
-            explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
-
-        response += (
-            f"{network_info['name']} ({network_info['symbol']}):\n"
-            f"`{wallet['address']}`\n"
-            f"[View on Explorer]({explorer_url})\n\n"
-        )
-
-    await update.message.reply_text(response, parse_mode="Markdown")
-
-
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Usage: /withdraw <network> <amount> <destination_address> [token_address]\n\n"
-            "Examples:\n"
-            "/withdraw ETH 0.1 0x123...abc\n"
-            "/withdraw BSC 10 0x123...abc 0xtoken..."
-        )
-        return
-
-    network = context.args[0].upper()
-    amount = context.args[1]
-    destination = context.args[2]
-    token_address = context.args[3] if len(context.args) > 3 else None
-
-    if network not in NETWORKS:
-        networks_list = ", ".join(NETWORKS.keys())
-        await update.message.reply_text(
-            f"Unsupported network: {network}\n"
-            f"Available networks: {networks_list}"
-        )
-        return
-
-    try:
-        Decimal(amount)
-    except Exception:
-        await update.message.reply_text("Invalid amount. Please enter a valid number.")
-        return
-
-    user_id = update.effective_user.id
-    wallet = db.get_wallet(user_id, network)
-
-    if not wallet:
-        await update.message.reply_text(
-            f"No wallet found for {NETWORKS[network]['name']}.\n"
-            f"Use /generate {network} to create one."
-        )
-        return
-
-    token_val = token_address or 'native'
-    callback_data = f"confirm_withdraw:{network}:{amount}:{destination}:{token_val}"
-    keyboard = [
-        [
-            InlineKeyboardButton("Confirm", callback_data=callback_data),
-            InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    token_info = f"\nToken: {token_address}" if token_address else ""
-    await update.message.reply_text(
-        f"Withdrawal Confirmation\n\n"
-        f"Network: {NETWORKS[network]['name']}\n"
-        f"Amount: {amount} {NETWORKS[network]['symbol'] if not token_address else 'tokens'}\n"
-        f"Destination: {destination}{token_info}\n\n"
-        f"Please confirm this withdrawal:",
-        reply_markup=reply_markup
-    )
-
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if not is_authorized(query.from_user.id):
-        await query.edit_message_text("You are not authorized to use this bot.")
+    text = (
+        "\U0001F4E5 *Deposit Funds*\n\n"
+        "Select a network to view your deposit address:"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_network_keyboard("deposit")
+    )
+
+
+async def show_deposit_address(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+    info = NETWORKS[network]
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"\u2795 Generate {info['name']} Wallet",
+                callback_data=f"gen_{network}"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data="menu_deposit"
+            )]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *No Wallet Found*\n\n"
+            f"You don't have a {info['name']} wallet yet.\n"
+            f"Generate one first to get a deposit address.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
-    if query.data == "cancel_withdraw":
-        await query.edit_message_text("Withdrawal cancelled.")
-        return
+    if network == "SOLANA":
+        explorer_url = f"{info['explorer']}/account/{wallet['address']}"
+    elif network == "TRON":
+        explorer_url = f"{info['explorer']}/#/address/{wallet['address']}"
+    else:
+        explorer_url = f"{info['explorer']}/address/{wallet['address']}"
 
-    if query.data.startswith("confirm_withdraw:"):
-        parts = query.data.split(":")
-        network = parts[1]
-        amount = parts[2]
-        destination = parts[3]
-        token_address = parts[4] if parts[4] != "native" else None
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F310 View on Explorer",
+            url=explorer_url
+        )],
+        [
+            InlineKeyboardButton(
+                "\U0001F504 Refresh Balance",
+                callback_data=f"refresh_{network}"
+            ),
+            InlineKeyboardButton(
+                "\U0001F4E4 Withdraw",
+                callback_data=f"withdraw_{network}"
+            )
+        ],
+        [InlineKeyboardButton(
+            "\U0001F519 Back",
+            callback_data="menu_deposit"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F3E0 Main Menu",
+            callback_data="main_menu"
+        )]
+    ]
 
-        user_id = query.from_user.id
-        wallet = db.get_wallet(user_id, network)
+    await query.edit_message_text(
+        f"\U0001F4E5 *Deposit {info['symbol']}*\n\n"
+        f"{info['icon']} *Network:* {info['name']}\n\n"
+        f"\U0001F4CD *Your Deposit Address:*\n"
+        f"`{wallet['address']}`\n\n"
+        f"\u2139\ufe0f Tap the address to copy it.\n\n"
+        f"\u26a0\ufe0f *Important:* Only send {info['symbol']} "
+        f"and {info['name']} tokens to this address!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-        if not wallet:
-            await query.edit_message_text("Wallet not found.")
+
+async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F4CA Check All Balances",
+            callback_data="balance_all"
+        )]
+    ]
+
+    for key, info in NETWORKS.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{info['icon']} {info['name']}",
+                callback_data=f"balance_{key}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
+
+    await query.edit_message_text(
+        "\U0001F4CA *Check Balances*\n\n"
+        "Select a network or check all balances:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Fetching balances...")
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+
+    if network == "all":
+        wallets = db.get_all_wallets(user_id)
+        if not wallets:
+            await query.edit_message_text(
+                "\u26a0\ufe0f *No Wallets Found*\n\n"
+                "Generate a wallet first to check balances.",
+                parse_mode="Markdown",
+                reply_markup=get_back_button("menu_balance")
+            )
             return
 
-        await query.edit_message_text("Processing withdrawal...")
+        await query.edit_message_text(
+            "\u23f3 *Fetching all balances...*",
+            parse_mode="Markdown"
+        )
 
-        try:
-            private_key = CryptoUtils.decrypt_private_key(
-                wallet["encrypted_private_key"]
+        text = "\U0001F4CA *Your Balances*\n\n"
+        for wallet in wallets:
+            net = wallet["network"]
+            info = NETWORKS[net]
+            balance_info = await BalanceChecker.get_balance(
+                net, wallet["address"]
             )
-            result = await WithdrawalHandler.withdraw(
-                network, private_key, destination, amount, token_address
+            balance_str = balance_info.get("balance", "Error")
+            symbol = balance_info.get("symbol", info["symbol"])
+            text += (
+                f"{info['icon']} *{info['name']}*\n"
+                f"   `{balance_str} {symbol}`\n"
+                f"   `{format_address(wallet['address'])}`\n\n"
             )
 
-            if result.get("success"):
-                db.log_transaction(
-                    user_id, network, "withdraw", amount,
-                    result.get("tx_hash"), destination, token_address, "completed"
+        keyboard = [
+            [InlineKeyboardButton(
+                "\U0001F504 Refresh",
+                callback_data="balance_all"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F3E0 Main Menu",
+                callback_data="main_menu"
+            )]
+        ]
+
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        wallet = db.get_wallet(user_id, network)
+        info = NETWORKS[network]
+
+        if not wallet:
+            keyboard = [
+                [InlineKeyboardButton(
+                    f"\u2795 Generate {info['name']} Wallet",
+                    callback_data=f"gen_{network}"
+                )],
+                [InlineKeyboardButton(
+                    "\U0001F519 Back",
+                    callback_data="menu_balance"
+                )]
+            ]
+            await query.edit_message_text(
+                f"\u26a0\ufe0f *No {info['name']} Wallet*\n\n"
+                f"Generate a wallet first to check balance.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        await query.edit_message_text(
+            f"\u23f3 *Fetching {info['name']} balance...*",
+            parse_mode="Markdown"
+        )
+
+        balance_info = await BalanceChecker.get_balance(
+            network, wallet["address"]
+        )
+        balance_str = balance_info.get("balance", "Error")
+        symbol = balance_info.get("symbol", info["symbol"])
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "\U0001F504 Refresh",
+                    callback_data=f"balance_{network}"
+                ),
+                InlineKeyboardButton(
+                    "\U0001F4E4 Withdraw",
+                    callback_data=f"withdraw_{network}"
                 )
-                await query.edit_message_text(
-                    f"Withdrawal successful!\n\n"
-                    f"Amount: {amount}\n"
-                    f"Destination: {destination}\n"
-                    f"TX Hash: `{result.get('tx_hash')}`\n\n"
-                    f"[View on Explorer]({result.get('explorer_url')})",
-                    parse_mode="Markdown"
-                )
-            else:
-                db.log_transaction(
-                    user_id, network, "withdraw", amount,
-                    None, destination, token_address, "failed"
-                )
-                await query.edit_message_text(
-                    f"Withdrawal failed: {result.get('error')}"
-                )
-        except Exception as e:
-            logger.error(f"Withdrawal error: {e}")
-            await query.edit_message_text(f"Withdrawal error: {str(e)}")
+            ],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data="menu_balance"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F3E0 Main Menu",
+                callback_data="main_menu"
+            )]
+        ]
+
+        await query.edit_message_text(
+            f"{info['icon']} *{info['name']} Balance*\n\n"
+            f"\U0001F4B0 *Balance:* `{balance_str} {symbol}`\n\n"
+            f"\U0001F4CD *Address:*\n`{wallet['address']}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+async def show_withdraw_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    await query.answer()
+
+    text = (
+        "\U0001F4E4 *Withdraw Funds*\n\n"
+        "Select a network to withdraw from:"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_network_keyboard("withdraw")
+    )
+
+
+async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+    info = NETWORKS[network]
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"\u2795 Generate {info['name']} Wallet",
+                callback_data=f"gen_{network}"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data="menu_withdraw"
+            )]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *No {info['name']} Wallet*\n\n"
+            f"Generate a wallet first to withdraw.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    balance_str = balance_info.get("balance", "0")
+
+    context.user_data["withdraw_network"] = network
+    context.user_data["withdraw_balance"] = balance_str
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\u274c Cancel",
+            callback_data="cancel_withdraw"
+        )]
+    ]
+
+    await query.edit_message_text(
+        f"\U0001F4E4 *Withdraw {info['symbol']}*\n\n"
+        f"{info['icon']} *Network:* {info['name']}\n"
+        f"\U0001F4B0 *Available:* `{balance_str} {info['symbol']}`\n\n"
+        f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
+        f"_Reply with the amount (e.g., 0.1)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return WITHDRAW_AMOUNT
+
+
+async def receive_withdraw_amount(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    amount = update.message.text.strip()
+
+    try:
+        amount_decimal = Decimal(amount)
+        if amount_decimal <= 0:
+            raise ValueError("Amount must be positive")
+    except Exception:
+        await update.message.reply_text(
+            "\u274c *Invalid Amount*\n\n"
+            "Please enter a valid positive number.\n"
+            "Example: `0.1` or `100`",
+            parse_mode="Markdown"
+        )
+        return WITHDRAW_AMOUNT
+
+    context.user_data["withdraw_amount"] = amount
+    network = context.user_data.get("withdraw_network")
+    info = NETWORKS[network]
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\u274c Cancel",
+            callback_data="cancel_withdraw"
+        )]
+    ]
+
+    await update.message.reply_text(
+        f"\U0001F4E4 *Withdraw {info['symbol']}*\n\n"
+        f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n\n"
+        f"\U0001F4DD *Step 2/3:* Enter the destination address:\n\n"
+        f"_Reply with the {info['name']} address_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return WITHDRAW_ADDRESS
+
+
+async def receive_withdraw_address(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    address = update.message.text.strip()
+    network = context.user_data.get("withdraw_network")
+    amount = context.user_data.get("withdraw_amount")
+    info = NETWORKS[network]
+
+    if info["type"] == "evm":
+        if not address.startswith("0x") or len(address) != 42:
+            await update.message.reply_text(
+                "\u274c *Invalid Address*\n\n"
+                "Please enter a valid EVM address starting with `0x`",
+                parse_mode="Markdown"
+            )
+            return WITHDRAW_ADDRESS
+    elif info["type"] == "solana":
+        if len(address) < 32 or len(address) > 44:
+            await update.message.reply_text(
+                "\u274c *Invalid Address*\n\n"
+                "Please enter a valid Solana address",
+                parse_mode="Markdown"
+            )
+            return WITHDRAW_ADDRESS
+    elif info["type"] == "tron":
+        if not address.startswith("T") or len(address) != 34:
+            await update.message.reply_text(
+                "\u274c *Invalid Address*\n\n"
+                "Please enter a valid Tron address starting with `T`",
+                parse_mode="Markdown"
+            )
+            return WITHDRAW_ADDRESS
+
+    context.user_data["withdraw_address"] = address
+
+    user_id = update.effective_user.id
+    pending_withdrawals[user_id] = {
+        "network": network,
+        "amount": amount,
+        "address": address
+    }
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "\u2705 Confirm Withdrawal",
+                callback_data="exec_withdraw"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "\u274c Cancel",
+                callback_data="cancel_withdraw"
+            )
+        ]
+    ]
+
+    await update.message.reply_text(
+        f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
+        f"\U0001F4DD *Step 3/3:* Please review and confirm:\n\n"
+        f"{'='*30}\n"
+        f"{info['icon']} *Network:* {info['name']}\n"
+        f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n"
+        f"\U0001F4CD *To:*\n`{address}`\n"
+        f"{'='*30}\n\n"
+        f"\u26a0\ufe0f *Warning:* This action cannot be undone!\n"
+        f"Please verify the address carefully.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return WITHDRAW_CONFIRM
+
+
+async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    withdrawal = pending_withdrawals.get(user_id)
+
+    if not withdrawal:
+        await query.edit_message_text(
+            "\u274c *Withdrawal Expired*\n\n"
+            "Please start a new withdrawal.",
+            parse_mode="Markdown",
+            reply_markup=get_back_button("menu_withdraw")
+        )
+        return ConversationHandler.END
+
+    network = withdrawal["network"]
+    amount = withdrawal["amount"]
+    address = withdrawal["address"]
+    info = NETWORKS[network]
+
+    wallet = db.get_wallet(user_id, network)
+    if not wallet:
+        await query.edit_message_text(
+            "\u274c *Wallet Not Found*",
+            parse_mode="Markdown",
+            reply_markup=get_back_button("main_menu")
+        )
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "\u23f3 *Processing Withdrawal...*\n\n"
+        "Please wait while we process your transaction.",
+        parse_mode="Markdown"
+    )
+
+    try:
+        private_key = CryptoUtils.decrypt_private_key(
+            wallet["encrypted_private_key"]
+        )
+        result = await WithdrawalHandler.withdraw(
+            network, private_key, address, amount
+        )
+
+        if result.get("success"):
+            db.log_transaction(
+                user_id, network, "withdraw", amount,
+                result.get("tx_hash"), address, None, "completed"
+            )
+
+            keyboard = [
+                [InlineKeyboardButton(
+                    "\U0001F310 View Transaction",
+                    url=result.get("explorer_url")
+                )],
+                [InlineKeyboardButton(
+                    "\U0001F4CA Check Balance",
+                    callback_data=f"balance_{network}"
+                )],
+                [InlineKeyboardButton(
+                    "\U0001F3E0 Main Menu",
+                    callback_data="main_menu"
+                )]
+            ]
+
+            await query.edit_message_text(
+                f"\u2705 *Withdrawal Successful!*\n\n"
+                f"{info['icon']} *Network:* {info['name']}\n"
+                f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n"
+                f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
+                f"\U0001F4DD *TX Hash:*\n`{result.get('tx_hash')}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            db.log_transaction(
+                user_id, network, "withdraw", amount,
+                None, address, None, "failed"
+            )
+
+            await query.edit_message_text(
+                f"\u274c *Withdrawal Failed*\n\n"
+                f"Error: {result.get('error')}",
+                parse_mode="Markdown",
+                reply_markup=get_back_button("menu_withdraw")
+            )
+    except Exception as e:
+        logger.error(f"Withdrawal error: {e}")
+        await query.edit_message_text(
+            f"\u274c *Withdrawal Error*\n\n{str(e)}",
+            parse_mode="Markdown",
+            reply_markup=get_back_button("menu_withdraw")
+        )
+
+    if user_id in pending_withdrawals:
+        del pending_withdrawals[user_id]
+    return ConversationHandler.END
+
+
+async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    if user_id in pending_withdrawals:
+        del pending_withdrawals[user_id]
+
+    context.user_data.clear()
+
+    await query.edit_message_text(
+        "\u274c *Withdrawal Cancelled*",
+        parse_mode="Markdown",
+        reply_markup=get_back_button("main_menu")
+    )
+
+    return ConversationHandler.END
+
+
+async def show_explorer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[1]
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+    info = NETWORKS[network]
+
+    if not wallet:
+        await query.edit_message_text(
+            f"\u26a0\ufe0f No wallet found for {info['name']}",
+            reply_markup=get_back_button("menu_wallets")
+        )
         return
 
-    help_text = """
-Depo Bot - Help
+    if network == "SOLANA":
+        explorer_url = f"{info['explorer']}/account/{wallet['address']}"
+    elif network == "TRON":
+        explorer_url = f"{info['explorer']}/#/address/{wallet['address']}"
+    else:
+        explorer_url = f"{info['explorer']}/address/{wallet['address']}"
 
-Commands:
-/start - Show welcome message
-/help - Show this help message
-/generate <network> - Generate a new wallet
-/balance [network] [token_address] - Check balances
-/deposit - Show deposit addresses
-/withdraw <network> <amount> <address> [token] - Withdraw funds
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F310 Open Explorer",
+            url=explorer_url
+        )],
+        [InlineKeyboardButton(
+            "\U0001F519 Back",
+            callback_data=f"wallet_{network}"
+        )]
+    ]
 
-Networks:
-- ETH: Ethereum Mainnet
-- BSC: Binance Smart Chain
-- POLYGON: Polygon (Matic)
-- SOLANA: Solana
-- TRON: Tron
+    await query.edit_message_text(
+        f"{info['icon']} *{info['name']} Explorer*\n\n"
+        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
+        f"Tap the button below to view on explorer:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-Examples:
-/generate ETH - Create Ethereum wallet
-/balance - Check all balances
-/balance ETH - Check ETH balance
-/balance BSC 0xtoken... - Check token balance on BSC
-/withdraw ETH 0.1 0x123... - Withdraw 0.1 ETH
-/withdraw BSC 100 0x123... 0xtoken... - Withdraw tokens
 
-Note: All private keys are encrypted and stored securely.
-"""
-    await update.message.reply_text(help_text)
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    help_text = (
+        "\u2753 *Help & Information*\n\n"
+        "\U0001F4B0 *My Wallets*\n"
+        "View all your generated wallets and their details.\n\n"
+        "\U0001F4E5 *Deposit*\n"
+        "Get your deposit address for any network.\n\n"
+        "\U0001F4CA *Balances*\n"
+        "Check your wallet balances across all networks.\n\n"
+        "\U0001F4E4 *Withdraw*\n"
+        "Send funds to an external address.\n\n"
+        "\u2795 *Generate Wallet*\n"
+        "Create a new wallet for any supported network.\n\n"
+        "==============================\n\n"
+        "\U0001F517 *Supported Networks:*\n"
+    )
+
+    for key, info in NETWORKS.items():
+        help_text += f"  {info['icon']} {info['name']} ({info['symbol']})\n"
+
+    help_text += (
+        "\n==============================\n\n"
+        "\U0001F512 *Security:*\n"
+        "All private keys are encrypted with AES-256.\n"
+        "Never share your encryption key with anyone."
+    )
+
+    await query.edit_message_text(
+        help_text,
+        parse_mode="Markdown",
+        reply_markup=get_back_button("main_menu")
+    )
+
+
+async def handle_text_commands(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if not is_authorized(update.effective_user.id):
+        return
+
+    text = update.message.text.lower().strip()
+
+    if text in ["/menu", "/start", "menu", "home"]:
+        await start(update, context)
 
 
 def main():
@@ -941,15 +1626,94 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("generate", generate))
-    application.add_handler(CommandHandler("balance", balance))
-    application.add_handler(CommandHandler("deposit", deposit))
-    application.add_handler(CommandHandler("withdraw", withdraw))
-    application.add_handler(CallbackQueryHandler(handle_callback))
+    withdraw_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                start_withdraw,
+                pattern=r"^withdraw_[A-Z]+$"
+            )
+        ],
+        states={
+            WITHDRAW_AMOUNT: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_withdraw_amount
+                )
+            ],
+            WITHDRAW_ADDRESS: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_withdraw_address
+                )
+            ],
+            WITHDRAW_CONFIRM: [
+                CallbackQueryHandler(execute_withdraw, pattern="^exec_withdraw$")
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_withdraw, pattern="^cancel_withdraw$"),
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
+            CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$")
+        ],
+        per_message=False
+    )
 
-    logger.info("Starting Depo Bot...")
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", start))
+
+    application.add_handler(withdraw_handler)
+
+    application.add_handler(
+        CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_wallets_menu, pattern="^menu_wallets$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_wallet_details, pattern=r"^wallet_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(refresh_balance, pattern=r"^refresh_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_generate_menu, pattern="^menu_generate$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(generate_wallet, pattern=r"^gen_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            confirm_generate_wallet,
+            pattern=r"^confirmgen_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_deposit_address, pattern=r"^deposit_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_balance_menu, pattern="^menu_balance$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(check_balance, pattern=r"^balance_")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_explorer, pattern=r"^explorer_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_help, pattern="^menu_help$")
+    )
+
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands)
+    )
+
+    logger.info("Starting Depo Bot with enhanced UI...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
