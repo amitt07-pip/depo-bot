@@ -971,7 +971,7 @@ def get_token_network_keyboard(token: str):
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_network_keyboard(action: str):
+def get_network_keyboard(action: str, include_tokens: bool = True):
     keyboard = []
     row = []
     for i, (key, info) in enumerate(NETWORKS.items()):
@@ -986,23 +986,24 @@ def get_network_keyboard(action: str):
     if row:
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton(
-        "\U0001F4B5 ━━━ TOKENS ━━━ \U0001F4B5",
-        callback_data="noop"
-    )])
+    if include_tokens:
+        keyboard.append([InlineKeyboardButton(
+            "\U0001F4B5 ━━━ TOKENS ━━━ \U0001F4B5",
+            callback_data="noop"
+        )])
 
-    token_row = []
-    for token_key, token_info in TOKENS.items():
-        btn = InlineKeyboardButton(
-            f"{token_info['icon']} {token_info['symbol']}",
-            callback_data=f"{action}_token_{token_key}"
-        )
-        token_row.append(btn)
-        if len(token_row) == 2:
+        token_row = []
+        for token_key, token_info in TOKENS.items():
+            btn = InlineKeyboardButton(
+                f"{token_info['icon']} {token_info['symbol']}",
+                callback_data=f"{action}_token_{token_key}"
+            )
+            token_row.append(btn)
+            if len(token_row) == 2:
+                keyboard.append(token_row)
+                token_row = []
+        if token_row:
             keyboard.append(token_row)
-            token_row = []
-    if token_row:
-        keyboard.append(token_row)
 
     keyboard.append([
         InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
@@ -1266,7 +1267,7 @@ async def show_generate_menu(
     await query.edit_message_text(
         text,
         parse_mode="Markdown",
-        reply_markup=get_network_keyboard("gen")
+        reply_markup=get_network_keyboard("gen", include_tokens=False)
     )
 
 
