@@ -1542,33 +1542,36 @@ async def show_token_withdraw_info(
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return
+        return ConversationHandler.END
 
     balance_info = await BalanceChecker.get_token_balance(
         token, network, wallet["address"]
     )
     balance_str = balance_info.get("balance", "0")
 
+    context.user_data["withdraw_network"] = network
+    context.user_data["withdraw_balance"] = balance_str
+    context.user_data["withdraw_token"] = token
+    context.user_data["withdraw_token_address"] = token_info["networks"][network]["address"]
+
     keyboard = [
         [InlineKeyboardButton(
-            "\U0001F519 Back",
-            callback_data=f"withdraw_token_{token}"
-        )],
-        [InlineKeyboardButton(
-            "\U0001F3E0 Main Menu",
-            callback_data="main_menu"
+            "\u274c Cancel",
+            callback_data="cancel_withdraw"
         )]
     ]
 
     await query.edit_message_text(
         f"{token_info['icon']} *Withdraw {token_info['symbol']}*\n\n"
         f"{network_info['icon']} *Network:* {network_info['name']}\n"
-        f"\U0001F4B0 *Balance:* `{balance_str} {token_info['symbol']}`\n\n"
-        f"\u26a0\ufe0f *Note:* Token withdrawals require manual processing.\n"
-        f"Contact support to withdraw tokens.",
+        f"\U0001F4B0 *Available:* `{balance_str} {token_info['symbol']}`\n\n"
+        f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
+        f"_Reply with the amount (e.g., 10)_",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+    return WITHDRAW_AMOUNT
 
 
 async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1814,7 +1817,16 @@ async def receive_withdraw_amount(
 
     context.user_data["withdraw_amount"] = amount
     network = context.user_data.get("withdraw_network")
+    token = context.user_data.get("withdraw_token")
     info = NETWORKS[network]
+
+    if token:
+        token_info = TOKENS[token]
+        symbol = token_info["symbol"]
+        icon = token_info["icon"]
+    else:
+        symbol = info["symbol"]
+        icon = info["icon"]
 
     keyboard = [
         [InlineKeyboardButton(
@@ -1824,8 +1836,8 @@ async def receive_withdraw_amount(
     ]
 
     await update.message.reply_text(
-        f"\U0001F4E4 *Withdraw {info['symbol']}*\n\n"
-        f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n\n"
+        f"{icon} *Withdraw {symbol}*\n\n"
+        f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n\n"
         f"\U0001F4DD *Step 2/3:* Enter the destination address:\n\n"
         f"_Reply with the {info['name']} address_",
         parse_mode="Markdown",
@@ -1842,6 +1854,8 @@ async def receive_withdraw_address(
     address = update.message.text.strip()
     network = context.user_data.get("withdraw_network")
     amount = context.user_data.get("withdraw_amount")
+    token = context.user_data.get("withdraw_token")
+    token_address = context.user_data.get("withdraw_token_address")
     info = NETWORKS[network]
 
     if info["type"] == "evm":
@@ -1875,8 +1889,18 @@ async def receive_withdraw_address(
     pending_withdrawals[user_id] = {
         "network": network,
         "amount": amount,
-        "address": address
+        "address": address,
+        "token": token,
+        "token_address": token_address
     }
+
+    if token:
+        token_info = TOKENS[token]
+        symbol = token_info["symbol"]
+        icon = token_info["icon"]
+    else:
+        symbol = info["symbol"]
+        icon = info["icon"]
 
     keyboard = [
         [
@@ -1898,7 +1922,8 @@ async def receive_withdraw_address(
         f"\U0001F4DD *Step 3/3:* Please review and confirm:\n\n"
         f"{'='*30}\n"
         f"{info['icon']} *Network:* {info['name']}\n"
-        f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n"
+        f"{icon} *Asset:* {symbol}\n"
+        f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
         f"\U0001F4CD *To:*\n`{address}`\n"
         f"{'='*30}\n\n"
         f"\u26a0\ufe0f *Warning:* This action cannot be undone!\n"
@@ -1929,7 +1954,17 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     network = withdrawal["network"]
     amount = withdrawal["amount"]
     address = withdrawal["address"]
+    token = withdrawal.get("token")
+    token_address = withdrawal.get("token_address")
     info = NETWORKS[network]
+
+    if token:
+        token_info = TOKENS[token]
+        symbol = token_info["symbol"]
+        icon = token_info["icon"]
+    else:
+        symbol = info["symbol"]
+        icon = info["icon"]
 
     wallet = db.get_wallet(user_id, network)
     if not wallet:
@@ -1950,9 +1985,15 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         private_key = CryptoUtils.decrypt_private_key(
             wallet["encrypted_private_key"]
         )
-        result = await WithdrawalHandler.withdraw(
-            network, private_key, address, amount
-        )
+
+        if token_address and info["type"] == "evm":
+            result = await WithdrawalHandler.withdraw_evm(
+                network, private_key, address, amount, token_address
+            )
+        else:
+            result = await WithdrawalHandler.withdraw(
+                network, private_key, address, amount
+            )
 
         if result.get("success"):
             db.log_transaction(
@@ -1978,7 +2019,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"\u2705 *Withdrawal Successful!*\n\n"
                 f"{info['icon']} *Network:* {info['name']}\n"
-                f"\U0001F4B0 *Amount:* `{amount} {info['symbol']}`\n"
+                f"{icon} *Asset:* {symbol}\n"
+                f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
                 f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
                 f"\U0001F4DD *TX Hash:*\n`{result.get('tx_hash')}`",
                 parse_mode="Markdown",
@@ -2360,6 +2402,10 @@ def main():
             CallbackQueryHandler(
                 start_withdraw,
                 pattern=r"^withdraw_[A-Z]+$"
+            ),
+            CallbackQueryHandler(
+                show_token_withdraw_info,
+                pattern=r"^tokenwd_[A-Z]+_[A-Z]+$"
             )
         ],
         states={
@@ -2438,12 +2484,6 @@ def main():
         CallbackQueryHandler(
             show_token_withdraw_networks,
             pattern=r"^withdraw_token_[A-Z]+$"
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            show_token_withdraw_info,
-            pattern=r"^tokenwd_[A-Z]+_[A-Z]+$"
         )
     )
     application.add_handler(
