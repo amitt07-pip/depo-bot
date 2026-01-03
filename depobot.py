@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = 7338429782
+ALLOWED_CHAT_ID = -1002215462357
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
+
+wallet_balances_cache = {}
 
 NETWORKS = {
     "ETH": {
@@ -787,10 +790,14 @@ class WithdrawalHandler:
 db = WalletDatabase()
 
 
-def is_authorized(user_id: int) -> bool:
+def is_authorized(user_id: int, chat_id: int = None) -> bool:
     if ALLOWED_USER_ID == 0:
         return True
-    return user_id == ALLOWED_USER_ID
+    if user_id == ALLOWED_USER_ID:
+        return True
+    if chat_id and chat_id == ALLOWED_CHAT_ID:
+        return True
+    return False
 
 
 def get_main_menu_keyboard():
@@ -930,24 +937,39 @@ def format_address(address: str) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_authorized(user_id):
+    chat_id = update.effective_chat.id
+    if not is_authorized(user_id, chat_id):
         await update.message.reply_text(
             "\u26d4 Access Denied\n\n"
             "You are not authorized to use this bot."
         )
         return
 
+    user_name = update.effective_user.first_name or "User"
+    wallets = db.get_all_wallets(user_id)
+    wallet_count = len(wallets) if wallets else 0
+
     welcome_text = (
-        "\U0001F3E6 *Welcome to Depo Wallet Bot*\n\n"
-        "Your personal multi-chain crypto wallet manager.\n\n"
-        "\U0001F517 *Supported Networks:*\n"
+        f"\U0001F3E6 *DEPO WALLET BOT*\n"
+        f"{'=' * 28}\n\n"
+        f"\U0001F44B Hello, *{user_name}*!\n\n"
+        f"\U0001F4BC *Your Portfolio:*\n"
+        f"   \U0001F4B0 Wallets: `{wallet_count}`\n"
+        f"   \U0001F517 Networks: `{len(NETWORKS)}`\n"
+        f"   \U0001F4B5 Tokens: `{len(TOKENS)}`\n\n"
+        f"{'=' * 28}\n"
+        f"\U0001F310 *Supported Networks:*\n"
     )
 
     for key, info in NETWORKS.items():
-        welcome_text += f"  {info['icon']} {info['name']} ({info['symbol']})\n"
+        welcome_text += f"   {info['icon']} {info['name']}\n"
 
     welcome_text += (
-        "\n\U0001F447 *Select an option below to get started:*"
+        f"\n{'=' * 28}\n"
+        f"\U0001F514 *Live Monitoring:* Active\n"
+        f"\U0001F512 *Security:* AES-256 Encrypted\n"
+        f"{'=' * 28}\n\n"
+        f"\U0001F447 *Select an option:*"
     )
 
     await update.message.reply_text(
@@ -1984,7 +2006,9 @@ async def handle_text_commands(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-    if not is_authorized(update.effective_user.id):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if not is_authorized(user_id, chat_id):
         return
 
     text = update.message.text.lower().strip()
@@ -1993,12 +2017,106 @@ async def handle_text_commands(
         await start(update, context)
 
 
+async def check_wallet_transactions(context: ContextTypes.DEFAULT_TYPE):
+    global wallet_balances_cache
+
+    wallets = db.get_all_wallets(ALLOWED_USER_ID)
+    if not wallets:
+        return
+
+    for wallet in wallets:
+        network = wallet["network"]
+        address = wallet["address"]
+        cache_key = f"{network}_{address}"
+
+        try:
+            balance_info = await BalanceChecker.get_balance(network, address)
+            current_balance = balance_info.get("balance", "0")
+            symbol = balance_info.get("symbol", network)
+
+            if cache_key in wallet_balances_cache:
+                old_balance = wallet_balances_cache[cache_key]
+                old_val = Decimal(old_balance) if old_balance else Decimal("0")
+                new_val = Decimal(current_balance) if current_balance else Decimal("0")
+
+                if new_val != old_val:
+                    diff = new_val - old_val
+                    network_info = NETWORKS.get(network, {})
+                    icon = network_info.get("icon", "")
+
+                    if diff > 0:
+                        msg = (
+                            f"\U0001F4E5 *Incoming Transaction Detected!*\n\n"
+                            f"{icon} *Network:* {network_info.get('name', network)}\n"
+                            f"\U0001F4B0 *Amount:* `+{diff} {symbol}`\n"
+                            f"\U0001F4CA *New Balance:* `{current_balance} {symbol}`\n\n"
+                            f"\U0001F4CD *Wallet:*\n`{address}`"
+                        )
+                    else:
+                        msg = (
+                            f"\U0001F4E4 *Outgoing Transaction Detected!*\n\n"
+                            f"{icon} *Network:* {network_info.get('name', network)}\n"
+                            f"\U0001F4B8 *Amount:* `{diff} {symbol}`\n"
+                            f"\U0001F4CA *New Balance:* `{current_balance} {symbol}`\n\n"
+                            f"\U0001F4CD *Wallet:*\n`{address}`"
+                        )
+
+                    keyboard = [[
+                        InlineKeyboardButton(
+                            "\U0001F50D View Details",
+                            callback_data=f"wallet_{network}"
+                        ),
+                        InlineKeyboardButton(
+                            "\U0001F517 Explorer",
+                            url=f"{network_info.get('explorer', '')}/address/{address}"
+                        )
+                    ]]
+
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ALLOWED_USER_ID,
+                            text=msg,
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                        if ALLOWED_CHAT_ID:
+                            await context.bot.send_message(
+                                chat_id=ALLOWED_CHAT_ID,
+                                text=msg,
+                                parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup(keyboard)
+                            )
+                    except Exception as e:
+                        logger.error(f"Error sending transaction notification: {e}")
+
+            wallet_balances_cache[cache_key] = current_balance
+
+        except Exception as e:
+            logger.error(f"Error checking balance for {network}: {e}")
+
+
+async def start_transaction_monitor(application):
+    job_queue = application.job_queue
+    job_queue.run_repeating(
+        check_wallet_transactions,
+        interval=60,
+        first=10,
+        name="transaction_monitor"
+    )
+    logger.info("Transaction monitor started - checking every 60 seconds")
+
+
 def main():
     if not BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
         return
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(start_transaction_monitor)
+        .build()
+    )
 
     withdraw_handler = ConversationHandler(
         entry_points=[
