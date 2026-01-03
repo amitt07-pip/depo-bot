@@ -2017,7 +2017,7 @@ async def handle_text_commands(
         await start(update, context)
 
 
-async def check_wallet_transactions(context: ContextTypes.DEFAULT_TYPE):
+async def check_wallet_transactions(application):
     global wallet_balances_cache
 
     wallets = db.get_all_wallets(ALLOWED_USER_ID)
@@ -2073,14 +2073,14 @@ async def check_wallet_transactions(context: ContextTypes.DEFAULT_TYPE):
                     ]]
 
                     try:
-                        await context.bot.send_message(
+                        await application.bot.send_message(
                             chat_id=ALLOWED_USER_ID,
                             text=msg,
                             parse_mode="Markdown",
                             reply_markup=InlineKeyboardMarkup(keyboard)
                         )
                         if ALLOWED_CHAT_ID:
-                            await context.bot.send_message(
+                            await application.bot.send_message(
                                 chat_id=ALLOWED_CHAT_ID,
                                 text=msg,
                                 parse_mode="Markdown",
@@ -2095,15 +2095,22 @@ async def check_wallet_transactions(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error checking balance for {network}: {e}")
 
 
-async def start_transaction_monitor(application):
-    job_queue = application.job_queue
-    job_queue.run_repeating(
-        check_wallet_transactions,
-        interval=60,
-        first=10,
-        name="transaction_monitor"
-    )
+async def transaction_monitor_loop(application):
+    import asyncio
     logger.info("Transaction monitor started - checking every 60 seconds")
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await check_wallet_transactions(application)
+        except Exception as e:
+            logger.error(f"Transaction monitor error: {e}")
+        await asyncio.sleep(60)
+
+
+async def start_transaction_monitor(application):
+    import asyncio
+    asyncio.create_task(transaction_monitor_loop(application))
+    logger.info("Transaction monitor background task created")
 
 
 def main():
