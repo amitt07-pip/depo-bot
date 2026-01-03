@@ -79,6 +79,63 @@ NETWORKS = {
         "explorer": "https://tronscan.org",
         "type": "tron",
         "icon": "\U0001F534"
+    },
+    "LTC": {
+        "name": "Litecoin",
+        "rpc": "https://ltc.getblock.io/mainnet/",
+        "symbol": "LTC",
+        "explorer": "https://blockchair.com/litecoin",
+        "type": "ltc",
+        "icon": "\U0001F315"
+    }
+}
+
+TOKENS = {
+    "USDT": {
+        "name": "Tether USD",
+        "symbol": "USDT",
+        "icon": "\U0001F4B5",
+        "networks": {
+            "ETH": {
+                "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "decimals": 6
+            },
+            "BSC": {
+                "address": "0x55d398326f99059fF775485246999027B3197955",
+                "decimals": 18
+            },
+            "POLYGON": {
+                "address": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+                "decimals": 6
+            },
+            "TRON": {
+                "address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+                "decimals": 6
+            }
+        }
+    },
+    "USDC": {
+        "name": "USD Coin",
+        "symbol": "USDC",
+        "icon": "\U0001F4B2",
+        "networks": {
+            "ETH": {
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "decimals": 6
+            },
+            "BSC": {
+                "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+                "decimals": 18
+            },
+            "POLYGON": {
+                "address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                "decimals": 6
+            },
+            "SOLANA": {
+                "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "decimals": 6
+            }
+        }
     }
 }
 
@@ -271,6 +328,38 @@ class WalletGenerator:
         return address, priv_key.hex()
 
     @staticmethod
+    def generate_ltc_wallet() -> tuple:
+        import hashlib
+        import secrets
+        private_key = secrets.token_bytes(32)
+        from ecdsa import SigningKey, SECP256k1
+        sk = SigningKey.from_string(private_key, curve=SECP256k1)
+        vk = sk.get_verifying_key()
+        public_key = b'\x04' + vk.to_string()
+        sha256_hash = hashlib.sha256(public_key).digest()
+        ripemd160 = hashlib.new('ripemd160')
+        ripemd160.update(sha256_hash)
+        pubkey_hash = ripemd160.digest()
+        version = b'\x30'
+        versioned_payload = version + pubkey_hash
+        checksum = hashlib.sha256(
+            hashlib.sha256(versioned_payload).digest()
+        ).digest()[:4]
+        address_bytes = versioned_payload + checksum
+        alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+        num = int.from_bytes(address_bytes, 'big')
+        address = ''
+        while num:
+            num, rem = divmod(num, 58)
+            address = alphabet[rem] + address
+        for byte in address_bytes:
+            if byte == 0:
+                address = '1' + address
+            else:
+                break
+        return address, private_key.hex()
+
+    @staticmethod
     def generate_wallet(network: str) -> tuple:
         network_info = NETWORKS.get(network.upper())
         if not network_info:
@@ -282,6 +371,8 @@ class WalletGenerator:
             return WalletGenerator.generate_solana_wallet()
         elif network_info["type"] == "tron":
             return WalletGenerator.generate_tron_wallet()
+        elif network_info["type"] == "ltc":
+            return WalletGenerator.generate_ltc_wallet()
         else:
             raise ValueError(f"Unknown network type: {network_info['type']}")
 
@@ -364,6 +455,119 @@ class BalanceChecker:
                 return {"balance": "0", "symbol": "TRX"}
 
     @staticmethod
+    async def get_ltc_balance(address: str) -> dict:
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/balance"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        balance_satoshi = data.get("balance", 0)
+                        return {
+                            "balance": str(Decimal(balance_satoshi) / Decimal(10 ** 8)),
+                            "symbol": "LTC",
+                            "raw_balance": balance_satoshi
+                        }
+                    return {"balance": "0", "symbol": "LTC", "error": "API error"}
+        except Exception as e:
+            logger.error(f"Error getting LTC balance: {e}")
+            return {"balance": "0", "symbol": "LTC", "error": str(e)}
+
+    @staticmethod
+    async def get_solana_token_balance(address: str, token_mint: str) -> dict:
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenAccountsByOwner",
+                    "params": [
+                        address,
+                        {"mint": token_mint},
+                        {"encoding": "jsonParsed"}
+                    ]
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=payload
+                ) as resp:
+                    data = await resp.json()
+                    if "result" in data and data["result"]["value"]:
+                        account = data["result"]["value"][0]
+                        token_amount = account["account"]["data"]["parsed"]["info"]
+                        amount = token_amount["tokenAmount"]["uiAmount"]
+                        return {
+                            "balance": str(amount) if amount else "0",
+                            "symbol": "USDC",
+                            "raw_balance": int(token_amount["tokenAmount"]["amount"])
+                        }
+                    return {"balance": "0", "symbol": "USDC", "raw_balance": 0}
+        except Exception as e:
+            logger.error(f"Error getting Solana token balance: {e}")
+            return {"balance": "0", "symbol": "USDC", "error": str(e)}
+
+    @staticmethod
+    async def get_tron_token_balance(address: str, token_address: str) -> dict:
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{NETWORKS['TRON']['rpc']}/v1/accounts/{address}"
+                async with session.get(url) as resp:
+                    data = await resp.json()
+                    if "data" in data and len(data["data"]) > 0:
+                        trc20 = data["data"][0].get("trc20", [])
+                        for token in trc20:
+                            if token_address in token:
+                                balance = int(token[token_address])
+                                return {
+                                    "balance": str(Decimal(balance) / Decimal(10 ** 6)),
+                                    "symbol": "USDT",
+                                    "raw_balance": balance
+                                }
+                    return {"balance": "0", "symbol": "USDT", "raw_balance": 0}
+        except Exception as e:
+            logger.error(f"Error getting Tron token balance: {e}")
+            return {"balance": "0", "symbol": "USDT", "error": str(e)}
+
+    @staticmethod
+    async def get_token_balance(
+        token: str,
+        network: str,
+        address: str
+    ) -> dict:
+        token = token.upper()
+        network = network.upper()
+
+        if token not in TOKENS:
+            return {"error": f"Unsupported token: {token}"}
+
+        token_info = TOKENS[token]
+        if network not in token_info["networks"]:
+            return {"error": f"{token} not available on {network}"}
+
+        network_token = token_info["networks"][network]
+        network_info = NETWORKS.get(network)
+
+        try:
+            if network_info["type"] == "evm":
+                return await BalanceChecker.get_evm_balance(
+                    network, address, network_token["address"]
+                )
+            elif network_info["type"] == "solana":
+                return await BalanceChecker.get_solana_token_balance(
+                    address, network_token["address"]
+                )
+            elif network_info["type"] == "tron":
+                return await BalanceChecker.get_tron_token_balance(
+                    address, network_token["address"]
+                )
+        except Exception as e:
+            logger.error(f"Error getting {token} balance on {network}: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
     async def get_balance(
         network: str,
         address: str,
@@ -383,6 +587,8 @@ class BalanceChecker:
                 return await BalanceChecker.get_solana_balance(address)
             elif network_info["type"] == "tron":
                 return await BalanceChecker.get_tron_balance(address)
+            elif network_info["type"] == "ltc":
+                return await BalanceChecker.get_ltc_balance(address)
         except Exception as e:
             logger.error(f"Error getting balance for {network}: {e}")
             return {"error": str(e)}
@@ -602,18 +808,62 @@ def get_main_menu_keyboard():
                 "\U0001F4CA Balances", callback_data="menu_balance"
             ),
             InlineKeyboardButton(
-                "\U0001F4E4 Withdraw", callback_data="menu_withdraw"
+                "\U0001F4B5 Tokens", callback_data="menu_tokens"
             )
         ],
         [
             InlineKeyboardButton(
-                "\u2795 Generate Wallet", callback_data="menu_generate"
+                "\U0001F4E4 Withdraw", callback_data="menu_withdraw"
             ),
+            InlineKeyboardButton(
+                "\u2795 Generate", callback_data="menu_generate"
+            )
+        ],
+        [
             InlineKeyboardButton(
                 "\u2753 Help", callback_data="menu_help"
             )
         ]
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_token_keyboard():
+    keyboard = []
+    for token_key, token_info in TOKENS.items():
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{token_info['icon']} {token_info['name']} ({token_info['symbol']})",
+                callback_data=f"token_{token_key}"
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_token_network_keyboard(token: str):
+    token_info = TOKENS.get(token)
+    if not token_info:
+        return get_back_button("menu_tokens")
+
+    keyboard = []
+    for network in token_info["networks"].keys():
+        network_info = NETWORKS.get(network)
+        if network_info:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{network_info['icon']} {network_info['name']}",
+                    callback_data=f"tokenbal_{token}_{network}"
+                )
+            ])
+    keyboard.append([
+        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_tokens")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -1606,6 +1856,130 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def show_tokens_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    text = (
+        "\U0001F4B5 *Token Balances*\n\n"
+        "Select a token to check your balance:\n\n"
+        "*Available Tokens:*\n"
+    )
+
+    for token_key, token_info in TOKENS.items():
+        networks = ", ".join(token_info["networks"].keys())
+        text += f"{token_info['icon']} *{token_info['symbol']}* - {networks}\n"
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_token_keyboard()
+    )
+
+
+async def show_token_networks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    token = query.data.split("_")[1]
+    token_info = TOKENS.get(token)
+
+    if not token_info:
+        await query.edit_message_text(
+            "\u26a0\ufe0f Token not found",
+            reply_markup=get_back_button("menu_tokens")
+        )
+        return
+
+    text = (
+        f"{token_info['icon']} *{token_info['name']}*\n\n"
+        f"Select a network to check your {token_info['symbol']} balance:"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_token_network_keyboard(token)
+    )
+
+
+async def check_token_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Fetching token balance...")
+
+    parts = query.data.split("_")
+    token = parts[1]
+    network = parts[2]
+
+    user_id = query.from_user.id
+    token_info = TOKENS.get(token)
+    network_info = NETWORKS.get(network)
+
+    if not token_info or not network_info:
+        await query.edit_message_text(
+            "\u26a0\ufe0f Invalid token or network",
+            reply_markup=get_back_button("menu_tokens")
+        )
+        return
+
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(
+                f"\u2795 Generate {network_info['name']} Wallet",
+                callback_data=f"gen_{network}"
+            )],
+            [InlineKeyboardButton(
+                "\U0001F519 Back",
+                callback_data=f"token_{token}"
+            )]
+        ]
+        await query.edit_message_text(
+            f"\u26a0\ufe0f *No {network_info['name']} Wallet*\n\n"
+            f"You need a {network_info['name']} wallet to check "
+            f"{token_info['symbol']} balance.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    await query.edit_message_text(
+        f"\u23f3 *Fetching {token_info['symbol']} balance on "
+        f"{network_info['name']}...*",
+        parse_mode="Markdown"
+    )
+
+    balance_info = await BalanceChecker.get_token_balance(
+        token, network, wallet["address"]
+    )
+    balance_str = balance_info.get("balance", "0")
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "\U0001F504 Refresh",
+            callback_data=f"tokenbal_{token}_{network}"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F519 Back",
+            callback_data=f"token_{token}"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F3E0 Main Menu",
+            callback_data="main_menu"
+        )]
+    ]
+
+    await query.edit_message_text(
+        f"{token_info['icon']} *{token_info['symbol']} Balance*\n\n"
+        f"{network_info['icon']} *Network:* {network_info['name']}\n"
+        f"\U0001F4B0 *Balance:* `{balance_str} {token_info['symbol']}`\n\n"
+        f"\U0001F4CD *Wallet:*\n`{wallet['address']}`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def handle_text_commands(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -1707,6 +2081,15 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_help, pattern="^menu_help$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_tokens_menu, pattern="^menu_tokens$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_token_networks, pattern=r"^token_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(check_token_balance, pattern=r"^tokenbal_[A-Z]+_[A-Z]+$")
     )
 
     application.add_handler(
