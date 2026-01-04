@@ -919,7 +919,10 @@ def get_main_menu_keyboard():
             InlineKeyboardButton("Balances", callback_data="menu_balance")
         ],
         [
-            InlineKeyboardButton("New Wallet", callback_data="menu_generate"),
+            InlineKeyboardButton("Convert", callback_data="menu_convert"),
+            InlineKeyboardButton("New Wallet", callback_data="menu_generate")
+        ],
+        [
             InlineKeyboardButton("Help", callback_data="menu_help")
         ]
     ]
@@ -2538,6 +2541,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Wallets - View and manage wallets\n"
         "Deposit - Get deposit addresses\n"
         "Withdraw - Send funds externally\n"
+        "Convert - Swap tokens (same network)\n"
         "Balances - Check wallet balances\n"
         "New Wallet - Create new wallets\n\n"
         "*Quick Command*\n"
@@ -2553,6 +2557,270 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         help_text,
+        parse_mode="Markdown",
+        reply_markup=get_back_button("main_menu")
+    )
+
+
+SWAP_PAIRS = {
+    "ETH": [
+        {"from": "USDT", "to": "USDC"},
+        {"from": "USDC", "to": "USDT"},
+        {"from": "ETH", "to": "USDT"},
+        {"from": "ETH", "to": "USDC"},
+    ],
+    "BSC": [
+        {"from": "USDT", "to": "USDC"},
+        {"from": "USDC", "to": "USDT"},
+        {"from": "BNB", "to": "USDT"},
+        {"from": "BNB", "to": "USDC"},
+    ],
+    "POLYGON": [
+        {"from": "USDT", "to": "USDC"},
+        {"from": "USDC", "to": "USDT"},
+        {"from": "MATIC", "to": "USDT"},
+        {"from": "MATIC", "to": "USDC"},
+    ],
+}
+
+CONVERT_AMOUNT = 10
+
+
+async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    wallets = db.get_all_wallets(user_id)
+
+    evm_wallets = []
+    for w in (wallets or []):
+        if w["network"] in ["ETH", "BSC", "POLYGON"]:
+            evm_wallets.append(w["network"])
+
+    if not evm_wallets:
+        keyboard = [
+            [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(
+            "*Convert*\n\n"
+            "No EVM wallets found.\n"
+            "Create an Ethereum, BSC, or Polygon wallet first.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    keyboard = []
+    for network in ["ETH", "BSC", "POLYGON"]:
+        if network in evm_wallets:
+            net_info = NETWORKS[network]
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{net_info['name']}",
+                    callback_data=f"convert_net_{network}"
+                )
+            ])
+
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    await query.edit_message_text(
+        "*Convert*\n"
+        "Select network for swap:\n\n"
+        "Supported: ETH, BSC, Polygon\n"
+        "Same-network swaps only.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_convert_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    network = query.data.split("_")[2]
+    context.user_data["convert_network"] = network
+
+    pairs = SWAP_PAIRS.get(network, [])
+    net_info = NETWORKS[network]
+
+    keyboard = []
+    for pair in pairs:
+        btn_text = f"{pair['from']} -> {pair['to']}"
+        callback = f"convert_pair_{pair['from']}_{pair['to']}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback)])
+
+    keyboard.append([InlineKeyboardButton("Back", callback_data="menu_convert")])
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    await query.edit_message_text(
+        f"*Convert on {net_info['name']}*\n"
+        "Select swap pair:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_convert_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    from_token = parts[2]
+    to_token = parts[3]
+
+    network = context.user_data.get("convert_network", "BSC")
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        await query.edit_message_text(
+            "*No Wallet*\nCreate a wallet first.",
+            parse_mode="Markdown",
+            reply_markup=get_back_button("menu_convert")
+        )
+        return ConversationHandler.END
+
+    from_token_info = TOKENS.get(from_token, {})
+    is_native = from_token_info.get("native", False)
+
+    if is_native:
+        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    else:
+        balance_info = await BalanceChecker.get_token_balance(
+            from_token, network, wallet["address"]
+        )
+    balance_str = balance_info.get("balance", "0")
+
+    context.user_data["convert_from"] = from_token
+    context.user_data["convert_to"] = to_token
+    context.user_data["convert_balance"] = balance_str
+    context.user_data["convert_is_native"] = is_native
+
+    net_info = NETWORKS[network]
+    keyboard = [[InlineKeyboardButton("Cancel", callback_data="cancel_convert")]]
+
+    await query.edit_message_text(
+        f"*Convert {from_token} to {to_token}*\n\n"
+        f"Network: {net_info['name']}\n"
+        f"Available: {balance_str} {from_token}\n\n"
+        f"Enter amount to convert:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return CONVERT_AMOUNT
+
+
+async def receive_convert_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return ConversationHandler.END
+
+    amount_str = update.message.text.strip()
+
+    try:
+        amount = Decimal(amount_str)
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+    except Exception:
+        await update.message.reply_text(
+            "*Invalid Amount*\nEnter a valid number.",
+            parse_mode="Markdown"
+        )
+        return CONVERT_AMOUNT
+
+    balance_str = context.user_data.get("convert_balance", "0")
+    try:
+        balance = Decimal(balance_str)
+    except Exception:
+        balance = Decimal("0")
+
+    if amount > balance:
+        await update.message.reply_text(
+            f"*Insufficient Balance*\nYou have {balance_str}.",
+            parse_mode="Markdown"
+        )
+        return CONVERT_AMOUNT
+
+    context.user_data["convert_amount"] = str(amount)
+
+    from_token = context.user_data.get("convert_from")
+    to_token = context.user_data.get("convert_to")
+    network = context.user_data.get("convert_network")
+    net_info = NETWORKS[network]
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Confirm", callback_data="confirm_convert"),
+            InlineKeyboardButton("Cancel", callback_data="cancel_convert")
+        ]
+    ]
+
+    await update.message.reply_text(
+        f"*Confirm Conversion*\n\n"
+        f"From: {amount} {from_token}\n"
+        f"To: {to_token}\n"
+        f"Network: {net_info['name']}\n\n"
+        f"Note: Actual amount received depends on market rate.\n"
+        f"Gas fees will be deducted in {net_info['symbol']}.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return ConversationHandler.END
+
+
+async def execute_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    from_token = context.user_data.get("convert_from")
+    to_token = context.user_data.get("convert_to")
+    network = context.user_data.get("convert_network")
+    amount = context.user_data.get("convert_amount")
+
+    net_info = NETWORKS[network]
+
+    keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
+
+    await query.edit_message_text(
+        f"*Conversion Pending*\n\n"
+        f"Converting {amount} {from_token} to {to_token}\n"
+        f"Network: {net_info['name']}\n\n"
+        f"DEX integration coming soon.\n"
+        f"For now, use external DEX:\n"
+        f"- ETH: Uniswap\n"
+        f"- BSC: PancakeSwap\n"
+        f"- Polygon: QuickSwap",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data.pop("convert_network", None)
+    context.user_data.pop("convert_from", None)
+    context.user_data.pop("convert_to", None)
+    context.user_data.pop("convert_amount", None)
+    context.user_data.pop("convert_balance", None)
+
+    await query.edit_message_text(
+        "*Conversion Cancelled*",
         parse_mode="Markdown",
         reply_markup=get_back_button("main_menu")
     )
@@ -3021,6 +3289,21 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_help, pattern="^menu_help$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_convert_menu, pattern="^menu_convert$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_convert_pairs, pattern=r"^convert_net_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_convert_amount, pattern=r"^convert_pair_[A-Z]+_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(execute_convert, pattern="^confirm_convert$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$")
     )
     application.add_handler(
         CallbackQueryHandler(show_tokens_menu, pattern="^menu_tokens$")
