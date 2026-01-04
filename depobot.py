@@ -355,10 +355,22 @@ class WalletDatabase:
                 network TEXT NOT NULL,
                 address TEXT NOT NULL,
                 encrypted_private_key TEXT NOT NULL,
+                interface_id INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, network)
+                UNIQUE(user_id, network, interface_id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                current_interface INTEGER NOT NULL DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("PRAGMA table_info(wallets)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "interface_id" not in columns:
+            cursor.execute("ALTER TABLE wallets ADD COLUMN interface_id INTEGER NOT NULL DEFAULT 1")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,13 +423,37 @@ class WalletDatabase:
         conn.commit()
         conn.close()
 
-    def get_wallet(self, user_id: int, network: str) -> Optional[dict]:
+    def get_current_interface(self, user_id: int) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT current_interface FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 1
+
+    def set_current_interface(self, user_id: int, interface_id: int):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO user_settings (user_id, current_interface, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (user_id, interface_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_wallet(self, user_id: int, network: str, interface_id: int = None) -> Optional[dict]:
+        if interface_id is None:
+            interface_id = self.get_current_interface(user_id)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT address, encrypted_private_key FROM wallets "
-            "WHERE user_id = ? AND network = ?",
-            (user_id, network)
+            "WHERE user_id = ? AND network = ? AND interface_id = ?",
+            (user_id, network, interface_id)
         )
         row = cursor.fetchone()
         conn.close()
@@ -430,29 +466,45 @@ class WalletDatabase:
         user_id: int,
         network: str,
         address: str,
-        encrypted_private_key: str
+        encrypted_private_key: str,
+        interface_id: int = None
     ):
+        if interface_id is None:
+            interface_id = self.get_current_interface(user_id)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO wallets "
-            "(user_id, network, address, encrypted_private_key) "
-            "VALUES (?, ?, ?, ?)",
-            (user_id, network, address, encrypted_private_key)
+            "(user_id, network, address, encrypted_private_key, interface_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, network, address, encrypted_private_key, interface_id)
         )
         conn.commit()
         conn.close()
 
-    def get_all_wallets(self, user_id: int) -> list:
+    def get_all_wallets(self, user_id: int, interface_id: int = None) -> list:
+        if interface_id is None:
+            interface_id = self.get_current_interface(user_id)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT network, address FROM wallets WHERE user_id = ?",
-            (user_id,)
+            "SELECT network, address FROM wallets WHERE user_id = ? AND interface_id = ?",
+            (user_id, interface_id)
         )
         rows = cursor.fetchall()
         conn.close()
         return [{"network": row[0], "address": row[1]} for row in rows]
+
+    def get_all_wallets_all_interfaces(self, user_id: int) -> list:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT network, address, interface_id FROM wallets WHERE user_id = ?",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"network": row[0], "address": row[1], "interface_id": row[2]} for row in rows]
 
     def log_transaction(
         self,
@@ -1247,7 +1299,8 @@ def get_friendly_error(error) -> str:
     return "Something went wrong. Please try again later."
 
 
-def get_main_menu_keyboard():
+def get_main_menu_keyboard(current_interface: int = 1):
+    other_interface = 2 if current_interface == 1 else 1
     keyboard = [
         [
             InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
@@ -1260,6 +1313,12 @@ def get_main_menu_keyboard():
         [
             InlineKeyboardButton("Convert", callback_data="menu_convert"),
             InlineKeyboardButton("New Wallet", callback_data="menu_generate")
+        ],
+        [
+            InlineKeyboardButton(
+                f"Switch to Interface {other_interface}",
+                callback_data=f"switch_interface_{other_interface}"
+            )
         ],
         [
             InlineKeyboardButton("Help", callback_data="menu_help")
@@ -1388,6 +1447,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_name = update.effective_user.first_name or "User"
+    current_interface = db.get_current_interface(user_id)
     wallets = db.get_all_wallets(user_id)
     wallet_count = len(wallets) if wallets else 0
 
@@ -1414,7 +1474,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     welcome_text = (
         f"Welcome, *{user_name}*\n\n"
-        f"\U0001F4BC *Portfolio*\n"
+        f"\U0001F4BC *Portfolio* (Interface {current_interface})\n"
         f"Wallets: {wallet_count}\n"
         f"Balance: ${total_usdt_value:.2f} USD\n\n"
         f"\U0001F6E1 *Status*\n"
@@ -1429,13 +1489,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=photo,
                 caption=welcome_text,
                 parse_mode="Markdown",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(current_interface)
             )
     else:
         await update.message.reply_text(
             welcome_text,
             parse_mode="Markdown",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(current_interface)
         )
 
 
@@ -1968,10 +2028,30 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    menu_text = "*VM CRYPTO BOT*\n\nChoose an option below:"
+    user_id = query.from_user.id
+    current_interface = db.get_current_interface(user_id)
+    menu_text = f"*VM CRYPTO BOT*\n\nInterface {current_interface}\nChoose an option below:"
 
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard()
+        query, "welcome", menu_text, get_main_menu_keyboard(current_interface)
+    )
+
+
+async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+
+    user_id = query.from_user.id
+    new_interface = int(query.data.split("_")[-1])
+    db.set_current_interface(user_id, new_interface)
+
+    await query.answer(f"Switched to Interface {new_interface}")
+
+    menu_text = f"*VM CRYPTO BOT*\n\nInterface {new_interface}\nChoose an option below:"
+
+    await edit_message_with_banner(
+        query, "welcome", menu_text, get_main_menu_keyboard(new_interface)
     )
 
 
@@ -3646,7 +3726,7 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
 async def check_wallet_transactions(application):
     global wallet_balances_cache
 
-    wallets = db.get_all_wallets(ALLOWED_USER_ID)
+    wallets = db.get_all_wallets_all_interfaces(ALLOWED_USER_ID)
     if not wallets:
         return
 
@@ -3895,6 +3975,9 @@ def main():
 
     application.add_handler(
         CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(switch_interface, pattern=r"^switch_interface_\d+$")
     )
     application.add_handler(
         CallbackQueryHandler(show_wallets_menu, pattern="^menu_wallets$")
