@@ -1562,7 +1562,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.set_current_interface(user_id, selected_interface)
         menu_text = build_main_menu_text(user_id, selected_interface)
         
-        banner_path = get_banner_path("welcome")
+        # Use public banner (without tagline) for regular users
+        if user_id in USER_ACCESS:
+            banner_path = get_banner_path("welcome")
+        else:
+            banner_path = get_banner_path("welcome_public")
         if os.path.exists(banner_path):
             with open(banner_path, "rb") as photo:
                 await update.message.reply_photo(
@@ -2168,8 +2172,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_interface = get_effective_interface(user_id)
     menu_text = build_main_menu_text(user_id, current_interface)
 
+    # Use public banner (without tagline) for regular users
+    banner_name = "welcome" if user_id in USER_ACCESS else "welcome_public"
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(current_interface, user_id)
+        query, banner_name, menu_text, get_main_menu_keyboard(current_interface, user_id)
     )
 
 
@@ -2193,8 +2199,10 @@ async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     menu_text = build_main_menu_text(user_id, new_interface)
 
+    # Use public banner (without tagline) for regular users
+    banner_name = "welcome" if user_id in USER_ACCESS else "welcome_public"
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(new_interface, user_id)
+        query, banner_name, menu_text, get_main_menu_keyboard(new_interface, user_id)
     )
 
 
