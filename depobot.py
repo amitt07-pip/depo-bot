@@ -859,6 +859,28 @@ class BalanceChecker:
 
 class WithdrawalHandler:
     @staticmethod
+    async def check_gas_balance(network: str, address: str, token_address: str = None) -> dict:
+        network_info = NETWORKS[network]
+        w3 = Web3(Web3.HTTPProvider(network_info["rpc"]))
+        try:
+            native_balance = w3.eth.get_balance(address)
+            gas_price = w3.eth.gas_price
+            estimated_gas = 100000 if token_address else 21000
+            estimated_fee = gas_price * estimated_gas
+            fee_in_native = Web3.from_wei(estimated_fee, "ether")
+            balance_in_native = Web3.from_wei(native_balance, "ether")
+            has_enough = native_balance >= estimated_fee
+            return {
+                "has_enough": has_enough,
+                "native_balance": str(balance_in_native),
+                "estimated_fee": str(fee_in_native),
+                "symbol": network_info["symbol"]
+            }
+        except Exception as e:
+            logger.error(f"Gas check error: {e}")
+            return {"has_enough": True, "error": str(e)}
+
+    @staticmethod
     async def withdraw_evm(
         network: str,
         private_key: str,
@@ -871,6 +893,9 @@ class WithdrawalHandler:
         account = Account.from_key(private_key)
 
         try:
+            gas_price = w3.eth.gas_price
+            native_balance = w3.eth.get_balance(account.address)
+
             if token_address:
                 contract = w3.eth.contract(
                     address=Web3.to_checksum_address(token_address),
@@ -879,24 +904,64 @@ class WithdrawalHandler:
                 decimals = contract.functions.decimals().call()
                 amount_wei = int(Decimal(amount) * Decimal(10 ** decimals))
 
-                tx = contract.functions.transfer(
+                tx_data = contract.functions.transfer(
                     Web3.to_checksum_address(to_address),
                     amount_wei
-                ).build_transaction({
+                )
+                try:
+                    estimated_gas = tx_data.estimate_gas({"from": account.address})
+                    estimated_gas = int(estimated_gas * 1.2)
+                except Exception:
+                    estimated_gas = 100000
+
+                estimated_fee = gas_price * estimated_gas
+                if native_balance < estimated_fee:
+                    fee_needed = Web3.from_wei(estimated_fee, "ether")
+                    balance_have = Web3.from_wei(native_balance, "ether")
+                    gas_price_gwei = Web3.from_wei(gas_price, "gwei")
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Insufficient {network_info['symbol']} for gas fees.\n\n"
+                            f"Your balance: {float(balance_have):.6f} {network_info['symbol']}\n"
+                            f"Required fee: {float(fee_needed):.6f} {network_info['symbol']}\n"
+                            f"Gas price: {float(gas_price_gwei):.2f} Gwei\n"
+                            f"Gas limit: {estimated_gas}\n\n"
+                            f"Please deposit more {network_info['symbol']} to cover gas."
+                        )
+                    }
+
+                tx = tx_data.build_transaction({
                     "from": account.address,
                     "nonce": w3.eth.get_transaction_count(account.address),
-                    "gas": 100000,
-                    "gasPrice": w3.eth.gas_price,
+                    "gas": estimated_gas,
+                    "gasPrice": gas_price,
                     "chainId": network_info["chain_id"]
                 })
             else:
                 amount_wei = Web3.to_wei(amount, "ether")
+                estimated_gas = 21000
+                estimated_fee = gas_price * estimated_gas
+                total_needed = amount_wei + estimated_fee
+
+                if native_balance < total_needed:
+                    total_in_native = Web3.from_wei(total_needed, "ether")
+                    balance_have = Web3.from_wei(native_balance, "ether")
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Insufficient balance. "
+                            f"Need ~{total_in_native:.6f} {network_info['symbol']} "
+                            f"(amount + gas), have {balance_have:.6f} {network_info['symbol']}"
+                        )
+                    }
+
                 tx = {
                     "to": Web3.to_checksum_address(to_address),
                     "value": amount_wei,
                     "nonce": w3.eth.get_transaction_count(account.address),
-                    "gas": 21000,
-                    "gasPrice": w3.eth.gas_price,
+                    "gas": estimated_gas,
+                    "gasPrice": gas_price,
                     "chainId": network_info["chain_id"]
                 }
 
@@ -1072,6 +1137,14 @@ def get_friendly_error(error) -> str:
     error_str = str(error).lower() if error else ""
 
     if "insufficient funds" in error_str or "balance 0" in error_str:
+        if "gas" in error_str:
+            return (
+                "Insufficient native token for gas fees!\n\n"
+                "For token withdrawals (USDT, USDC), you need the native "
+                "coin (BNB on BSC, ETH on Ethereum, MATIC on Polygon) to pay "
+                "for network fees.\n\n"
+                "Please deposit some native tokens first."
+            )
         return (
             "Insufficient balance! Your wallet doesn't have enough funds "
             "to cover the transaction and gas fees.\n\n"
