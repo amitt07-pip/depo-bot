@@ -1437,6 +1437,45 @@ def format_address(address: str) -> str:
     return address
 
 
+async def build_main_menu_text(user_id: int, interface_id: int) -> str:
+    """Build main menu text with wallet count and balance for the given interface."""
+    wallets = db.get_all_wallets(user_id, interface_id)
+    wallet_count = len(wallets) if wallets else 0
+
+    total_usdt_value = Decimal("0")
+    for wallet in (wallets or []):
+        network = wallet["network"]
+        address = wallet["address"]
+        for token_key, token_info in TOKENS.items():
+            if network in token_info.get("networks", {}):
+                net_info = token_info["networks"][network]
+                if net_info.get("native"):
+                    continue
+                if token_key in ["USDT", "USDC"]:
+                    try:
+                        result = await BalanceChecker.get_token_balance(
+                            token_key, network, address
+                        )
+                        if result and "balance" in result and not result.get("error"):
+                            bal_str = result["balance"]
+                            if bal_str and float(bal_str) > 0:
+                                total_usdt_value += Decimal(bal_str)
+                    except Exception:
+                        pass
+
+    interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
+    
+    menu_text = (
+        f"*VM CRYPTO BOT*\n\n"
+        f"\U0001F4BC *{interface_info['name']}*\n"
+        f"_{interface_info['desc']}_\n\n"
+        f"Wallets: {wallet_count}\n"
+        f"Balance: ${total_usdt_value:.2f} USD\n\n"
+        f"Choose an option below:"
+    )
+    return menu_text
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -1496,39 +1535,10 @@ async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     selected_interface = int(query.data.split("_")[-1])
     db.set_current_interface(user_id, selected_interface)
 
-    await query.answer(f"Interface {selected_interface} selected")
+    interface_info = INTERFACE_INFO.get(selected_interface, {"name": f"Interface {selected_interface}", "desc": ""})
+    await query.answer(f"{interface_info['desc']}")
 
-    wallets = db.get_all_wallets(user_id)
-    wallet_count = len(wallets) if wallets else 0
-
-    total_usdt_value = Decimal("0")
-    for wallet in (wallets or []):
-        network = wallet["network"]
-        address = wallet["address"]
-        for token_key, token_info in TOKENS.items():
-            if network in token_info.get("networks", {}):
-                net_info = token_info["networks"][network]
-                if net_info.get("native"):
-                    continue
-                if token_key in ["USDT", "USDC"]:
-                    try:
-                        result = await BalanceChecker.get_token_balance(
-                            token_key, network, address
-                        )
-                        if result and "balance" in result and not result.get("error"):
-                            bal_str = result["balance"]
-                            if bal_str and float(bal_str) > 0:
-                                total_usdt_value += Decimal(bal_str)
-                    except Exception:
-                        pass
-
-    menu_text = (
-        f"*VM CRYPTO BOT*\n\n"
-        f"\U0001F4BC *Interface {selected_interface}*\n"
-        f"Wallets: {wallet_count}\n"
-        f"Balance: ${total_usdt_value:.2f} USD\n\n"
-        f"Choose an option below:"
-    )
+    menu_text = await build_main_menu_text(user_id, selected_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(selected_interface)
@@ -2066,7 +2076,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     current_interface = db.get_current_interface(user_id)
-    menu_text = f"*VM CRYPTO BOT*\n\nInterface {current_interface}\nChoose an option below:"
+    menu_text = await build_main_menu_text(user_id, current_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(current_interface)
@@ -2082,9 +2092,10 @@ async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_interface = int(query.data.split("_")[-1])
     db.set_current_interface(user_id, new_interface)
 
-    await query.answer(f"Switched to Interface {new_interface}")
+    interface_info = INTERFACE_INFO.get(new_interface, {"name": f"Interface {new_interface}", "desc": ""})
+    await query.answer(f"{interface_info['desc']}")
 
-    menu_text = f"*VM CRYPTO BOT*\n\nInterface {new_interface}\nChoose an option below:"
+    menu_text = await build_main_menu_text(user_id, new_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(new_interface)
@@ -3328,6 +3339,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 CONVERTIBLE_ASSETS = ["ETH", "BNB", "MATIC", "SOL", "TRX", "LTC", "USDT", "USDC"]
 
+INTERFACE_INFO = {
+    1: {"name": "Interface 1", "desc": "Logged into Work account [CR]"},
+    2: {"name": "Interface 2", "desc": "Logged into Main account"}
+}
+
 CONVERT_AMOUNT = 10
 
 
@@ -3767,7 +3783,7 @@ async def check_wallet_transactions(application):
         return
 
     async def send_balance_notification(
-        network, address, symbol, old_balance, new_balance, token_name=None
+        network, address, symbol, old_balance, new_balance, interface_id, token_name=None
     ):
         old_val = Decimal(old_balance) if old_balance else Decimal("0")
         new_val = Decimal(new_balance) if new_balance else Decimal("0")
@@ -3790,9 +3806,13 @@ async def check_wallet_transactions(application):
         if is_native and abs(diff) < Decimal("0.0001"):
             return
 
+        interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
+        interface_label = f"{interface_info['name']} - {interface_info['desc']}"
+
         if diff > 0:
             msg = (
                 f"*Deposit Detected!*\n\n"
+                f"*Interface:* {interface_label}\n"
                 f"*Token:* {symbol} [{network_short}]\n"
                 f"*Amount:* `+{diff}`\n"
                 f"*Balance:* `{new_balance} {symbol}`"
@@ -3801,6 +3821,7 @@ async def check_wallet_transactions(application):
         else:
             msg = (
                 f"*Withdrawal Detected!*\n\n"
+                f"*Interface:* {interface_label}\n"
                 f"*Token:* {symbol} [{network_short}]\n"
                 f"*Amount:* `{diff}`\n"
                 f"*Balance:* `{new_balance} {symbol}`"
@@ -3868,7 +3889,8 @@ async def check_wallet_transactions(application):
                     logger.info(f"Credited {diff} {ledger_asset} to internal balance")
 
                 await send_balance_notification(
-                    network, address, symbol, old_balance, current_balance
+                    network, address, symbol, old_balance, current_balance,
+                    wallet.get("interface_id", 1)
                 )
 
             wallet_balances_cache[cache_key] = current_balance
@@ -3915,7 +3937,8 @@ async def check_wallet_transactions(application):
 
                     await send_balance_notification(
                         network, address, token_symbol,
-                        old_token_balance, current_token_balance, token_key
+                        old_token_balance, current_token_balance,
+                        wallet.get("interface_id", 1), token_key
                     )
 
                 wallet_balances_cache[token_cache_key] = current_token_balance
