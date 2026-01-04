@@ -911,33 +911,16 @@ def get_friendly_error(error) -> str:
 def get_main_menu_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton(
-                "\U0001F4B0 My Wallets", callback_data="menu_wallets"
-            ),
-            InlineKeyboardButton(
-                "\U0001F4E5 Deposit", callback_data="menu_deposit"
-            )
+            InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
+            InlineKeyboardButton("Deposit", callback_data="menu_deposit")
         ],
         [
-            InlineKeyboardButton(
-                "\U0001F4CA Balances", callback_data="menu_balance"
-            ),
-            InlineKeyboardButton(
-                "\U0001F4B5 Tokens", callback_data="menu_tokens"
-            )
+            InlineKeyboardButton("Withdraw", callback_data="menu_withdraw"),
+            InlineKeyboardButton("Balances", callback_data="menu_balance")
         ],
         [
-            InlineKeyboardButton(
-                "\U0001F4E4 Withdraw", callback_data="menu_withdraw"
-            ),
-            InlineKeyboardButton(
-                "\u2795 Generate", callback_data="menu_generate"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "\u2753 Help", callback_data="menu_help"
-            )
+            InlineKeyboardButton("New Wallet", callback_data="menu_generate"),
+            InlineKeyboardButton("Help", callback_data="menu_help")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1057,7 +1040,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text(
-            "\U0001F6AB *You are not authorised to use the bot!*",
+            "*Access Denied*\nYou are not authorized to use this bot.",
             parse_mode="Markdown"
         )
         return
@@ -1087,19 +1070,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
 
-    divider = "\u2501" * 24
     welcome_text = (
-        f"\U0001F3E6 *VM CRYPTO BOT*\n"
-        f"{divider}\n\n"
-        f"\U0001F44B Welcome back, *{user_name}*!\n\n"
-        f"\U0001F4CA *Portfolio Overview*\n"
-        f"    \U0001F4B0 Wallets: *{wallet_count}*\n"
-        f"    \U0001F4B5 Est. Value: *{total_usdt_value:.2f} USDT*\n\n"
-        f"\U0001F6E1 *Security Status*\n"
-        f"    \U0001F7E2 Live Monitoring: Active\n"
-        f"    \U0001F512 Encryption: AES-256\n\n"
-        f"{divider}\n"
-        f"\U0001F447 *Choose an option below:*"
+        f"*VM Crypto Wallet*\n"
+        f"Welcome, {user_name}\n\n"
+        f"*Portfolio*\n"
+        f"Wallets: {wallet_count}\n"
+        f"Balance: ${total_usdt_value:.2f} USD\n\n"
+        f"*Status*\n"
+        f"Monitoring: Active (60s)\n"
+        f"Security: AES-256"
     )
 
     await update.message.reply_text(
@@ -1270,22 +1249,15 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     wallets = db.get_all_wallets(user_id)
 
-    divider = "\u2501" * 24
     if not wallets:
         text = (
-            f"\U0001F4B0 *My Wallets*\n"
-            f"{divider}\n\n"
-            f"\U0001F4ED *No wallets found*\n\n"
-            f"Create your first wallet to get started!\n"
-            f"Tap the button below \U0001F447"
+            "*Wallets*\n\n"
+            "No wallets found.\n"
+            "Create your first wallet to get started."
         )
         keyboard = [
-            [InlineKeyboardButton(
-                "\u2795 Create Wallet", callback_data="menu_generate"
-            )],
-            [InlineKeyboardButton(
-                "\U0001F3E0 Main Menu", callback_data="main_menu"
-            )]
+            [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
         await query.edit_message_text(
             text,
@@ -1294,33 +1266,22 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = (
-        f"\U0001F4B0 *My Wallets*\n"
-        f"{divider}\n\n"
-        f"\U0001F4CA Total: *{len(wallets)}* wallet(s)\n\n"
-    )
+    text = f"*Wallets* ({len(wallets)})\n\n"
     keyboard = []
 
     for wallet in wallets:
         network = wallet["network"]
         info = NETWORKS[network]
-        text += (
-            f"{info['icon']} *{info['name']}*\n"
-            f"    `{format_address(wallet['address'])}`\n\n"
-        )
+        text += f"{info['name']}\n`{format_address(wallet['address'])}`\n\n"
         keyboard.append([
             InlineKeyboardButton(
-                f"{info['icon']} {info['name']}",
+                info['name'],
                 callback_data=f"wallet_{network}"
             )
         ])
 
-    keyboard.append([
-        InlineKeyboardButton("\u2795 Add Wallet", callback_data="menu_generate")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
-    ])
+    keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await query.edit_message_text(
         text,
@@ -1416,10 +1377,9 @@ async def show_generate_menu(
     await query.answer()
 
     text = (
-        "\u2795 *Generate New Wallet*\n\n"
-        "Select a network to generate a new wallet:\n\n"
-        "\u26a0\ufe0f *Note:* If you already have a wallet for a network, "
-        "generating a new one will replace it."
+        "*New Wallet*\n"
+        "Select network:\n\n"
+        "Note: Creating a new wallet replaces existing one."
     )
 
     await query.edit_message_text(
@@ -1546,8 +1506,8 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     text = (
-        "\U0001F4E5 *Deposit Funds*\n\n"
-        "Select a network to view your deposit address:"
+        "*Deposit*\n"
+        "Select asset to receive:"
     )
 
     await query.edit_message_text(
@@ -1774,18 +1734,14 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not wallet:
         keyboard = [
             [InlineKeyboardButton(
-                f"\u2795 Generate {network_info['name']} Wallet",
+                f"Create {network_info['name']} Wallet",
                 callback_data=f"gen_{network}"
             )],
-            [InlineKeyboardButton(
-                "\U0001F519 Back",
-                callback_data="menu_deposit"
-            )]
+            [InlineKeyboardButton("Back", callback_data="menu_deposit")]
         ]
         await query.edit_message_text(
-            f"\u26a0\ufe0f *No Wallet Found*\n\n"
-            f"You need a {network_info['name']} wallet to receive "
-            f"{token_info['symbol']}.\nGenerate one first.",
+            f"*No Wallet*\n"
+            f"Create a {network_info['name']} wallet to receive {token_info['symbol']}.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1799,19 +1755,17 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
-        [InlineKeyboardButton("\U0001F310 View on Explorer", url=explorer_url)],
-        [InlineKeyboardButton("\U0001F519 Back", callback_data="menu_deposit")],
-        [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
+        [InlineKeyboardButton("View Explorer", url=explorer_url)],
+        [InlineKeyboardButton("Back", callback_data="menu_deposit")],
+        [InlineKeyboardButton("Home", callback_data="main_menu")]
     ]
 
     await query.edit_message_text(
-        f"{token_info['icon']} *Deposit {token}[{network_short}]*\n\n"
-        f"\U0001F310 *Network:* {network_info['name']}\n\n"
-        f"\U0001F4CD *Your Deposit Address:*\n"
+        f"*Deposit {token}[{network_short}]*\n\n"
+        f"Network: {network_info['name']}\n\n"
+        f"*Address:*\n"
         f"`{wallet['address']}`\n\n"
-        f"\u2139\ufe0f Tap the address to copy it.\n\n"
-        f"\u26a0\ufe0f *Important:* Only send {token_info['symbol']} "
-        f"({network_info['name']} network) to this address!",
+        f"Tap to copy. Only send {token_info['symbol']} on {network_info['name']}.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1841,14 +1795,14 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not wallet:
         keyboard = [
             [InlineKeyboardButton(
-                f"\u2795 Generate {network_info['name']} Wallet",
+                f"Create {network_info['name']} Wallet",
                 callback_data=f"gen_{network}"
             )],
-            [InlineKeyboardButton("\U0001F519 Back", callback_data="menu_withdraw")]
+            [InlineKeyboardButton("Back", callback_data="menu_withdraw")]
         ]
         await query.edit_message_text(
-            f"\u26a0\ufe0f *No {network_info['name']} Wallet*\n\n"
-            f"Generate a wallet first to withdraw.",
+            f"*No Wallet*\n"
+            f"Create a {network_info['name']} wallet first.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1868,14 +1822,14 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["withdraw_balance"] = balance_str
     context.user_data["withdraw_is_native"] = is_native
 
-    keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="cancel_withdraw")]]
+    keyboard = [[InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")]]
 
     await query.edit_message_text(
-        f"\U0001F4E4 *Withdraw {token}[{network_short}]*\n\n"
-        f"\U0001F310 *Network:* {network_info['name']}\n"
-        f"\U0001F4B0 *Available:* `{balance_str} {token}`\n\n"
-        f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
-        f"_Reply with the amount (e.g., 0.1)_",
+        f"*Withdraw {token}[{network_short}]*\n\n"
+        f"Network: {network_info['name']}\n"
+        f"Available: {balance_str} {token}\n\n"
+        f"Step 1/3: Enter amount\n"
+        f"Reply with the amount (e.g., 0.1)",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2001,43 +1955,23 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton(
-            "\U0001F4CA Check All Balances",
-            callback_data="balance_all"
-        )]
+        [InlineKeyboardButton("All Balances", callback_data="balance_all")]
     ]
 
+    row = []
     for key, info in NETWORKS.items():
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{info['icon']} {info['name']}",
-                callback_data=f"balance_{key}"
-            )
-        ])
+        row.append(InlineKeyboardButton(info['name'], callback_data=f"balance_{key}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton(
-        "\U0001F4B5 \u2501\u2501 TOKENS \u2501\u2501 \U0001F4B5",
-        callback_data="ignore"
-    )])
-
-    for token_key, token_info in TOKENS.items():
-        if not token_info.get("networks", {}).get(
-            list(token_info.get("networks", {}).keys())[0], {}
-        ).get("native", False):
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{token_info['icon']} {token_info['symbol']}",
-                    callback_data=f"token_balance_{token_key}"
-                )
-            ])
-
-    keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
-    ])
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await query.edit_message_text(
-        "\U0001F4CA *Check Balances*\n\n"
-        "Select a network or token:",
+        "*Balances*\n"
+        "Select network to check:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2201,8 +2135,8 @@ async def show_withdraw_menu(
     await query.answer()
 
     text = (
-        "\U0001F4E4 *Withdraw Funds*\n\n"
-        "Select a network to withdraw from:"
+        "*Withdraw*\n"
+        "Select asset to send:"
     )
 
     await query.edit_message_text(
@@ -2598,33 +2532,23 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    divider = "\u2501" * 24
     help_text = (
-        f"\U0001F4D6 *Help & Guide*\n"
-        f"{divider}\n\n"
-        f"\U0001F4B0 *My Wallets*\n"
-        f"    View and manage your wallets\n\n"
-        f"\U0001F4E5 *Deposit*\n"
-        f"    Get deposit addresses\n\n"
-        f"\U0001F4CA *Balances*\n"
-        f"    Check wallet balances\n\n"
-        f"\U0001F4E4 *Withdraw*\n"
-        f"    Send funds externally\n\n"
-        f"\u2795 *Generate*\n"
-        f"    Create new wallets\n\n"
-        f"{divider}\n"
-        f"\U0001F310 *Networks*\n"
-    )
-
-    for key, info in NETWORKS.items():
-        help_text += f"    {info['icon']} {info['name']} ({info['symbol']})\n"
-
-    help_text += (
-        f"\n{divider}\n"
-        f"\U0001F512 *Security*\n"
-        f"    \U0001F7E2 AES-256 Encryption\n"
-        f"    \U0001F7E2 Secure Key Storage\n"
-        f"    \U0001F7E2 Live Monitoring"
+        "*Help*\n\n"
+        "*Commands*\n"
+        "Wallets - View and manage wallets\n"
+        "Deposit - Get deposit addresses\n"
+        "Withdraw - Send funds externally\n"
+        "Balances - Check wallet balances\n"
+        "New Wallet - Create new wallets\n\n"
+        "*Quick Command*\n"
+        "/send TOKEN NETWORK - Get deposit address\n"
+        "Example: /send USDT BSC\n\n"
+        "*Supported Networks*\n"
+        "Ethereum, BNB Chain, Polygon, Solana, Tron, Litecoin\n\n"
+        "*Supported Tokens*\n"
+        "USDT, USDC, ETH, BNB, MATIC, SOL, TRX, LTC\n\n"
+        "*Security*\n"
+        "AES-256 encryption, auto-monitoring (60s)"
     )
 
     await query.edit_message_text(
