@@ -1959,6 +1959,13 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    is_native = token_info.get("native", False)
+    if is_native:
+        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    else:
+        balance_info = await BalanceChecker.get_token_balance(token, network, wallet["address"])
+    balance_str = balance_info.get("balance", "0")
+
     if network == "SOLANA":
         explorer_url = f"{network_info['explorer']}/account/{wallet['address']}"
     elif network == "TRON":
@@ -1967,6 +1974,10 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
+        [InlineKeyboardButton(
+            "Refresh Balance",
+            callback_data=f"refresh_dep_{token}_{network}"
+        )],
         [InlineKeyboardButton("View Explorer", url=explorer_url)],
         [InlineKeyboardButton("Back", callback_data="menu_deposit")],
         [InlineKeyboardButton("Home", callback_data="main_menu")]
@@ -1974,7 +1985,68 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         f"*Deposit {token}[{network_short}]*\n\n"
-        f"Network: {network_info['name']}\n\n"
+        f"Network: {network_info['name']}\n"
+        f"Balance: {balance_str} {token}\n\n"
+        f"*Address:*\n"
+        f"`{wallet['address']}`\n\n"
+        f"Tap to copy. Only send {token_info['symbol']} on {network_info['name']}.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer("Refreshing balance...")
+
+    parts = query.data.split("_")
+    token = parts[2]
+    network = parts[3]
+
+    token_info = TOKENS.get(token)
+    network_info = NETWORKS.get(network)
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    network_short = network
+    if network == "TRON":
+        network_short = "TRX"
+    elif network == "SOLANA":
+        network_short = "SOL"
+
+    if not wallet:
+        return
+
+    is_native = token_info.get("native", False)
+    if is_native:
+        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    else:
+        balance_info = await BalanceChecker.get_token_balance(token, network, wallet["address"])
+    balance_str = balance_info.get("balance", "0")
+
+    if network == "SOLANA":
+        explorer_url = f"{network_info['explorer']}/account/{wallet['address']}"
+    elif network == "TRON":
+        explorer_url = f"{network_info['explorer']}/#/address/{wallet['address']}"
+    else:
+        explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "Refresh Balance",
+            callback_data=f"refresh_dep_{token}_{network}"
+        )],
+        [InlineKeyboardButton("View Explorer", url=explorer_url)],
+        [InlineKeyboardButton("Back", callback_data="menu_deposit")],
+        [InlineKeyboardButton("Home", callback_data="main_menu")]
+    ]
+
+    await query.edit_message_text(
+        f"*Deposit {token}[{network_short}]*\n\n"
+        f"Network: {network_info['name']}\n"
+        f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n"
         f"`{wallet['address']}`\n\n"
         f"Tap to copy. Only send {token_info['symbol']} on {network_info['name']}.",
@@ -3476,6 +3548,12 @@ def main():
         CallbackQueryHandler(
             show_combo_deposit,
             pattern=r"^deposit_combo_[A-Z]+_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            refresh_deposit_balance,
+            pattern=r"^refresh_dep_[A-Z]+_[A-Z]+$"
         )
     )
     application.add_handler(
