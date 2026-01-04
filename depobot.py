@@ -2568,18 +2568,24 @@ SWAP_PAIRS = {
         {"from": "USDC", "to": "USDT"},
         {"from": "ETH", "to": "USDT"},
         {"from": "ETH", "to": "USDC"},
+        {"from": "USDT", "to": "ETH"},
+        {"from": "USDC", "to": "ETH"},
     ],
     "BSC": [
         {"from": "USDT", "to": "USDC"},
         {"from": "USDC", "to": "USDT"},
         {"from": "BNB", "to": "USDT"},
         {"from": "BNB", "to": "USDC"},
+        {"from": "USDT", "to": "BNB"},
+        {"from": "USDC", "to": "BNB"},
     ],
     "POLYGON": [
         {"from": "USDT", "to": "USDC"},
         {"from": "USDC", "to": "USDT"},
         {"from": "MATIC", "to": "USDT"},
         {"from": "MATIC", "to": "USDC"},
+        {"from": "USDT", "to": "MATIC"},
+        {"from": "USDC", "to": "MATIC"},
     ],
 }
 
