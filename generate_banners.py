@@ -140,14 +140,14 @@ def create_banner(name, config, width=800, height=400):
     if tagline:
         try:
             tagline_font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", 18
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", 16
             )
         except OSError:
             tagline_font = subtitle_font
         tagline_bbox = draw.textbbox((0, 0), tagline, font=tagline_font)
         tagline_width = tagline_bbox[2] - tagline_bbox[0]
         tagline_x = (width - tagline_width) // 2
-        tagline_y = subtitle_y + 40
+        tagline_y = height - 70
         draw.text((tagline_x, tagline_y), tagline, font=tagline_font, fill=ACCENT_LIGHT)
 
     draw_rounded_rect(draw, (width // 2 - 60, title_y - 80, width // 2 + 60, title_y - 20),

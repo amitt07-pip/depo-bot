@@ -1666,29 +1666,22 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallets = db.get_all_wallets(user_id)
 
     if not wallets:
-        text = (
-            "*Wallets*\n\n"
-            "No wallets found.\n"
-            "Create your first wallet to get started."
-        )
+        text = "*Wallets*\n\nNo wallets found.\nCreate your first wallet."
         keyboard = [
             [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        await edit_message_with_banner(
+            query, "wallets", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
-    text = f"*Wallets* ({len(wallets)})\n\n"
+    text = f"*Wallets* ({len(wallets)})"
     keyboard = []
 
     for wallet in wallets:
         network = wallet["network"]
         info = NETWORKS[network]
-        text += f"{info['name']}\n`{format_address(wallet['address'])}`\n\n"
         keyboard.append([
             InlineKeyboardButton(
                 info['name'],
@@ -1699,10 +1692,8 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await edit_message_with_banner(
+        query, "wallets", text, InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -3011,30 +3002,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    help_text = (
-        "*Help*\n\n"
-        "*Commands*\n"
-        "Wallets - View and manage wallets\n"
-        "Deposit - Get deposit addresses\n"
-        "Withdraw - Send funds externally\n"
-        "Convert - Swap tokens (same network)\n"
-        "Balances - Check wallet balances\n"
-        "New Wallet - Create new wallets\n\n"
-        "*Quick Command*\n"
-        "/send TOKEN NETWORK - Get deposit address\n"
-        "Example: /send USDT BSC\n\n"
-        "*Supported Networks*\n"
-        "Ethereum, BNB Chain, Polygon, Solana, Tron, Litecoin\n\n"
-        "*Supported Tokens*\n"
-        "USDT, USDC, ETH, BNB, MATIC, SOL, TRX, LTC\n\n"
-        "*Security*\n"
-        "AES-256 encryption, auto-monitoring (60s)"
-    )
+    help_text = "*Help*\n\n/send TOKEN NETWORK\nExample: /send USDT BSC"
 
-    await query.edit_message_text(
-        help_text,
-        parse_mode="Markdown",
-        reply_markup=get_back_button("main_menu")
+    await edit_message_with_banner(
+        query, "help", help_text, get_back_button("main_menu")
     )
 
 
