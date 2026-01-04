@@ -63,8 +63,11 @@ async def edit_message_with_banner(
                     reply_markup=reply_markup
                 )
             except Exception:
-                await query.message.delete()
                 chat_id = query.message.chat_id
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
                 with open(banner_path, "rb") as photo:
                     await query.get_bot().send_photo(
                         chat_id=chat_id,
@@ -81,9 +84,13 @@ async def edit_message_with_banner(
                 reply_markup=reply_markup
             )
         except Exception:
-            await query.message.delete()
+            chat_id = query.message.chat_id
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
             await query.get_bot().send_message(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 text=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
