@@ -4,6 +4,7 @@ import sqlite3
 import logging
 import hashlib
 import base64
+import aiohttp
 from typing import Optional
 from decimal import Decimal
 
@@ -225,6 +226,60 @@ WITHDRAW_AMOUNT, WITHDRAW_ADDRESS, WITHDRAW_CONFIRM = range(3)
 
 pending_withdrawals = {}
 
+COINGECKO_IDS = {
+    "ETH": "ethereum",
+    "BNB": "binancecoin",
+    "MATIC": "matic-network",
+    "SOL": "solana",
+    "TRX": "tron",
+    "LTC": "litecoin",
+    "USDT": "tether",
+    "USDC": "usd-coin",
+}
+
+
+class PriceFetcher:
+    @staticmethod
+    async def get_price(asset: str) -> Decimal:
+        if asset in ["USDT", "USDC"]:
+            return Decimal("1.0")
+        cg_id = COINGECKO_IDS.get(asset)
+        if not cg_id:
+            return Decimal("0")
+        try:
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        price = data.get(cg_id, {}).get("usd", 0)
+                        return Decimal(str(price))
+        except Exception:
+            pass
+        return Decimal("0")
+
+    @staticmethod
+    async def get_conversion_rate(from_asset: str, to_asset: str) -> Decimal:
+        if from_asset == to_asset:
+            return Decimal("1.0")
+        if from_asset in ["USDT", "USDC"] and to_asset in ["USDT", "USDC"]:
+            return Decimal("1.0")
+        from_price = await PriceFetcher.get_price(from_asset)
+        to_price = await PriceFetcher.get_price(to_asset)
+        if to_price == 0:
+            return Decimal("0")
+        return from_price / to_price
+
+    @staticmethod
+    async def calculate_conversion(from_asset: str, to_asset: str,
+                                   amount: Decimal) -> tuple:
+        rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
+        if rate == 0:
+            return Decimal("0"), "0"
+        to_amount = amount * rate
+        to_amount = to_amount.quantize(Decimal("0.000001"))
+        return to_amount, str(rate)
+
 
 class WalletDatabase:
     def __init__(self, db_path: str = None):
@@ -258,6 +313,41 @@ class WalletDatabase:
                 destination TEXT,
                 token_address TEXT,
                 status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS internal_balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                balance TEXT NOT NULL DEFAULT '0',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, asset)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset TEXT NOT NULL,
+                tx_type TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                network TEXT,
+                tx_hash TEXT,
+                from_asset TEXT,
+                to_asset TEXT,
+                rate TEXT,
+                status TEXT DEFAULT 'completed',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS master_wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL,
+                encrypted_private_key TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -329,6 +419,125 @@ class WalletDatabase:
         )
         conn.commit()
         conn.close()
+
+    def get_internal_balance(self, user_id: int, asset: str) -> Decimal:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT balance FROM internal_balances WHERE user_id = ? AND asset = ?",
+            (user_id, asset)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return Decimal(row[0])
+        return Decimal("0")
+
+    def get_all_internal_balances(self, user_id: int) -> dict:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT asset, balance FROM internal_balances WHERE user_id = ?",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return {row[0]: Decimal(row[1]) for row in rows}
+
+    def update_internal_balance(self, user_id: int, asset: str, new_balance: Decimal):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO internal_balances (user_id, asset, balance, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (user_id, asset, str(new_balance))
+        )
+        conn.commit()
+        conn.close()
+
+    def credit_balance(self, user_id: int, asset: str, amount: Decimal,
+                       tx_type: str, network: str = None, tx_hash: str = None):
+        current = self.get_internal_balance(user_id, asset)
+        new_balance = current + amount
+        self.update_internal_balance(user_id, asset, new_balance)
+        self.log_ledger(user_id, asset, tx_type, str(amount), network, tx_hash)
+        return new_balance
+
+    def debit_balance(self, user_id: int, asset: str, amount: Decimal,
+                      tx_type: str, network: str = None, tx_hash: str = None) -> bool:
+        current = self.get_internal_balance(user_id, asset)
+        if current < amount:
+            return False
+        new_balance = current - amount
+        self.update_internal_balance(user_id, asset, new_balance)
+        self.log_ledger(user_id, asset, tx_type, str(-amount), network, tx_hash)
+        return True
+
+    def log_ledger(self, user_id: int, asset: str, tx_type: str, amount: str,
+                   network: str = None, tx_hash: str = None,
+                   from_asset: str = None, to_asset: str = None, rate: str = None):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ledger (user_id, asset, tx_type, amount, network, tx_hash, "
+            "from_asset, to_asset, rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, asset, tx_type, amount, network, tx_hash, from_asset, to_asset, rate)
+        )
+        conn.commit()
+        conn.close()
+
+    def convert_balance(self, user_id: int, from_asset: str, to_asset: str,
+                        from_amount: Decimal, to_amount: Decimal, rate: str) -> bool:
+        current_from = self.get_internal_balance(user_id, from_asset)
+        if current_from < from_amount:
+            return False
+        new_from = current_from - from_amount
+        self.update_internal_balance(user_id, from_asset, new_from)
+        current_to = self.get_internal_balance(user_id, to_asset)
+        new_to = current_to + to_amount
+        self.update_internal_balance(user_id, to_asset, new_to)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO ledger (user_id, asset, tx_type, amount, from_asset, to_asset, rate) "
+            "VALUES (?, ?, 'convert', ?, ?, ?, ?)",
+            (user_id, to_asset, str(to_amount), from_asset, to_asset, rate)
+        )
+        conn.commit()
+        conn.close()
+        return True
+
+    def get_master_wallet(self, network: str) -> Optional[dict]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT address, encrypted_private_key FROM master_wallets WHERE network = ?",
+            (network,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {"address": row[0], "encrypted_private_key": row[1]}
+        return None
+
+    def save_master_wallet(self, network: str, address: str, encrypted_private_key: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO master_wallets (network, address, encrypted_private_key) "
+            "VALUES (?, ?, ?)",
+            (network, address, encrypted_private_key)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_all_master_wallets(self) -> list:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT network, address FROM master_wallets")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"network": row[0], "address": row[1]} for row in rows]
 
 
 class CryptoUtils:
@@ -2562,32 +2771,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-SWAP_PAIRS = {
-    "ETH": [
-        {"from": "USDT", "to": "USDC"},
-        {"from": "USDC", "to": "USDT"},
-        {"from": "ETH", "to": "USDT"},
-        {"from": "ETH", "to": "USDC"},
-        {"from": "USDT", "to": "ETH"},
-        {"from": "USDC", "to": "ETH"},
-    ],
-    "BSC": [
-        {"from": "USDT", "to": "USDC"},
-        {"from": "USDC", "to": "USDT"},
-        {"from": "BNB", "to": "USDT"},
-        {"from": "BNB", "to": "USDC"},
-        {"from": "USDT", "to": "BNB"},
-        {"from": "USDC", "to": "BNB"},
-    ],
-    "POLYGON": [
-        {"from": "USDT", "to": "USDC"},
-        {"from": "USDC", "to": "USDT"},
-        {"from": "MATIC", "to": "USDT"},
-        {"from": "MATIC", "to": "USDC"},
-        {"from": "USDT", "to": "MATIC"},
-        {"from": "USDC", "to": "MATIC"},
-    ],
-}
+CONVERTIBLE_ASSETS = ["ETH", "BNB", "MATIC", "SOL", "TRX", "LTC", "USDT", "USDC"]
 
 CONVERT_AMOUNT = 10
 
@@ -2599,74 +2783,82 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user_id = query.from_user.id
-    wallets = db.get_all_wallets(user_id)
+    balances = db.get_all_internal_balances(user_id)
 
-    evm_wallets = []
-    for w in (wallets or []):
-        if w["network"] in ["ETH", "BSC", "POLYGON"]:
-            evm_wallets.append(w["network"])
+    assets_with_balance = [a for a in CONVERTIBLE_ASSETS if balances.get(a, Decimal("0")) > 0]
 
-    if not evm_wallets:
+    if not assets_with_balance:
         keyboard = [
-            [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
+            [InlineKeyboardButton("Deposit", callback_data="menu_deposit")],
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
         await query.edit_message_text(
             "*Convert*\n\n"
-            "No EVM wallets found.\n"
-            "Create an Ethereum, BSC, or Polygon wallet first.",
+            "No assets to convert.\n"
+            "Deposit funds first to use the convert feature.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
     keyboard = []
-    for network in ["ETH", "BSC", "POLYGON"]:
-        if network in evm_wallets:
-            net_info = NETWORKS[network]
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{net_info['name']}",
-                    callback_data=f"convert_net_{network}"
-                )
-            ])
+    for asset in assets_with_balance:
+        bal = balances.get(asset, Decimal("0"))
+        token_info = TOKENS.get(asset, {})
+        icon = token_info.get("icon", "")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{icon} {asset} ({bal:.6f})",
+                callback_data=f"convert_from_{asset}"
+            )
+        ])
 
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await query.edit_message_text(
-        "*Convert*\n"
-        "Select network for swap:\n\n"
-        "Supported: ETH, BSC, Polygon\n"
-        "Same-network swaps only.",
+        "*Convert*\n\n"
+        "Select asset to convert from:\n"
+        "(Internal ledger conversion at market rate)",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-async def show_convert_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_convert_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
     query = update.callback_query
     await query.answer()
 
-    network = query.data.split("_")[2]
-    context.user_data["convert_network"] = network
+    from_asset = query.data.split("_")[2]
+    context.user_data["convert_from"] = from_asset
 
-    pairs = SWAP_PAIRS.get(network, [])
-    net_info = NETWORKS[network]
+    user_id = query.from_user.id
+    balance = db.get_internal_balance(user_id, from_asset)
+
+    to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
 
     keyboard = []
-    for pair in pairs:
-        btn_text = f"{pair['from']} -> {pair['to']}"
-        callback = f"convert_pair_{pair['from']}_{pair['to']}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback)])
+    for asset in to_assets:
+        token_info = TOKENS.get(asset, {})
+        icon = token_info.get("icon", "")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{icon} {asset}",
+                callback_data=f"convert_to_{asset}"
+            )
+        ])
 
     keyboard.append([InlineKeyboardButton("Back", callback_data="menu_convert")])
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
+    from_info = TOKENS.get(from_asset, {})
+    from_icon = from_info.get("icon", "")
+
     await query.edit_message_text(
-        f"*Convert on {net_info['name']}*\n"
-        "Select swap pair:",
+        f"*Convert {from_icon} {from_asset}*\n\n"
+        f"Available: {balance:.6f} {from_asset}\n\n"
+        f"Select asset to convert to:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2678,45 +2870,28 @@ async def show_convert_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
 
-    parts = query.data.split("_")
-    from_token = parts[2]
-    to_token = parts[3]
+    to_asset = query.data.split("_")[2]
+    context.user_data["convert_to"] = to_asset
 
-    network = context.user_data.get("convert_network", "BSC")
+    from_asset = context.user_data.get("convert_from")
     user_id = query.from_user.id
-    wallet = db.get_wallet(user_id, network)
+    balance = db.get_internal_balance(user_id, from_asset)
 
-    if not wallet:
-        await query.edit_message_text(
-            "*No Wallet*\nCreate a wallet first.",
-            parse_mode="Markdown",
-            reply_markup=get_back_button("menu_convert")
-        )
-        return ConversationHandler.END
+    context.user_data["convert_balance"] = str(balance)
 
-    from_token_info = TOKENS.get(from_token, {})
-    is_native = from_token_info.get("native", False)
+    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
 
-    if is_native:
-        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-    else:
-        balance_info = await BalanceChecker.get_token_balance(
-            from_token, network, wallet["address"]
-        )
-    balance_str = balance_info.get("balance", "0")
+    from_info = TOKENS.get(from_asset, {})
+    to_info = TOKENS.get(to_asset, {})
+    from_icon = from_info.get("icon", "")
+    to_icon = to_info.get("icon", "")
 
-    context.user_data["convert_from"] = from_token
-    context.user_data["convert_to"] = to_token
-    context.user_data["convert_balance"] = balance_str
-    context.user_data["convert_is_native"] = is_native
-
-    net_info = NETWORKS[network]
     keyboard = [[InlineKeyboardButton("Cancel", callback_data="cancel_convert")]]
 
     await query.edit_message_text(
-        f"*Convert {from_token} to {to_token}*\n\n"
-        f"Network: {net_info['name']}\n"
-        f"Available: {balance_str} {from_token}\n\n"
+        f"*Convert {from_icon} {from_asset} to {to_icon} {to_asset}*\n\n"
+        f"Available: {balance:.6f} {from_asset}\n"
+        f"Rate: 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
         f"Enter amount to convert:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2758,10 +2933,17 @@ async def receive_convert_amount(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data["convert_amount"] = str(amount)
 
-    from_token = context.user_data.get("convert_from")
-    to_token = context.user_data.get("convert_to")
-    network = context.user_data.get("convert_network")
-    net_info = NETWORKS[network]
+    from_asset = context.user_data.get("convert_from")
+    to_asset = context.user_data.get("convert_to")
+
+    to_amount, rate = await PriceFetcher.calculate_conversion(from_asset, to_asset, amount)
+    context.user_data["convert_to_amount"] = str(to_amount)
+    context.user_data["convert_rate"] = rate
+
+    from_info = TOKENS.get(from_asset, {})
+    to_info = TOKENS.get(to_asset, {})
+    from_icon = from_info.get("icon", "")
+    to_icon = to_info.get("icon", "")
 
     keyboard = [
         [
@@ -2772,11 +2954,10 @@ async def receive_convert_amount(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(
         f"*Confirm Conversion*\n\n"
-        f"From: {amount} {from_token}\n"
-        f"To: {to_token}\n"
-        f"Network: {net_info['name']}\n\n"
-        f"Note: Actual amount received depends on market rate.\n"
-        f"Gas fees will be deducted in {net_info['symbol']}.",
+        f"From: {amount} {from_icon} {from_asset}\n"
+        f"To: {to_amount} {to_icon} {to_asset}\n"
+        f"Rate: 1 {from_asset} = {rate} {to_asset}\n\n"
+        f"This is an internal ledger conversion.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2790,27 +2971,54 @@ async def execute_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    from_token = context.user_data.get("convert_from")
-    to_token = context.user_data.get("convert_to")
-    network = context.user_data.get("convert_network")
-    amount = context.user_data.get("convert_amount")
+    user_id = query.from_user.id
+    from_asset = context.user_data.get("convert_from")
+    to_asset = context.user_data.get("convert_to")
+    amount_str = context.user_data.get("convert_amount")
+    to_amount_str = context.user_data.get("convert_to_amount")
+    rate = context.user_data.get("convert_rate")
 
-    net_info = NETWORKS[network]
+    from_amount = Decimal(amount_str)
+    to_amount = Decimal(to_amount_str)
+
+    success = db.convert_balance(user_id, from_asset, to_asset, from_amount, to_amount, rate)
 
     keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
 
-    await query.edit_message_text(
-        f"*Conversion Pending*\n\n"
-        f"Converting {amount} {from_token} to {to_token}\n"
-        f"Network: {net_info['name']}\n\n"
-        f"DEX integration coming soon.\n"
-        f"For now, use external DEX:\n"
-        f"- ETH: Uniswap\n"
-        f"- BSC: PancakeSwap\n"
-        f"- Polygon: QuickSwap",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if success:
+        new_from_bal = db.get_internal_balance(user_id, from_asset)
+        new_to_bal = db.get_internal_balance(user_id, to_asset)
+
+        from_info = TOKENS.get(from_asset, {})
+        to_info = TOKENS.get(to_asset, {})
+        from_icon = from_info.get("icon", "")
+        to_icon = to_info.get("icon", "")
+
+        await query.edit_message_text(
+            f"*Conversion Complete*\n\n"
+            f"Converted: {amount_str} {from_icon} {from_asset}\n"
+            f"Received: {to_amount_str} {to_icon} {to_asset}\n"
+            f"Rate: 1 {from_asset} = {rate} {to_asset}\n\n"
+            f"New Balances:\n"
+            f"{from_icon} {from_asset}: {new_from_bal:.6f}\n"
+            f"{to_icon} {to_asset}: {new_to_bal:.6f}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.edit_message_text(
+            "*Conversion Failed*\n\n"
+            "Insufficient balance for conversion.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    context.user_data.pop("convert_from", None)
+    context.user_data.pop("convert_to", None)
+    context.user_data.pop("convert_amount", None)
+    context.user_data.pop("convert_to_amount", None)
+    context.user_data.pop("convert_rate", None)
+    context.user_data.pop("convert_balance", None)
 
 
 async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2819,10 +3027,11 @@ async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    context.user_data.pop("convert_network", None)
     context.user_data.pop("convert_from", None)
     context.user_data.pop("convert_to", None)
     context.user_data.pop("convert_amount", None)
+    context.user_data.pop("convert_to_amount", None)
+    context.user_data.pop("convert_rate", None)
     context.user_data.pop("convert_balance", None)
 
     await query.edit_message_text(
@@ -3300,10 +3509,10 @@ def main():
         CallbackQueryHandler(show_convert_menu, pattern="^menu_convert$")
     )
     application.add_handler(
-        CallbackQueryHandler(show_convert_pairs, pattern=r"^convert_net_[A-Z]+$")
+        CallbackQueryHandler(show_convert_to, pattern=r"^convert_from_[A-Z]+$")
     )
     application.add_handler(
-        CallbackQueryHandler(show_convert_amount, pattern=r"^convert_pair_[A-Z]+_[A-Z]+$")
+        CallbackQueryHandler(show_convert_amount, pattern=r"^convert_to_[A-Z]+$")
     )
     application.add_handler(
         CallbackQueryHandler(execute_convert, pattern="^confirm_convert$")
