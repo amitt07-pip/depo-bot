@@ -1403,6 +1403,30 @@ def get_network_keyboard(action: str, include_tokens: bool = True):
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_generate_network_keyboard():
+    """Keyboard for generate wallet - shows only networks (not token/network combos)."""
+    keyboard = []
+    row = []
+
+    for network_key, network_info in NETWORKS.items():
+        btn_text = f"{network_info['icon']} {network_info['name']}"
+        callback = f"gen_{network_key}"
+
+        btn = InlineKeyboardButton(btn_text, callback_data=callback)
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_back_button(callback_data: str = "main_menu"):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("\U0001F519 Back", callback_data=callback_data)]
@@ -1444,31 +1468,23 @@ def format_address(address: str) -> str:
     return address
 
 
-async def build_main_menu_text(user_id: int, interface_id: int) -> str:
-    """Build main menu text with wallet count and balance for the given interface."""
+def build_main_menu_text(user_id: int, interface_id: int) -> str:
+    """Build main menu text with wallet count and balance for the given interface.
+    
+    Uses internal ledger balance for fast response (no RPC calls).
+    """
     wallets = db.get_all_wallets(user_id, interface_id)
     wallet_count = len(wallets) if wallets else 0
 
     total_usdt_value = Decimal("0")
-    for wallet in (wallets or []):
-        network = wallet["network"]
-        address = wallet["address"]
-        for token_key, token_info in TOKENS.items():
-            if network in token_info.get("networks", {}):
-                net_info = token_info["networks"][network]
-                if net_info.get("native"):
-                    continue
-                if token_key in ["USDT", "USDC"]:
-                    try:
-                        result = await BalanceChecker.get_token_balance(
-                            token_key, network, address
-                        )
-                        if result and "balance" in result and not result.get("error"):
-                            bal_str = result["balance"]
-                            if bal_str and float(bal_str) > 0:
-                                total_usdt_value += Decimal(bal_str)
-                    except Exception:
-                        pass
+    balances = db.get_all_internal_balances(user_id)
+    for bal in (balances or []):
+        asset = bal.get("asset", "")
+        if asset in ["USDT", "USDC"]:
+            try:
+                total_usdt_value += Decimal(str(bal.get("balance", 0)))
+            except Exception:
+                pass
 
     interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
     
@@ -1545,7 +1561,7 @@ async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interface_info = INTERFACE_INFO.get(selected_interface, {"name": f"Interface {selected_interface}", "desc": ""})
     await query.answer(f"{interface_info['desc']}")
 
-    menu_text = await build_main_menu_text(user_id, selected_interface)
+    menu_text = build_main_menu_text(user_id, selected_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(selected_interface)
@@ -2083,7 +2099,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     current_interface = db.get_current_interface(user_id)
-    menu_text = await build_main_menu_text(user_id, current_interface)
+    menu_text = build_main_menu_text(user_id, current_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(current_interface)
@@ -2102,7 +2118,7 @@ async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interface_info = INTERFACE_INFO.get(new_interface, {"name": f"Interface {new_interface}", "desc": ""})
     await query.answer(f"{interface_info['desc']}")
 
-    menu_text = await build_main_menu_text(user_id, new_interface)
+    menu_text = build_main_menu_text(user_id, new_interface)
 
     await edit_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard(new_interface)
@@ -2236,7 +2252,7 @@ async def show_generate_menu(
     text = "*Generate Wallet*\nSelect network:"
 
     await edit_message_with_banner(
-        query, "generate", text, get_network_keyboard("gen", include_tokens=False)
+        query, "generate", text, get_generate_network_keyboard()
     )
 
 
