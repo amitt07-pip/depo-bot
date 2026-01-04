@@ -1237,12 +1237,19 @@ db = WalletDatabase()
 
 
 def is_authorized(user_id: int) -> bool:
-    return user_id in USER_ACCESS
+    """All users are authorized to use the bot."""
+    return True
 
 
 def get_user_interfaces(user_id: int) -> list:
-    """Get list of interfaces a user has access to."""
-    return USER_ACCESS.get(user_id, [])
+    """Get list of interfaces a user has access to.
+    
+    Admin users in USER_ACCESS get their configured interfaces.
+    All other users get Interface 1 by default.
+    """
+    if user_id in USER_ACCESS:
+        return USER_ACCESS.get(user_id, [1])
+    return [1]
 
 
 def get_effective_interface(user_id: int) -> int:
@@ -1501,6 +1508,7 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
     """Build main menu text with wallet count and balance for the given interface.
     
     Uses internal ledger balance for fast response (no RPC calls).
+    Shows interface info only for admin users with multiple interfaces.
     """
     wallets = db.get_all_wallets(user_id, interface_id)
     wallet_count = len(wallets) if wallets else 0
@@ -1514,16 +1522,25 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
             except Exception:
                 pass
 
-    interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
+    user_interfaces = get_user_interfaces(user_id)
     
-    menu_text = (
-        f"*VM CRYPTO BOT*\n\n"
-        f"\U0001F4BC *{interface_info['name']}*\n"
-        f"_{interface_info['desc']}_\n\n"
-        f"Wallets: {wallet_count}\n"
-        f"Balance: ${total_usdt_value:.2f} USD\n\n"
-        f"Choose an option below:"
-    )
+    if len(user_interfaces) > 1:
+        interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
+        menu_text = (
+            f"*VM CRYPTO BOT*\n\n"
+            f"\U0001F4BC *{interface_info['name']}*\n"
+            f"_{interface_info['desc']}_\n\n"
+            f"Wallets: {wallet_count}\n"
+            f"Balance: ${total_usdt_value:.2f} USD\n\n"
+            f"Choose an option below:"
+        )
+    else:
+        menu_text = (
+            f"*VM CRYPTO BOT*\n\n"
+            f"Wallets: {wallet_count}\n"
+            f"Balance: ${total_usdt_value:.2f} USD\n\n"
+            f"Choose an option below:"
+        )
     return menu_text
 
 
