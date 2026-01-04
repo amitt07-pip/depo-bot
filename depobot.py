@@ -1448,6 +1448,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_name = update.effective_user.first_name or "User"
     current_interface = db.get_current_interface(user_id)
+
+    welcome_text = (
+        f"Welcome, *{user_name}*\n\n"
+        f"*VM CRYPTO BOT*\n\n"
+        f"Select an interface to continue:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"Interface 1" + (" (Active)" if current_interface == 1 else ""),
+                callback_data="select_interface_1"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"Interface 2" + (" (Active)" if current_interface == 2 else ""),
+                callback_data="select_interface_2"
+            )
+        ]
+    ]
+
+    banner_path = get_banner_path("welcome")
+    if os.path.exists(banner_path):
+        with open(banner_path, "rb") as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=welcome_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    else:
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+
+    user_id = query.from_user.id
+    selected_interface = int(query.data.split("_")[-1])
+    db.set_current_interface(user_id, selected_interface)
+
+    await query.answer(f"Interface {selected_interface} selected")
+
     wallets = db.get_all_wallets(user_id)
     wallet_count = len(wallets) if wallets else 0
 
@@ -1472,31 +1522,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
 
-    welcome_text = (
-        f"Welcome, *{user_name}*\n\n"
-        f"\U0001F4BC *Portfolio* (Interface {current_interface})\n"
+    menu_text = (
+        f"*VM CRYPTO BOT*\n\n"
+        f"\U0001F4BC *Interface {selected_interface}*\n"
         f"Wallets: {wallet_count}\n"
         f"Balance: ${total_usdt_value:.2f} USD\n\n"
-        f"\U0001F6E1 *Status*\n"
-        f"Monitoring: Active\n"
-        f"Security: AES-256"
+        f"Choose an option below:"
     )
 
-    banner_path = get_banner_path("welcome")
-    if os.path.exists(banner_path):
-        with open(banner_path, "rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption=welcome_text,
-                parse_mode="Markdown",
-                reply_markup=get_main_menu_keyboard(current_interface)
-            )
-    else:
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode="Markdown",
-            reply_markup=get_main_menu_keyboard(current_interface)
-        )
+    await edit_message_with_banner(
+        query, "welcome", menu_text, get_main_menu_keyboard(selected_interface)
+    )
 
 
 async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3975,6 +4011,9 @@ def main():
 
     application.add_handler(
         CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(select_interface, pattern=r"^select_interface_\d+$")
     )
     application.add_handler(
         CallbackQueryHandler(switch_interface, pattern=r"^switch_interface_\d+$")
