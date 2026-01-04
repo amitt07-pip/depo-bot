@@ -1593,6 +1593,239 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def send_photo_with_banner(message, banner_name, text, reply_markup=None):
+    banner_path = get_banner_path(banner_name)
+    if os.path.exists(banner_path):
+        with open(banner_path, "rb") as photo:
+            await message.reply_photo(
+                photo=photo,
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    else:
+        await message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("All Balances", callback_data="balance_all")]
+    ]
+
+    row = []
+    for key, info in NETWORKS.items():
+        row.append(InlineKeyboardButton(info['name'], callback_data=f"balance_{key}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    text = "*Balances*\nSelect network to check:"
+
+    await send_photo_with_banner(
+        update.message, "balance", text, InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    wallets = db.get_all_wallets(user_id)
+
+    if not wallets:
+        text = "*Wallets*\n\nNo wallets found.\nCreate your first wallet."
+        keyboard = [
+            [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
+        ]
+        await send_photo_with_banner(
+            update.message, "wallets", text, InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    text = f"*Wallets* ({len(wallets)})"
+    keyboard = []
+
+    for wallet in wallets:
+        network = wallet["network"]
+        info = NETWORKS[network]
+        keyboard.append([
+            InlineKeyboardButton(info['name'], callback_data=f"wallet_{network}")
+        ])
+
+    keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    await send_photo_with_banner(
+        update.message, "wallets", text, InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    text = "*Deposit*\nSelect asset to receive:"
+
+    await send_photo_with_banner(
+        update.message, "deposit", text, get_network_keyboard("deposit")
+    )
+
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    text = "*Withdraw*\nSelect asset to send:"
+
+    await send_photo_with_banner(
+        update.message, "withdraw", text, get_network_keyboard("withdraw")
+    )
+
+
+async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    keyboard = []
+    for key, info in NETWORKS.items():
+        keyboard.append([
+            InlineKeyboardButton(info['name'], callback_data=f"gen_{key}")
+        ])
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    text = "*Generate Wallet*\nSelect network:"
+
+    await send_photo_with_banner(
+        update.message, "generate", text, InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    balances = db.get_all_internal_balances(user_id)
+    assets_with_balance = [
+        asset for asset in CONVERTIBLE_ASSETS
+        if balances.get(asset, 0) > 0
+    ]
+
+    if not assets_with_balance:
+        text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
+        keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
+        await send_photo_with_banner(
+            update.message, "convert", text, InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    keyboard = []
+    for asset in assets_with_balance:
+        balance = balances.get(asset, 0)
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{asset} ({balance:.4f})",
+                callback_data=f"convert_from_{asset}"
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+
+    text = "*Convert*\nSelect asset to convert from:"
+
+    await send_photo_with_banner(
+        update.message, "convert", text, InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    text = "*Token Balances*\nSelect a token to check:"
+
+    await send_photo_with_banner(
+        update.message, "tokens", text, get_token_keyboard()
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    help_text = (
+        "*Help*\n\n"
+        "*Commands:*\n"
+        "/start - Main menu\n"
+        "/balance - Check balances\n"
+        "/wallets - View wallets\n"
+        "/deposit - Deposit funds\n"
+        "/withdraw - Withdraw funds\n"
+        "/generate - Generate wallet\n"
+        "/convert - Convert assets\n"
+        "/tokens - Token balances\n"
+        "/send TOKEN NETWORK - Quick deposit address\n"
+        "/help - This help\n\n"
+        "*Example:*\n"
+        "`/send USDT BSC`"
+    )
+
+    await send_photo_with_banner(
+        update.message, "help", help_text, get_back_button("main_menu")
+    )
+
+
 async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
@@ -3531,6 +3764,14 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", start))
     application.add_handler(CommandHandler("send", send_command))
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("wallets", wallets_command))
+    application.add_handler(CommandHandler("deposit", deposit_command))
+    application.add_handler(CommandHandler("withdraw", withdraw_command))
+    application.add_handler(CommandHandler("generate", generate_command))
+    application.add_handler(CommandHandler("convert", convert_command))
+    application.add_handler(CommandHandler("tokens", tokens_command))
+    application.add_handler(CommandHandler("help", help_command))
 
     application.add_handler(withdraw_handler)
 
