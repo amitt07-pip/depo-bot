@@ -33,6 +33,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def get_banner_path(name: str) -> str:
+    """Get the path to a banner image."""
+    return os.path.join(ASSETS_DIR, f"{name}.png")
+
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = 7338429782
 ALLOWED_CHAT_ID = -1002215462357
@@ -1356,21 +1364,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
     welcome_text = (
-        f"*VM Crypto Wallet*\n"
-        f"Welcome, {user_name}\n\n"
-        f"*Portfolio*\n"
+        f"Welcome, *{user_name}*\n\n"
+        f"\U0001F4BC *Portfolio*\n"
         f"Wallets: {wallet_count}\n"
         f"Balance: ${total_usdt_value:.2f} USD\n\n"
-        f"*Status*\n"
-        f"Monitoring: Active (60s)\n"
+        f"\U0001F6E1 *Status*\n"
+        f"Monitoring: Active\n"
         f"Security: AES-256"
     )
 
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard()
-    )
+    banner_path = get_banner_path("welcome")
+    if os.path.exists(banner_path):
+        with open(banner_path, "rb") as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=welcome_text,
+                parse_mode="Markdown",
+                reply_markup=get_main_menu_keyboard()
+            )
+    else:
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_keyboard()
+        )
 
 
 async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
