@@ -1570,17 +1570,27 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"refresh_send_{token}_{network}"
         )],
         [InlineKeyboardButton(
-            "\U0001F50D View on Explorer",
+            "View on Explorer",
             url=f"{network_info['explorer']}/address/{address}"
         )],
-        [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
+        [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
 
-    await update.message.reply_text(
-        response_text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    banner_path = get_banner_path("deposit")
+    if os.path.exists(banner_path):
+        with open(banner_path, "rb") as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=response_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    else:
+        await update.message.reply_text(
+            response_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
