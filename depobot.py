@@ -1406,18 +1406,30 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token_icon = token_info.get("icon", "\U0001F4B0")
     network_icon = network_info.get("icon", "\U0001F310")
 
+    is_native = token_info.get("native", False)
+    if is_native:
+        balance_info = await BalanceChecker.get_balance(network, address)
+    else:
+        balance_info = await BalanceChecker.get_token_balance(token, network, address)
+    balance_str = balance_info.get("balance", "0")
+
     divider = "\u2501" * 24
     response_text = (
         f"\U0001F4E4 *Deposit Address*\n"
         f"{divider}\n\n"
         f"{token_icon} *Token:* {token}\n"
-        f"{network_icon} *Network:* {network_info['name']}\n\n"
+        f"{network_icon} *Network:* {network_info['name']}\n"
+        f"\U0001F4B0 *Balance:* {balance_str} {token}\n\n"
         f"\U0001F4CB *Address:*\n"
         f"`{address}`\n\n"
         f"\u26A0\uFE0F *Important:* Only send {token} on {network_info['name']} network!"
     )
 
     keyboard = [
+        [InlineKeyboardButton(
+            "Refresh Balance",
+            callback_data=f"refresh_send_{token}_{network}"
+        )],
         [InlineKeyboardButton(
             "\U0001F50D View on Explorer",
             url=f"{network_info['explorer']}/address/{address}"
@@ -1426,6 +1438,66 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.message.reply_text(
+        response_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer("Refreshing balance...")
+
+    parts = query.data.split("_")
+    token = parts[2]
+    network = parts[3]
+
+    token_info = TOKENS.get(token)
+    network_info = NETWORKS.get(network)
+    user_id = query.from_user.id
+    wallet = db.get_wallet(user_id, network)
+
+    if not wallet:
+        return
+
+    address = wallet["address"]
+    token_icon = token_info.get("icon", "\U0001F4B0")
+    network_icon = network_info.get("icon", "\U0001F310")
+
+    is_native = token_info.get("native", False)
+    if is_native:
+        balance_info = await BalanceChecker.get_balance(network, address)
+    else:
+        balance_info = await BalanceChecker.get_token_balance(token, network, address)
+    balance_str = balance_info.get("balance", "0")
+
+    divider = "\u2501" * 24
+    response_text = (
+        f"\U0001F4E4 *Deposit Address*\n"
+        f"{divider}\n\n"
+        f"{token_icon} *Token:* {token}\n"
+        f"{network_icon} *Network:* {network_info['name']}\n"
+        f"\U0001F4B0 *Balance:* {balance_str} {token}\n\n"
+        f"\U0001F4CB *Address:*\n"
+        f"`{address}`\n\n"
+        f"\u26A0\uFE0F *Important:* Only send {token} on {network_info['name']} network!"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton(
+            "Refresh Balance",
+            callback_data=f"refresh_send_{token}_{network}"
+        )],
+        [InlineKeyboardButton(
+            "\U0001F50D View on Explorer",
+            url=f"{network_info['explorer']}/address/{address}"
+        )],
+        [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
+    ]
+
+    await query.edit_message_text(
         response_text,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -3554,6 +3626,12 @@ def main():
         CallbackQueryHandler(
             refresh_deposit_balance,
             pattern=r"^refresh_dep_[A-Z]+_[A-Z]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            refresh_send_balance,
+            pattern=r"^refresh_send_[A-Z]+_[A-Z]+$"
         )
     )
     application.add_handler(
