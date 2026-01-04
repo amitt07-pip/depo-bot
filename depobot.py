@@ -1826,6 +1826,84 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.message.reply_text(
+        "*Syncing balances...*\nThis may take a moment.",
+        parse_mode="Markdown"
+    )
+
+    wallets = db.get_all_wallets(user_id)
+    if not wallets:
+        await update.message.reply_text(
+            "*No wallets found.*\nGenerate a wallet first.",
+            parse_mode="Markdown"
+        )
+        return
+
+    synced = []
+    for wallet in wallets:
+        network = wallet["network"]
+        address = wallet["address"]
+
+        try:
+            balance_info = await BalanceChecker.get_balance(network, address)
+            onchain_balance = Decimal(balance_info.get("balance", "0"))
+            ledger_asset = get_ledger_asset(network)
+            internal_balance = db.get_internal_balance(user_id, ledger_asset)
+            diff = onchain_balance - internal_balance
+
+            if diff > Decimal("0"):
+                db.credit_balance(user_id, ledger_asset, diff, "sync", network)
+                synced.append(f"{ledger_asset}: +{diff:.6f}")
+
+        except Exception as e:
+            logger.error(f"Error syncing {network}: {e}")
+
+        for token_key in ["USDT", "USDC"]:
+            token_info = TOKENS.get(token_key, {})
+            if network not in token_info.get("networks", {}):
+                continue
+            network_token = token_info["networks"][network]
+            if network_token.get("native"):
+                continue
+
+            try:
+                token_balance_info = await BalanceChecker.get_token_balance(
+                    token_key, network, address
+                )
+                if token_balance_info.get("error"):
+                    continue
+
+                onchain_token = Decimal(token_balance_info.get("balance", "0"))
+                ledger_asset = get_ledger_asset(network, token_key)
+                internal_token = db.get_internal_balance(user_id, ledger_asset)
+                diff = onchain_token - internal_token
+
+                if diff > Decimal("0"):
+                    db.credit_balance(user_id, ledger_asset, diff, "sync", network)
+                    synced.append(f"{ledger_asset}: +{diff:.6f}")
+
+            except Exception as e:
+                logger.error(f"Error syncing {token_key} on {network}: {e}")
+
+    if synced:
+        msg = "*Sync Complete!*\n\n*Credited:*\n" + "\n".join(synced)
+    else:
+        msg = "*Sync Complete!*\n\nAll balances already synced."
+
+    await send_photo_with_banner(
+        update.message, "balance", msg, get_back_button("main_menu")
+    )
+
+
 async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
@@ -3811,6 +3889,7 @@ def main():
     application.add_handler(CommandHandler("convert", convert_command))
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("sync", sync_command))
 
     application.add_handler(withdraw_handler)
 
