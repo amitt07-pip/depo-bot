@@ -100,6 +100,11 @@ async def edit_message_with_banner(
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = 7338429782
 ALLOWED_CHAT_ID = -1002215462357
+
+USER_ACCESS = {
+    7338429782: [1, 2],
+    7103743713: [2],
+}
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 
 wallet_balances_cache = {}
@@ -1232,9 +1237,12 @@ db = WalletDatabase()
 
 
 def is_authorized(user_id: int) -> bool:
-    if ALLOWED_USER_ID == 0:
-        return True
-    return user_id == ALLOWED_USER_ID
+    return user_id in USER_ACCESS
+
+
+def get_user_interfaces(user_id: int) -> list:
+    """Get list of interfaces a user has access to."""
+    return USER_ACCESS.get(user_id, [])
 
 
 async def check_callback_auth(update: Update) -> bool:
@@ -1510,6 +1518,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_name = update.effective_user.first_name or "User"
     current_interface = db.get_current_interface(user_id)
+    user_interfaces = get_user_interfaces(user_id)
+
+    if len(user_interfaces) == 1:
+        selected_interface = user_interfaces[0]
+        db.set_current_interface(user_id, selected_interface)
+        menu_text = build_main_menu_text(user_id, selected_interface)
+        
+        banner_path = get_banner_path("welcome")
+        if os.path.exists(banner_path):
+            with open(banner_path, "rb") as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=menu_text,
+                    parse_mode="Markdown",
+                    reply_markup=get_main_menu_keyboard(selected_interface)
+                )
+        else:
+            await update.message.reply_text(
+                menu_text,
+                parse_mode="Markdown",
+                reply_markup=get_main_menu_keyboard(selected_interface)
+            )
+        return
 
     welcome_text = (
         f"Welcome, *{user_name}*\n\n"
@@ -1517,20 +1548,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Select an interface to continue:"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                f"Interface 1" + (" (Active)" if current_interface == 1 else ""),
-                callback_data="select_interface_1"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"Interface 2" + (" (Active)" if current_interface == 2 else ""),
-                callback_data="select_interface_2"
-            )
-        ]
-    ]
+    keyboard = []
+    for iface in user_interfaces:
+        interface_info = INTERFACE_INFO.get(iface, {"name": f"Interface {iface}", "desc": ""})
+        btn_text = f"{interface_info['name']}" + (" (Active)" if current_interface == iface else "")
+        keyboard.append([
+            InlineKeyboardButton(btn_text, callback_data=f"select_interface_{iface}")
+        ])
 
     banner_path = get_banner_path("welcome")
     if os.path.exists(banner_path):
@@ -1556,6 +1580,12 @@ async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     selected_interface = int(query.data.split("_")[-1])
+    
+    user_interfaces = get_user_interfaces(user_id)
+    if selected_interface not in user_interfaces:
+        await query.answer("You don't have access to this interface.", show_alert=True)
+        return
+    
     db.set_current_interface(user_id, selected_interface)
 
     interface_info = INTERFACE_INFO.get(selected_interface, {"name": f"Interface {selected_interface}", "desc": ""})
