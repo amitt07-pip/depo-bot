@@ -1805,24 +1805,22 @@ async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "\u2705 Yes, Replace",
+                    "Yes, Replace",
                     callback_data=f"confirmgen_{network}"
                 ),
                 InlineKeyboardButton(
-                    "\u274c Cancel",
+                    "Cancel",
                     callback_data="menu_generate"
                 )
             ]
         ]
-        await query.edit_message_text(
-            f"\u26a0\ufe0f *Warning*\n\n"
-            f"You already have a {info['name']} wallet:\n"
-            f"`{existing['address']}`\n\n"
-            f"Generating a new wallet will *replace* this one.\n"
-            f"Make sure you have withdrawn all funds first!\n\n"
-            f"Do you want to continue?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        text = (
+            f"*Warning*\n\n"
+            f"You already have a {info['name']} wallet.\n"
+            f"Generating new will replace it."
+        )
+        await edit_message_with_banner(
+            query, "generate", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -1847,9 +1845,8 @@ async def confirm_generate_wallet(
 async def do_generate_wallet(query, network: str, user_id: int):
     info = NETWORKS[network]
 
-    await query.edit_message_text(
-        f"\u23f3 *Generating {info['name']} wallet...*",
-        parse_mode="Markdown"
+    await edit_message_with_banner(
+        query, "generate", f"*Generating {info['name']} wallet...*", None
     )
 
     try:
@@ -1860,43 +1857,28 @@ async def do_generate_wallet(query, network: str, user_id: int):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "\U0001F4CA Check Balance",
-                    callback_data=f"refresh_{network}"
+                    "Check Balance", callback_data=f"refresh_{network}"
                 ),
                 InlineKeyboardButton(
-                    "\U0001F4E5 Deposit",
-                    callback_data=f"deposit_{network}"
+                    "Deposit", callback_data=f"deposit_{network}"
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    "\u2795 Generate Another",
-                    callback_data="menu_generate"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "\U0001F3E0 Main Menu",
-                    callback_data="main_menu"
-                )
-            ]
+            [InlineKeyboardButton("Generate Another", callback_data="menu_generate")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
 
-        await query.edit_message_text(
-            f"\u2705 *Wallet Generated Successfully!*\n\n"
-            f"{info['icon']} *Network:* {info['name']}\n\n"
-            f"\U0001F4CD *Your Address:*\n`{address}`\n\n"
-            f"\U0001F512 Your private key has been securely encrypted.\n\n"
-            f"\U0001F447 *What would you like to do next?*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        text = (
+            f"*Wallet Generated!*\n\n"
+            f"*Network:* {info['name']}\n"
+            f"*Address:*\n`{address}`"
+        )
+        await edit_message_with_banner(
+            query, "generate", text, InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
         logger.error(f"Error generating wallet: {e}")
-        await query.edit_message_text(
-            f"\u274c *Error generating wallet*\n\n{str(e)}",
-            parse_mode="Markdown",
-            reply_markup=get_back_button("menu_generate")
+        await edit_message_with_banner(
+            query, "generate", f"*Error*\n\n{str(e)}", get_back_button("menu_generate")
         )
 
 
@@ -2135,11 +2117,9 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )],
             [InlineKeyboardButton("Back", callback_data="menu_deposit")]
         ]
-        await query.edit_message_text(
-            f"*No Wallet*\n"
-            f"Create a {network_info['name']} wallet to receive {token_info['symbol']}.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        text = f"*No Wallet*\nCreate a {network_info['name']} wallet first."
+        await edit_message_with_banner(
+            query, "deposit", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -2158,24 +2138,19 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
-        [InlineKeyboardButton(
-            "Refresh Balance",
-            callback_data=f"refresh_dep_{token}_{network}"
-        )],
-        [InlineKeyboardButton("View Explorer", url=explorer_url)],
+        [InlineKeyboardButton("Refresh", callback_data=f"refresh_dep_{token}_{network}")],
+        [InlineKeyboardButton("Explorer", url=explorer_url)],
         [InlineKeyboardButton("Back", callback_data="menu_deposit")],
         [InlineKeyboardButton("Home", callback_data="main_menu")]
     ]
 
-    await query.edit_message_text(
+    text = (
         f"*Deposit {token}[{network_short}]*\n\n"
-        f"Network: {network_info['name']}\n"
         f"Balance: {balance_str} {token}\n\n"
-        f"*Address:*\n"
-        f"`{wallet['address']}`\n\n"
-        f"Tap to copy. Only send {token_info['symbol']} on {network_info['name']}.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"*Address:*\n`{wallet['address']}`"
+    )
+    await edit_message_with_banner(
+        query, "deposit", text, InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -2183,7 +2158,7 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
     if not await check_callback_auth(update):
         return
     query = update.callback_query
-    await query.answer("Refreshing balance...")
+    await query.answer("Refreshing...")
 
     parts = query.data.split("_")
     token = parts[2]
@@ -2218,24 +2193,19 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
-        [InlineKeyboardButton(
-            "Refresh Balance",
-            callback_data=f"refresh_dep_{token}_{network}"
-        )],
-        [InlineKeyboardButton("View Explorer", url=explorer_url)],
+        [InlineKeyboardButton("Refresh", callback_data=f"refresh_dep_{token}_{network}")],
+        [InlineKeyboardButton("Explorer", url=explorer_url)],
         [InlineKeyboardButton("Back", callback_data="menu_deposit")],
         [InlineKeyboardButton("Home", callback_data="main_menu")]
     ]
 
-    await query.edit_message_text(
+    text = (
         f"*Deposit {token}[{network_short}]*\n\n"
-        f"Network: {network_info['name']}\n"
         f"Balance: {balance_str} {token}\n\n"
-        f"*Address:*\n"
-        f"`{wallet['address']}`\n\n"
-        f"Tap to copy. Only send {token_info['symbol']} on {network_info['name']}.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"*Address:*\n`{wallet['address']}`"
+    )
+    await edit_message_with_banner(
+        query, "deposit", text, InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -2456,7 +2426,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
     query = update.callback_query
-    await query.answer("Fetching balances...")
+    await query.answer("Fetching...")
 
     network = query.data.split("_")[1]
     user_id = query.from_user.id
@@ -2464,49 +2434,32 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if network == "all":
         wallets = db.get_all_wallets(user_id)
         if not wallets:
-            await query.edit_message_text(
-                "\u26a0\ufe0f *No Wallets Found*\n\n"
-                "Generate a wallet first to check balances.",
-                parse_mode="Markdown",
-                reply_markup=get_back_button("menu_balance")
+            await edit_message_with_banner(
+                query, "balance", "*No Wallets*\nGenerate a wallet first.",
+                get_back_button("menu_balance")
             )
             return
 
-        await query.edit_message_text(
-            "\u23f3 *Fetching all balances...*",
-            parse_mode="Markdown"
+        await edit_message_with_banner(
+            query, "balance", "*Fetching all balances...*", None
         )
 
-        text = "\U0001F4CA *Your Balances*\n\n"
+        text = "*Your Balances*\n\n"
         for wallet in wallets:
             net = wallet["network"]
             info = NETWORKS[net]
-            balance_info = await BalanceChecker.get_balance(
-                net, wallet["address"]
-            )
+            balance_info = await BalanceChecker.get_balance(net, wallet["address"])
             balance_str = balance_info.get("balance", "Error")
             symbol = balance_info.get("symbol", info["symbol"])
-            text += (
-                f"{info['icon']} *{info['name']}*\n"
-                f"   `{balance_str} {symbol}`\n"
-                f"   `{format_address(wallet['address'])}`\n\n"
-            )
+            text += f"{info['icon']} {info['name']}: `{balance_str} {symbol}`\n"
 
         keyboard = [
-            [InlineKeyboardButton(
-                "\U0001F504 Refresh",
-                callback_data="balance_all"
-            )],
-            [InlineKeyboardButton(
-                "\U0001F3E0 Main Menu",
-                callback_data="main_menu"
-            )]
+            [InlineKeyboardButton("Refresh", callback_data="balance_all")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
 
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        await edit_message_with_banner(
+            query, "balance", text, InlineKeyboardMarkup(keyboard)
         )
     else:
         wallet = db.get_wallet(user_id, network)
@@ -2515,39 +2468,25 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not wallet:
             keyboard = [
                 [InlineKeyboardButton(
-                    f"\u2795 Generate {info['name']} Wallet",
-                    callback_data=f"gen_{network}"
+                    f"Generate {info['name']} Wallet", callback_data=f"gen_{network}"
                 )],
-                [InlineKeyboardButton(
-                    "\U0001F519 Back",
-                    callback_data="menu_balance"
-                )]
+                [InlineKeyboardButton("Back", callback_data="menu_balance")]
             ]
-            await query.edit_message_text(
-                f"\u26a0\ufe0f *No {info['name']} Wallet*\n\n"
-                f"Generate a wallet first to check balance.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+            await edit_message_with_banner(
+                query, "balance", f"*No {info['name']} Wallet*\nGenerate one first.",
+                InlineKeyboardMarkup(keyboard)
             )
             return
 
-        await query.edit_message_text(
-            f"\u23f3 *Fetching {info['name']} balances...*",
-            parse_mode="Markdown"
+        await edit_message_with_banner(
+            query, "balance", f"*Fetching {info['name']} balances...*", None
         )
 
-        balance_info = await BalanceChecker.get_balance(
-            network, wallet["address"]
-        )
+        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
         native_balance = balance_info.get("balance", "Error")
         native_symbol = balance_info.get("symbol", info["symbol"])
 
-        divider = "\u2501" * 24
-        text = (
-            f"{info['icon']} *{info['name']} Balances*\n"
-            f"{divider}\n\n"
-            f"\U0001F4B0 *Native:* `{native_balance} {native_symbol}`\n"
-        )
+        text = f"*{info['name']} Balances*\n\n*Native:* `{native_balance} {native_symbol}`\n"
 
         for token_key, token_info in TOKENS.items():
             if network in token_info.get("networks", {}):
@@ -2561,42 +2500,23 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if result and "balance" in result and not result.get("error"):
                         bal_str = result["balance"]
                         if bal_str and float(bal_str) > 0:
-                            text += (
-                                f"{token_info['icon']} *{token_info['symbol']}:* "
-                                f"`{bal_str} {token_info['symbol']}`\n"
-                            )
+                            text += f"*{token_info['symbol']}:* `{bal_str}`\n"
                 except Exception:
                     pass
 
-        text += (
-            f"\n\U0001F4CD *Address:*\n`{wallet['address']}`"
-        )
+        text += f"\n*Address:*\n`{wallet['address']}`"
 
         keyboard = [
             [
-                InlineKeyboardButton(
-                    "\U0001F504 Refresh",
-                    callback_data=f"balance_{network}"
-                ),
-                InlineKeyboardButton(
-                    "\U0001F4E4 Withdraw",
-                    callback_data=f"withdraw_{network}"
-                )
+                InlineKeyboardButton("Refresh", callback_data=f"balance_{network}"),
+                InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")
             ],
-            [InlineKeyboardButton(
-                "\U0001F519 Back",
-                callback_data="menu_balance"
-            )],
-            [InlineKeyboardButton(
-                "\U0001F3E0 Main Menu",
-                callback_data="main_menu"
-            )]
+            [InlineKeyboardButton("Back", callback_data="menu_balance")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
 
-        await query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        await edit_message_with_banner(
+            query, "balance", text, InlineKeyboardMarkup(keyboard)
         )
 
 
@@ -3487,37 +3407,51 @@ async def check_wallet_transactions(application):
 
         if diff > 0:
             msg = (
-                f"\U0001F4E5 *Deposit Transaction Detected!*\n\n"
-                f"\U0001F4B0 *Token:* {symbol} [{network_short}]\n"
-                f"\U0001F4B5 *Amount:* `+{diff}`\n"
-                f"\U0001F4CA *Total Balance:* `{new_balance} {symbol}`"
+                f"*Deposit Detected!*\n\n"
+                f"*Token:* {symbol} [{network_short}]\n"
+                f"*Amount:* `+{diff}`\n"
+                f"*Balance:* `{new_balance} {symbol}`"
             )
+            banner_name = "deposit"
         else:
             msg = (
-                f"\U0001F4E4 *Withdrawal Transaction Detected!*\n\n"
-                f"\U0001F4B0 *Token:* {symbol} [{network_short}]\n"
-                f"\U0001F4B8 *Amount:* `{diff}`\n"
-                f"\U0001F4CA *Total Balance:* `{new_balance} {symbol}`\n"
-                f"\U0001F4CD *Sent To:* `{format_address(address)}`"
+                f"*Withdrawal Detected!*\n\n"
+                f"*Token:* {symbol} [{network_short}]\n"
+                f"*Amount:* `{diff}`\n"
+                f"*Balance:* `{new_balance} {symbol}`"
             )
+            banner_name = "withdraw"
 
         keyboard = [[
             InlineKeyboardButton(
-                "\U0001F517 Explorer",
+                "Explorer",
                 url=f"{network_info.get('explorer', '')}/address/{address}"
             )
         ]]
 
+        banner_path = get_banner_path(banner_name)
         try:
-            await application.bot.send_message(
-                chat_id=ALLOWED_USER_ID,
-                text=msg,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            if ALLOWED_CHAT_ID:
+            if os.path.exists(banner_path):
+                with open(banner_path, "rb") as photo:
+                    await application.bot.send_photo(
+                        chat_id=ALLOWED_USER_ID,
+                        photo=photo,
+                        caption=msg,
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                if ALLOWED_CHAT_ID:
+                    with open(banner_path, "rb") as photo:
+                        await application.bot.send_photo(
+                            chat_id=ALLOWED_CHAT_ID,
+                            photo=photo,
+                            caption=msg,
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+            else:
                 await application.bot.send_message(
-                    chat_id=ALLOWED_CHAT_ID,
+                    chat_id=ALLOWED_USER_ID,
                     text=msg,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
