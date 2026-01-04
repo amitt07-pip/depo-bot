@@ -1749,7 +1749,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balances = db.get_all_internal_balances(user_id)
     assets_with_balance = [
         asset for asset in CONVERTIBLE_ASSETS
-        if balances.get(asset, 0) > 0
+        if balances.get(asset, Decimal("0")) > 0
     ]
 
     if not assets_with_balance:
@@ -3551,6 +3551,20 @@ async def handle_text_commands(
         await start(update, context)
 
 
+def get_ledger_asset(network: str, token_key: str = None) -> str:
+    if token_key:
+        return token_key
+    network_to_asset = {
+        "ETH": "ETH",
+        "BSC": "BNB",
+        "POLYGON": "MATIC",
+        "SOLANA": "SOL",
+        "TRON": "TRX",
+        "LTC": "LTC"
+    }
+    return network_to_asset.get(network, network)
+
+
 async def check_wallet_transactions(application):
     global wallet_balances_cache
 
@@ -3648,6 +3662,17 @@ async def check_wallet_transactions(application):
 
             if cache_key in wallet_balances_cache:
                 old_balance = wallet_balances_cache[cache_key]
+                old_val = Decimal(old_balance) if old_balance else Decimal("0")
+                new_val = Decimal(current_balance) if current_balance else Decimal("0")
+                diff = new_val - old_val
+
+                if diff > Decimal("0.0001"):
+                    ledger_asset = get_ledger_asset(network)
+                    db.credit_balance(
+                        ALLOWED_USER_ID, ledger_asset, diff, "deposit", network
+                    )
+                    logger.info(f"Credited {diff} {ledger_asset} to internal balance")
+
                 await send_balance_notification(
                     network, address, symbol, old_balance, current_balance
                 )
@@ -3680,6 +3705,20 @@ async def check_wallet_transactions(application):
 
                 if token_cache_key in wallet_balances_cache:
                     old_token_balance = wallet_balances_cache[token_cache_key]
+                    old_val = Decimal(old_token_balance) if old_token_balance else Decimal("0")
+                    new_val = (
+                        Decimal(current_token_balance) if current_token_balance
+                        else Decimal("0")
+                    )
+                    diff = new_val - old_val
+
+                    if diff > Decimal("0.0001"):
+                        ledger_asset = get_ledger_asset(network, token_key)
+                        db.credit_balance(
+                            ALLOWED_USER_ID, ledger_asset, diff, "deposit", network
+                        )
+                        logger.info(f"Credited {diff} {ledger_asset} to internal balance")
+
                     await send_balance_notification(
                         network, address, token_symbol,
                         old_token_balance, current_token_balance, token_key
