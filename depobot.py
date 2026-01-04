@@ -27,11 +27,18 @@ from tronpy.keys import PrivateKey as TronPrivateKey
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
+# Configure logging - cleaner output
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP request logs from httpx and telegram
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
@@ -1554,14 +1561,15 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "User"
+    logger.info(f"User {user_name} ({user_id}) started bot")
+    
     if not is_authorized(user_id):
         await update.message.reply_text(
             "*Access Denied*\nYou are not authorized to use this bot.",
             parse_mode="Markdown"
         )
         return
-
-    user_name = update.effective_user.first_name or "User"
     current_interface = db.get_current_interface(user_id)
     user_interfaces = get_user_interfaces(user_id)
 
@@ -2399,6 +2407,7 @@ async def confirm_generate_wallet(
 
 async def do_generate_wallet(query, network: str, user_id: int):
     info = NETWORKS[network]
+    logger.info(f"User {user_id} generating {network} wallet")
 
     await edit_message_with_banner(
         query, "generate", f"*Generating {info['name']} wallet...*", None
@@ -2408,6 +2417,7 @@ async def do_generate_wallet(query, network: str, user_id: int):
         address, private_key = WalletGenerator.generate_wallet(network)
         encrypted_key = CryptoUtils.encrypt_private_key(private_key)
         db.save_wallet(user_id, network, address, encrypted_key)
+        logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
 
         keyboard = [
             [
@@ -3263,6 +3273,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     withdrawal = pending_withdrawals.get(user_id)
+    if withdrawal:
+        logger.info(f"User {user_id} withdrawing {withdrawal.get('amount')} {withdrawal.get('token') or withdrawal.get('network')} to {withdrawal.get('address')[:10]}...")
 
     if not withdrawal:
         await query.edit_message_text(
