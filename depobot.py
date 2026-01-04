@@ -1245,6 +1245,22 @@ def get_user_interfaces(user_id: int) -> list:
     return USER_ACCESS.get(user_id, [])
 
 
+def get_effective_interface(user_id: int) -> int:
+    """Get the user's current interface, ensuring it's one they have access to.
+    
+    If the stored interface is not allowed, reset to the first allowed interface.
+    """
+    current = db.get_current_interface(user_id)
+    allowed = get_user_interfaces(user_id)
+    if not allowed:
+        return 1
+    if current not in allowed:
+        new_interface = allowed[0]
+        db.set_current_interface(user_id, new_interface)
+        return new_interface
+    return current
+
+
 async def check_callback_auth(update: Update) -> bool:
     query = update.callback_query
     user_id = query.from_user.id
@@ -1314,8 +1330,7 @@ def get_friendly_error(error) -> str:
     return "Something went wrong. Please try again later."
 
 
-def get_main_menu_keyboard(current_interface: int = 1):
-    other_interface = 2 if current_interface == 1 else 1
+def get_main_menu_keyboard(current_interface: int = 1, user_id: int = None):
     keyboard = [
         [
             InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
@@ -1328,17 +1343,23 @@ def get_main_menu_keyboard(current_interface: int = 1):
         [
             InlineKeyboardButton("Convert", callback_data="menu_convert"),
             InlineKeyboardButton("New Wallet", callback_data="menu_generate")
-        ],
-        [
-            InlineKeyboardButton(
-                f"Switch to Interface {other_interface}",
-                callback_data=f"switch_interface_{other_interface}"
-            )
-        ],
-        [
-            InlineKeyboardButton("Help", callback_data="menu_help")
         ]
     ]
+    
+    user_interfaces = get_user_interfaces(user_id) if user_id else [1, 2]
+    if len(user_interfaces) > 1:
+        other_interface = 2 if current_interface == 1 else 1
+        if other_interface in user_interfaces:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"Switch to Interface {other_interface}",
+                    callback_data=f"switch_interface_{other_interface}"
+                )
+            ])
+    
+    keyboard.append([
+        InlineKeyboardButton("Help", callback_data="menu_help")
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -1486,11 +1507,10 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
 
     total_usdt_value = Decimal("0")
     balances = db.get_all_internal_balances(user_id)
-    for bal in (balances or []):
-        asset = bal.get("asset", "")
+    for asset, balance in (balances or {}).items():
         if asset in ["USDT", "USDC"]:
             try:
-                total_usdt_value += Decimal(str(bal.get("balance", 0)))
+                total_usdt_value += Decimal(str(balance))
             except Exception:
                 pass
 
@@ -1532,13 +1552,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo=photo,
                     caption=menu_text,
                     parse_mode="Markdown",
-                    reply_markup=get_main_menu_keyboard(selected_interface)
+                    reply_markup=get_main_menu_keyboard(selected_interface, user_id)
                 )
         else:
             await update.message.reply_text(
                 menu_text,
                 parse_mode="Markdown",
-                reply_markup=get_main_menu_keyboard(selected_interface)
+                reply_markup=get_main_menu_keyboard(selected_interface, user_id)
             )
         return
 
@@ -1594,7 +1614,7 @@ async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = build_main_menu_text(user_id, selected_interface)
 
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(selected_interface)
+        query, "welcome", menu_text, get_main_menu_keyboard(selected_interface, user_id)
     )
 
 
@@ -2128,11 +2148,11 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user_id = query.from_user.id
-    current_interface = db.get_current_interface(user_id)
+    current_interface = get_effective_interface(user_id)
     menu_text = build_main_menu_text(user_id, current_interface)
 
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(current_interface)
+        query, "welcome", menu_text, get_main_menu_keyboard(current_interface, user_id)
     )
 
 
@@ -2143,6 +2163,12 @@ async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     new_interface = int(query.data.split("_")[-1])
+    
+    user_interfaces = get_user_interfaces(user_id)
+    if new_interface not in user_interfaces:
+        await query.answer("You don't have access to this interface.", show_alert=True)
+        return
+    
     db.set_current_interface(user_id, new_interface)
 
     interface_info = INTERFACE_INFO.get(new_interface, {"name": f"Interface {new_interface}", "desc": ""})
@@ -2151,7 +2177,7 @@ async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = build_main_menu_text(user_id, new_interface)
 
     await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(new_interface)
+        query, "welcome", menu_text, get_main_menu_keyboard(new_interface, user_id)
     )
 
 
