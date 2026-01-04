@@ -3474,33 +3474,36 @@ async def check_wallet_transactions(application):
 
         diff = new_val - old_val
         network_info = NETWORKS.get(network, {})
-        icon = network_info.get("icon", "")
-        token_icon = TOKENS.get(symbol, {}).get("icon", icon) if token_name else icon
+
+        network_short = network
+        if network == "TRON":
+            network_short = "TRX"
+        elif network == "SOLANA":
+            network_short = "SOL"
+        elif network == "POLYGON":
+            network_short = "MATIC"
+
+        is_native = token_name is None
+        if is_native and abs(diff) < Decimal("0.0001"):
+            return
 
         if diff > 0:
             msg = (
-                f"\U0001F4E5 *Incoming Transaction Detected!*\n\n"
-                f"{token_icon} *Asset:* {symbol}\n"
-                f"\U0001F310 *Network:* {network_info.get('name', network)}\n"
-                f"\U0001F4B0 *Amount:* `+{diff} {symbol}`\n"
-                f"\U0001F4CA *New Balance:* `{new_balance} {symbol}`\n\n"
-                f"\U0001F4CD *Wallet:*\n`{address}`"
+                f"\U0001F4E5 *Deposit Transaction Detected!*\n\n"
+                f"\U0001F4B0 *Token:* {symbol} [{network_short}]\n"
+                f"\U0001F4B5 *Amount:* `+{diff}`\n"
+                f"\U0001F4CA *Total Balance:* `{new_balance} {symbol}`"
             )
         else:
             msg = (
-                f"\U0001F4E4 *Outgoing Transaction Detected!*\n\n"
-                f"{token_icon} *Asset:* {symbol}\n"
-                f"\U0001F310 *Network:* {network_info.get('name', network)}\n"
-                f"\U0001F4B8 *Amount:* `{diff} {symbol}`\n"
-                f"\U0001F4CA *New Balance:* `{new_balance} {symbol}`\n\n"
-                f"\U0001F4CD *Wallet:*\n`{address}`"
+                f"\U0001F4E4 *Withdrawal Transaction Detected!*\n\n"
+                f"\U0001F4B0 *Token:* {symbol} [{network_short}]\n"
+                f"\U0001F4B8 *Amount:* `{diff}`\n"
+                f"\U0001F4CA *Total Balance:* `{new_balance} {symbol}`\n"
+                f"\U0001F4CD *Sent To:* `{format_address(address)}`"
             )
 
         keyboard = [[
-            InlineKeyboardButton(
-                "\U0001F50D View Details",
-                callback_data=f"wallet_{network}"
-            ),
             InlineKeyboardButton(
                 "\U0001F517 Explorer",
                 url=f"{network_info.get('explorer', '')}/address/{address}"
