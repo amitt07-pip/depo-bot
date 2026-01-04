@@ -2250,6 +2250,10 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["withdraw_token"] = token
     context.user_data["withdraw_balance"] = balance_str
     context.user_data["withdraw_is_native"] = is_native
+    if not is_native and token_info and network in token_info.get("networks", {}):
+        context.user_data["withdraw_token_address"] = token_info["networks"][network]
+    else:
+        context.user_data["withdraw_token_address"] = None
 
     keyboard = [[InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")]]
 
