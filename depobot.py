@@ -8,7 +8,7 @@ import aiohttp
 from typing import Optional
 from decimal import Decimal
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -39,6 +39,55 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 def get_banner_path(name: str) -> str:
     """Get the path to a banner image."""
     return os.path.join(ASSETS_DIR, f"{name}.png")
+
+
+async def edit_message_with_banner(
+    query, banner_name: str, caption: str, reply_markup
+):
+    """Edit a message to show a banner image with caption."""
+    banner_path = get_banner_path(banner_name)
+    if os.path.exists(banner_path):
+        try:
+            with open(banner_path, "rb") as photo:
+                media = InputMediaPhoto(
+                    media=photo,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
+                await query.edit_message_media(media=media, reply_markup=reply_markup)
+        except Exception:
+            try:
+                await query.edit_message_caption(
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                await query.message.delete()
+                chat_id = query.message.chat_id
+                with open(banner_path, "rb") as photo:
+                    await query.get_bot().send_photo(
+                        chat_id=chat_id,
+                        photo=photo,
+                        caption=caption,
+                        parse_mode="Markdown",
+                        reply_markup=reply_markup
+                    )
+    else:
+        try:
+            await query.edit_message_text(
+                caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        except Exception:
+            await query.message.delete()
+            await query.get_bot().send_message(
+                chat_id=query.message.chat_id,
+                text=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1600,17 +1649,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    divider = "\u2501" * 24
-    menu_text = (
-        f"\U0001F3E6 *VM CRYPTO BOT*\n"
-        f"{divider}\n\n"
-        f"\U0001F447 *Choose an option below:*"
-    )
+    menu_text = "*VM CRYPTO BOT*\n\nChoose an option below:"
 
-    await query.edit_message_text(
-        menu_text,
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard()
+    await edit_message_with_banner(
+        query, "welcome", menu_text, get_main_menu_keyboard()
     )
 
 
@@ -1750,16 +1792,10 @@ async def show_generate_menu(
     query = update.callback_query
     await query.answer()
 
-    text = (
-        "*New Wallet*\n"
-        "Select network:\n\n"
-        "Note: Creating a new wallet replaces existing one."
-    )
+    text = "*Generate Wallet*\nSelect network:"
 
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_network_keyboard("gen", include_tokens=False)
+    await edit_message_with_banner(
+        query, "generate", text, get_network_keyboard("gen", include_tokens=False)
     )
 
 
@@ -1879,15 +1915,10 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    text = (
-        "*Deposit*\n"
-        "Select asset to receive:"
-    )
+    text = "*Deposit*\nSelect asset to receive:"
 
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_network_keyboard("deposit")
+    await edit_message_with_banner(
+        query, "deposit", text, get_network_keyboard("deposit")
     )
 
 
@@ -2423,11 +2454,10 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
-    await query.edit_message_text(
-        "*Balances*\n"
-        "Select network to check:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    text = "*Balances*\nSelect network to check:"
+
+    await edit_message_with_banner(
+        query, "balance", text, InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -2588,15 +2618,10 @@ async def show_withdraw_menu(
     query = update.callback_query
     await query.answer()
 
-    text = (
-        "*Withdraw*\n"
-        "Select asset to send:"
-    )
+    text = "*Withdraw*\nSelect asset to send:"
 
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_network_keyboard("withdraw")
+    await edit_message_with_banner(
+        query, "withdraw", text, get_network_keyboard("withdraw")
     )
 
 
@@ -3034,12 +3059,9 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Deposit", callback_data="menu_deposit")],
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
-        await query.edit_message_text(
-            "*Convert*\n\n"
-            "No assets to convert.\n"
-            "Deposit funds first to use the convert feature.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
+        await edit_message_with_banner(
+            query, "convert", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -3057,12 +3079,10 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
-    await query.edit_message_text(
-        "*Convert*\n\n"
-        "Select asset to convert from:\n"
-        "(Internal ledger conversion at market rate)",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    text = "*Convert*\nSelect asset to convert:"
+
+    await edit_message_with_banner(
+        query, "convert", text, InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -3289,20 +3309,10 @@ async def show_tokens_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    text = (
-        "\U0001F4B5 *Token Balances*\n\n"
-        "Select a token to check your balance:\n\n"
-        "*Available Tokens:*\n"
-    )
+    text = "*Token Balances*\nSelect a token to check:"
 
-    for token_key, token_info in TOKENS.items():
-        networks = ", ".join(token_info["networks"].keys())
-        text += f"{token_info['icon']} *{token_info['symbol']}* - {networks}\n"
-
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_token_keyboard()
+    await edit_message_with_banner(
+        query, "tokens", text, get_token_keyboard()
     )
 
 

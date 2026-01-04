@@ -11,6 +11,7 @@ BANNERS = {
     "welcome": {
         "title": "VM DEPO BOT",
         "subtitle": "Secure Crypto Wallet",
+        "tagline": "Securely Made By Venom",
         "icon": "\U0001F3E6"
     },
     "deposit": {
@@ -134,6 +135,20 @@ def create_banner(name, config, width=800, height=400):
     subtitle_y = title_y + 90
 
     draw.text((subtitle_x, subtitle_y), subtitle, font=subtitle_font, fill=TEXT_GRAY)
+
+    tagline = config.get("tagline")
+    if tagline:
+        try:
+            tagline_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", 18
+            )
+        except OSError:
+            tagline_font = subtitle_font
+        tagline_bbox = draw.textbbox((0, 0), tagline, font=tagline_font)
+        tagline_width = tagline_bbox[2] - tagline_bbox[0]
+        tagline_x = (width - tagline_width) // 2
+        tagline_y = subtitle_y + 40
+        draw.text((tagline_x, tagline_y), tagline, font=tagline_font, fill=ACCENT_LIGHT)
 
     draw_rounded_rect(draw, (width // 2 - 60, title_y - 80, width // 2 + 60, title_y - 20),
                       10, ACCENT_COLOR)
