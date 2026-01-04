@@ -77,24 +77,32 @@ async def edit_message_with_banner(
                         reply_markup=reply_markup
                     )
     else:
+        # Try edit_message_caption first (for media messages), then edit_message_text
         try:
-            await query.edit_message_text(
-                caption,
+            await query.edit_message_caption(
+                caption=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
         except Exception:
-            chat_id = query.message.chat_id
             try:
-                await query.message.delete()
+                await query.edit_message_text(
+                    caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
             except Exception:
-                pass
-            await query.get_bot().send_message(
-                chat_id=chat_id,
-                text=caption,
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
+                chat_id = query.message.chat_id
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.get_bot().send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
