@@ -3065,10 +3065,11 @@ async def show_token_withdraw_info(
         )
         return ConversationHandler.END
 
-    balance_info = await BalanceChecker.get_token_balance(
-        token, network, wallet["address"]
-    )
-    balance_str = balance_info.get("balance", "0")
+    # Use internal ledger balance instead of on-chain balance
+    # This allows cross-network withdrawals (e.g., deposit on BSC, withdraw on TRC20)
+    ledger_asset = get_ledger_asset(network, token)
+    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    balance_str = str(internal_balance)
 
     network_token = token_info["networks"][network]
     is_native = network_token.get("native", False)
