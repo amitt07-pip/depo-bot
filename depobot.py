@@ -3300,6 +3300,8 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["withdraw_network"] = network
     context.user_data["withdraw_balance"] = balance_str
+    # Store the message ID so we can delete it later
+    context.user_data["withdraw_msg_id"] = query.message.message_id
 
     keyboard = [
         [InlineKeyboardButton(
