@@ -3119,6 +3119,9 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         text = "*Your Balances*\n\n"
+        
+        # Show on-chain native balances
+        text += "*On-Chain:*\n"
         for wallet in wallets:
             net = wallet["network"]
             info = NETWORKS[net]
@@ -3126,6 +3129,14 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             balance_str = balance_info.get("balance", "Error")
             symbol = balance_info.get("symbol", info["symbol"])
             text += f"{info['icon']} {info['name']}: `{balance_str} {symbol}`\n"
+        
+        # Show internal ledger balances (including USDT/USDC)
+        internal_balances = db.get_all_internal_balances(user_id)
+        if internal_balances:
+            text += "\n*Internal Ledger:*\n"
+            for asset, balance in internal_balances.items():
+                if balance > Decimal("0"):
+                    text += f"\U0001F4B0 {asset}: `{balance:.6f}`\n"
 
         keyboard = [
             [InlineKeyboardButton("Refresh", callback_data="balance_all")],
@@ -3160,7 +3171,9 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         native_balance = balance_info.get("balance", "Error")
         native_symbol = balance_info.get("symbol", info["symbol"])
 
-        text = f"*{info['name']} Balances*\n\n*Native:* `{native_balance} {native_symbol}`\n"
+        text = f"*{info['name']} Balances*\n\n"
+        text += f"*On-Chain:*\n"
+        text += f"{info['icon']} Native: `{native_balance} {native_symbol}`\n"
 
         for token_key, token_info in TOKENS.items():
             if network in token_info.get("networks", {}):
@@ -3173,10 +3186,26 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     if result and "balance" in result and not result.get("error"):
                         bal_str = result["balance"]
-                        if bal_str and float(bal_str) > 0:
-                            text += f"*{token_info['symbol']}:* `{bal_str}`\n"
+                        text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
                 except Exception:
                     pass
+
+        # Show internal ledger balances for this network
+        ledger_asset = get_ledger_asset(network)
+        internal_native = db.get_internal_balance(user_id, ledger_asset)
+        
+        text += f"\n*Internal Ledger:*\n"
+        text += f"\U0001F4B0 {ledger_asset}: `{internal_native:.6f}`\n"
+        
+        # Check for USDT/USDC internal balances on this network
+        for token_key in ["USDT", "USDC"]:
+            token_info = TOKENS.get(token_key, {})
+            if network in token_info.get("networks", {}):
+                net_info = token_info["networks"][network]
+                if not net_info.get("native"):
+                    token_ledger_asset = get_ledger_asset(network, token_key)
+                    internal_token = db.get_internal_balance(user_id, token_ledger_asset)
+                    text += f"\U0001F4B0 {token_ledger_asset}: `{internal_token:.6f}`\n"
 
         text += f"\n*Address:*\n`{wallet['address']}`"
 
