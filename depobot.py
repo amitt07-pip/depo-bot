@@ -51,65 +51,33 @@ def get_banner_path(name: str) -> str:
 async def edit_message_with_banner(
     query, banner_name: str, caption: str, reply_markup
 ):
-    """Edit a message to show a banner image with caption."""
+    """Delete the old message and send a new one with banner image."""
+    chat_id = query.message.chat_id
+    
+    # Delete the old message first
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    
+    # Send new message with banner
     banner_path = get_banner_path(banner_name)
     if os.path.exists(banner_path):
-        try:
-            with open(banner_path, "rb") as photo:
-                media = InputMediaPhoto(
-                    media=photo,
-                    caption=caption,
-                    parse_mode="Markdown"
-                )
-                await query.edit_message_media(media=media, reply_markup=reply_markup)
-        except Exception:
-            try:
-                await query.edit_message_caption(
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-            except Exception:
-                chat_id = query.message.chat_id
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                with open(banner_path, "rb") as photo:
-                    await query.get_bot().send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=caption,
-                        parse_mode="Markdown",
-                        reply_markup=reply_markup
-                    )
-    else:
-        # Try edit_message_caption first (for media messages), then edit_message_text
-        try:
-            await query.edit_message_caption(
+        with open(banner_path, "rb") as photo:
+            await query.get_bot().send_photo(
+                chat_id=chat_id,
+                photo=photo,
                 caption=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
-        except Exception:
-            try:
-                await query.edit_message_text(
-                    caption,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-            except Exception:
-                chat_id = query.message.chat_id
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                await query.get_bot().send_message(
-                    chat_id=chat_id,
-                    text=caption,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
+    else:
+        await query.get_bot().send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
