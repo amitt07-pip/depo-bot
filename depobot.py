@@ -34,6 +34,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+import traceback
 
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -4360,6 +4361,22 @@ async def start_transaction_monitor(application):
     logger.info("Transaction monitor background task created")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler to prevent bot from dying on exceptions."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    try:
+        if update and hasattr(update, 'effective_chat') and update.effective_chat:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="An error occurred. Please try again or use /start to restart."
+            )
+    except Exception as e:
+        logger.error(f"Failed to send error message to user: {e}")
+
+
 def main():
     if not BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
@@ -4577,6 +4594,9 @@ def main():
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands)
     )
+
+    # Add global error handler to prevent bot from dying
+    application.add_error_handler(error_handler)
 
     logger.info("Starting Depo Bot with enhanced UI...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
