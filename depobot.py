@@ -2019,7 +2019,14 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(
+    # Delete the user's command message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Send loading message and store reference to delete later
+    loading_msg = await update.message.chat.send_message(
         "*Syncing balances...*\nThis may take a moment.",
         parse_mode="Markdown"
     )
@@ -2094,6 +2101,12 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = "*Sync Complete!*\n\nAll balances already synced."
 
+    # Delete the loading message before sending final result
+    try:
+        await loading_msg.delete()
+    except Exception:
+        pass
+
     await send_photo_with_banner(
         update.message, "balance", msg, get_back_button("main_menu")
     )
@@ -2109,7 +2122,14 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(
+    # Delete the user's command message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Send loading message and store reference to delete later
+    loading_msg = await update.message.chat.send_message(
         "*Scanning for errors...*\nThis may take a moment.",
         parse_mode="Markdown"
     )
@@ -2252,6 +2272,12 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not fixes and not errors:
         msg_parts.append("\nNo issues found. Bot is healthy!")
+
+    # Delete the loading message before sending final result
+    try:
+        await loading_msg.delete()
+    except Exception:
+        pass
 
     await send_photo_with_banner(
         update.message, "help", "\n".join(msg_parts), get_back_button("main_menu")
@@ -3301,17 +3327,32 @@ async def receive_withdraw_amount(
 ):
     amount = update.message.text.strip()
 
+    # Delete the user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Delete the previous bot message if stored
+    prev_msg_id = context.user_data.get("withdraw_msg_id")
+    if prev_msg_id:
+        try:
+            await update.message.chat.delete_message(prev_msg_id)
+        except Exception:
+            pass
+
     try:
         amount_decimal = Decimal(amount)
         if amount_decimal <= 0:
             raise ValueError("Amount must be positive")
     except Exception:
-        await update.message.reply_text(
+        msg = await update.message.chat.send_message(
             "\u274c *Invalid Amount*\n\n"
             "Please enter a valid positive number.\n"
             "Example: `0.1` or `100`",
             parse_mode="Markdown"
         )
+        context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_AMOUNT
 
     context.user_data["withdraw_amount"] = amount
@@ -3334,7 +3375,7 @@ async def receive_withdraw_amount(
         )]
     ]
 
-    await update.message.reply_text(
+    msg = await update.message.chat.send_message(
         f"{icon} *Withdraw {symbol}*\n\n"
         f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n\n"
         f"\U0001F4DD *Step 2/3:* Enter the destination address:\n\n"
@@ -3342,6 +3383,7 @@ async def receive_withdraw_amount(
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    context.user_data["withdraw_msg_id"] = msg.message_id
 
     return WITHDRAW_ADDRESS
 
@@ -3357,29 +3399,46 @@ async def receive_withdraw_address(
     token_address = context.user_data.get("withdraw_token_address")
     info = NETWORKS[network]
 
+    # Delete the user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Delete the previous bot message if stored
+    prev_msg_id = context.user_data.get("withdraw_msg_id")
+    if prev_msg_id:
+        try:
+            await update.message.chat.delete_message(prev_msg_id)
+        except Exception:
+            pass
+
     if info["type"] == "evm":
         if not address.startswith("0x") or len(address) != 42:
-            await update.message.reply_text(
+            msg = await update.message.chat.send_message(
                 "\u274c *Invalid Address*\n\n"
                 "Please enter a valid EVM address starting with `0x`",
                 parse_mode="Markdown"
             )
+            context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_ADDRESS
     elif info["type"] == "solana":
         if len(address) < 32 or len(address) > 44:
-            await update.message.reply_text(
+            msg = await update.message.chat.send_message(
                 "\u274c *Invalid Address*\n\n"
                 "Please enter a valid Solana address",
                 parse_mode="Markdown"
             )
+            context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_ADDRESS
     elif info["type"] == "tron":
         if not address.startswith("T") or len(address) != 34:
-            await update.message.reply_text(
+            msg = await update.message.chat.send_message(
                 "\u274c *Invalid Address*\n\n"
                 "Please enter a valid Tron address starting with `T`",
                 parse_mode="Markdown"
             )
+            context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_ADDRESS
 
     context.user_data["withdraw_address"] = address
@@ -3416,7 +3475,7 @@ async def receive_withdraw_address(
         ]
     ]
 
-    await update.message.reply_text(
+    msg = await update.message.chat.send_message(
         f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
         f"\U0001F4DD *Step 3/3:* Please review and confirm:\n\n"
         f"{'='*30}\n"
@@ -3430,6 +3489,7 @@ async def receive_withdraw_address(
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    context.user_data["withdraw_msg_id"] = msg.message_id
 
     return WITHDRAW_CONFIRM
 
