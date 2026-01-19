@@ -3270,6 +3270,13 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
+
+    # Delete the old message first
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
     network = query.data.split("_")[1]
     user_id = query.from_user.id
@@ -3287,8 +3294,9 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="menu_withdraw"
             )]
         ]
-        await query.edit_message_text(
-            f"\u26a0\ufe0f *No {info['name']} Wallet*\n\n"
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"\u26a0\ufe0f *No {info['name']} Wallet*\n\n"
             f"Generate a wallet first to withdraw.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -3300,8 +3308,6 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["withdraw_network"] = network
     context.user_data["withdraw_balance"] = balance_str
-    # Store the message ID so we can delete it later
-    context.user_data["withdraw_msg_id"] = query.message.message_id
 
     keyboard = [
         [InlineKeyboardButton(
@@ -3310,8 +3316,9 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
     ]
 
-    await query.edit_message_text(
-        f"\U0001F4E4 *Withdraw {info['symbol']}*\n\n"
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"\U0001F4E4 *Withdraw {info['symbol']}*\n\n"
         f"{info['icon']} *Network:* {info['name']}\n"
         f"\U0001F4B0 *Available:* `{balance_str} {info['symbol']}`\n\n"
         f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
@@ -3319,6 +3326,8 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    # Store the new message ID so we can delete it later
+    context.user_data["withdraw_msg_id"] = msg.message_id
 
     return WITHDRAW_AMOUNT
 
@@ -3328,6 +3337,7 @@ async def receive_withdraw_amount(
     context: ContextTypes.DEFAULT_TYPE
 ):
     amount = update.message.text.strip()
+    chat_id = update.message.chat_id  # Get chat_id before any deletions
 
     # Delete the user's input message
     try:
@@ -3339,7 +3349,6 @@ async def receive_withdraw_amount(
     prev_msg_id = context.user_data.get("withdraw_msg_id")
     if prev_msg_id:
         try:
-            chat_id = update.message.chat_id
             await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
         except Exception:
             pass
@@ -3349,8 +3358,9 @@ async def receive_withdraw_amount(
         if amount_decimal <= 0:
             raise ValueError("Amount must be positive")
     except Exception:
-        msg = await update.message.chat.send_message(
-            "\u274c *Invalid Amount*\n\n"
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="\u274c *Invalid Amount*\n\n"
             "Please enter a valid positive number.\n"
             "Example: `0.1` or `100`",
             parse_mode="Markdown"
@@ -3378,8 +3388,9 @@ async def receive_withdraw_amount(
         )]
     ]
 
-    msg = await update.message.chat.send_message(
-        f"{icon} *Withdraw {symbol}*\n\n"
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{icon} *Withdraw {symbol}*\n\n"
         f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n\n"
         f"\U0001F4DD *Step 2/3:* Enter the destination address:\n\n"
         f"_Reply with the {info['name']} address_",
@@ -3396,6 +3407,7 @@ async def receive_withdraw_address(
     context: ContextTypes.DEFAULT_TYPE
 ):
     address = update.message.text.strip()
+    chat_id = update.message.chat_id  # Get chat_id before any deletions
     network = context.user_data.get("withdraw_network")
     amount = context.user_data.get("withdraw_amount")
     token = context.user_data.get("withdraw_token")
@@ -3412,15 +3424,15 @@ async def receive_withdraw_address(
     prev_msg_id = context.user_data.get("withdraw_msg_id")
     if prev_msg_id:
         try:
-            chat_id = update.message.chat_id
             await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
         except Exception:
             pass
 
     if info["type"] == "evm":
         if not address.startswith("0x") or len(address) != 42:
-            msg = await update.message.chat.send_message(
-                "\u274c *Invalid Address*\n\n"
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Invalid Address*\n\n"
                 "Please enter a valid EVM address starting with `0x`",
                 parse_mode="Markdown"
             )
@@ -3428,8 +3440,9 @@ async def receive_withdraw_address(
             return WITHDRAW_ADDRESS
     elif info["type"] == "solana":
         if len(address) < 32 or len(address) > 44:
-            msg = await update.message.chat.send_message(
-                "\u274c *Invalid Address*\n\n"
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Invalid Address*\n\n"
                 "Please enter a valid Solana address",
                 parse_mode="Markdown"
             )
@@ -3437,8 +3450,9 @@ async def receive_withdraw_address(
             return WITHDRAW_ADDRESS
     elif info["type"] == "tron":
         if not address.startswith("T") or len(address) != 34:
-            msg = await update.message.chat.send_message(
-                "\u274c *Invalid Address*\n\n"
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Invalid Address*\n\n"
                 "Please enter a valid Tron address starting with `T`",
                 parse_mode="Markdown"
             )
@@ -3479,8 +3493,9 @@ async def receive_withdraw_address(
         ]
     ]
 
-    msg = await update.message.chat.send_message(
-        f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
         f"\U0001F4DD *Step 3/3:* Please review and confirm:\n\n"
         f"{'='*30}\n"
         f"{info['icon']} *Network:* {info['name']}\n"
