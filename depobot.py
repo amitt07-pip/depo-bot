@@ -3339,7 +3339,8 @@ async def receive_withdraw_amount(
     prev_msg_id = context.user_data.get("withdraw_msg_id")
     if prev_msg_id:
         try:
-            await update.message.chat.delete_message(prev_msg_id)
+            chat_id = update.message.chat_id
+            await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
         except Exception:
             pass
 
@@ -3411,7 +3412,8 @@ async def receive_withdraw_address(
     prev_msg_id = context.user_data.get("withdraw_msg_id")
     if prev_msg_id:
         try:
-            await update.message.chat.delete_message(prev_msg_id)
+            chat_id = update.message.chat_id
+            await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
         except Exception:
             pass
 
