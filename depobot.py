@@ -2099,6 +2099,165 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scan and fix any errors in the bot's database and state."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.message.reply_text(
+        "*Scanning for errors...*\nThis may take a moment.",
+        parse_mode="Markdown"
+    )
+
+    fixes = []
+    errors = []
+
+    try:
+        # 1. Re-initialize database tables to ensure schema is up to date
+        db.init_db()
+        fixes.append("Database schema verified")
+
+        # 2. Clear stale balance cache
+        global wallet_balances_cache
+        cache_count = len(wallet_balances_cache)
+        wallet_balances_cache = {}
+        if cache_count > 0:
+            fixes.append(f"Cleared {cache_count} cached balances")
+
+        # 3. Check and fix internal balances for all wallets
+        conn = sqlite3.connect(db.db_path)
+        cursor = conn.cursor()
+
+        # Get all unique user_ids from wallets table
+        cursor.execute("SELECT DISTINCT user_id FROM wallets")
+        wallet_users = [row[0] for row in cursor.fetchall()]
+
+        # For each user, ensure they have internal balance entries
+        for uid in wallet_users:
+            # Get all wallets for this user
+            cursor.execute(
+                "SELECT network, interface_id FROM wallets WHERE user_id = ?",
+                (uid,)
+            )
+            user_wallets = cursor.fetchall()
+
+            for network, interface_id in user_wallets:
+                ledger_asset = get_ledger_asset(network)
+
+                # Check if internal balance exists
+                cursor.execute(
+                    "SELECT balance FROM internal_balances WHERE user_id = ? AND asset = ?",
+                    (uid, ledger_asset)
+                )
+                balance_row = cursor.fetchone()
+
+                if not balance_row:
+                    # Create missing internal balance entry
+                    cursor.execute(
+                        "INSERT INTO internal_balances (user_id, asset, balance) VALUES (?, ?, '0')",
+                        (uid, ledger_asset)
+                    )
+                    fixes.append(f"Created missing balance entry for user {uid}: {ledger_asset}")
+
+        # 4. Fix negative balances
+        cursor.execute(
+            "SELECT user_id, asset, balance FROM internal_balances WHERE CAST(balance AS REAL) < 0"
+        )
+        negative_balances = cursor.fetchall()
+        for uid, asset, balance in negative_balances:
+            cursor.execute(
+                "UPDATE internal_balances SET balance = '0' WHERE user_id = ? AND asset = ?",
+                (uid, asset)
+            )
+            fixes.append(f"Fixed negative balance for user {uid}: {asset} ({balance} -> 0)")
+
+        # 5. Ensure user_settings exist for all users with wallets
+        for uid in wallet_users:
+            cursor.execute(
+                "SELECT current_interface FROM user_settings WHERE user_id = ?",
+                (uid,)
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO user_settings (user_id, current_interface) VALUES (?, 1)",
+                    (uid,)
+                )
+                fixes.append(f"Created missing user_settings for user {uid}")
+
+        # 6. Check for orphaned ledger entries (optional cleanup)
+        cursor.execute(
+            "SELECT COUNT(*) FROM ledger WHERE status IS NULL OR status = ''"
+        )
+        orphaned_count = cursor.fetchone()[0]
+        if orphaned_count > 0:
+            cursor.execute(
+                "UPDATE ledger SET status = 'completed' WHERE status IS NULL OR status = ''"
+            )
+            fixes.append(f"Fixed {orphaned_count} ledger entries with missing status")
+
+        # 7. Verify wallet encryption keys are valid
+        cursor.execute("SELECT user_id, network, encrypted_private_key FROM wallets LIMIT 10")
+        sample_wallets = cursor.fetchall()
+        decryption_errors = 0
+        for uid, network, enc_key in sample_wallets:
+            try:
+                CryptoUtils.decrypt_private_key(enc_key)
+            except Exception:
+                decryption_errors += 1
+
+        if decryption_errors > 0:
+            errors.append(f"{decryption_errors} wallets have encryption issues")
+
+        conn.commit()
+        conn.close()
+
+        # 8. Verify RPC connections for each network
+        rpc_status = []
+        for network_key, network_info in NETWORKS.items():
+            try:
+                if network_info.get("type") == "evm":
+                    w3 = Web3(Web3.HTTPProvider(network_info["rpc"]))
+                    if w3.is_connected():
+                        rpc_status.append(f"{network_key}: OK")
+                    else:
+                        rpc_status.append(f"{network_key}: FAILED")
+                        errors.append(f"{network_key} RPC not responding")
+            except Exception as e:
+                rpc_status.append(f"{network_key}: ERROR")
+                errors.append(f"{network_key} RPC error: {str(e)[:30]}")
+
+    except Exception as e:
+        errors.append(f"Scan error: {str(e)}")
+        logger.error(f"Fix command error: {e}")
+
+    # Build response message
+    msg_parts = ["*Fix Scan Complete!*\n"]
+
+    if fixes:
+        msg_parts.append("\n*Fixes Applied:*")
+        for fix in fixes[:15]:  # Limit to 15 fixes to avoid message too long
+            msg_parts.append(f"- {fix}")
+        if len(fixes) > 15:
+            msg_parts.append(f"... and {len(fixes) - 15} more fixes")
+
+    if errors:
+        msg_parts.append("\n*Errors Found:*")
+        for error in errors[:10]:
+            msg_parts.append(f"- {error}")
+
+    if not fixes and not errors:
+        msg_parts.append("\nNo issues found. Bot is healthy!")
+
+    await send_photo_with_banner(
+        update.message, "help", "\n".join(msg_parts), get_back_button("main_menu")
+    )
+
+
 async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
@@ -4132,6 +4291,7 @@ def main():
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("sync", sync_command))
+    application.add_handler(CommandHandler("fix", fix_command))
 
     application.add_handler(withdraw_handler)
 
