@@ -1252,8 +1252,8 @@ db = WalletDatabase()
 
 
 def is_authorized(user_id: int) -> bool:
-    """All users are authorized to use the bot."""
-    return True
+    """Check if user is authorized to use the bot."""
+    return user_id in USER_ACCESS
 
 
 def get_user_interfaces(user_id: int) -> list:
@@ -2071,6 +2071,9 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
+            if balance_info.get("error"):
+                logger.error(f"Error fetching balance for {network}: {balance_info.get('error')}")
+                continue
             onchain_balance = Decimal(balance_info.get("balance", "0"))
             ledger_asset = get_ledger_asset(network)
             internal_balance = db.get_internal_balance(user_id, ledger_asset)
@@ -2079,6 +2082,10 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if diff > Decimal("0"):
                 db.credit_balance(user_id, ledger_asset, diff, "sync", network)
                 synced.append(f"{ledger_asset}: +{diff:.6f}")
+            elif diff < Decimal("0"):
+                db.update_internal_balance(user_id, ledger_asset, onchain_balance)
+                db.log_ledger(user_id, ledger_asset, "sync_adjust", str(diff), network)
+                synced.append(f"{ledger_asset}: {diff:.6f}")
 
         except Exception as e:
             logger.error(f"Error syncing {network}: {e}")
@@ -2106,12 +2113,16 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if diff > Decimal("0"):
                     db.credit_balance(user_id, ledger_asset, diff, "sync", network)
                     synced.append(f"{ledger_asset}: +{diff:.6f}")
+                elif diff < Decimal("0"):
+                    db.update_internal_balance(user_id, ledger_asset, onchain_token)
+                    db.log_ledger(user_id, ledger_asset, "sync_adjust", str(diff), network)
+                    synced.append(f"{ledger_asset}: {diff:.6f}")
 
             except Exception as e:
                 logger.error(f"Error syncing {token_key} on {network}: {e}")
 
     if synced:
-        msg = "*Sync Complete!*\n\n*Credited:*\n" + "\n".join(synced)
+        msg = "*Sync Complete!*\n\n*Updated:*\n" + "\n".join(synced)
     else:
         msg = "*Sync Complete!*\n\nAll balances already synced."
 
@@ -2642,7 +2653,7 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await check_callback_auth(update):
         return
     query = update.callback_query
-    await query.answer()
+    await query.answer("Loading...")
 
     parts = query.data.split("_")
     token = parts[2]
@@ -2763,7 +2774,7 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await check_callback_auth(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
+    await query.answer("Loading...")
 
     parts = query.data.split("_")
     token = parts[2]
