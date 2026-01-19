@@ -4428,6 +4428,31 @@ def main():
 
     application.add_handler(withdraw_handler)
 
+    # Convert conversation handler
+    convert_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                show_convert_amount,
+                pattern=r"^convert_to_[A-Z]+$"
+            )
+        ],
+        states={
+            CONVERT_AMOUNT: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_convert_amount
+                )
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$"),
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
+            CallbackQueryHandler(show_convert_menu, pattern="^menu_convert$")
+        ],
+        per_message=False
+    )
+    application.add_handler(convert_handler)
+
     application.add_handler(
         CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
     )
@@ -4526,9 +4551,6 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_convert_to, pattern=r"^convert_from_[A-Z]+$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_convert_amount, pattern=r"^convert_to_[A-Z]+$")
     )
     application.add_handler(
         CallbackQueryHandler(execute_convert, pattern="^confirm_convert$")
