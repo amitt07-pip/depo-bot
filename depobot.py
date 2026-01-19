@@ -2959,14 +2959,15 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return ConversationHandler.END
 
+    # Use internal ledger balance instead of on-chain balance
+    # This allows cross-network withdrawals
     is_native = token_info.get("native", False)
     if is_native:
-        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+        ledger_asset = get_ledger_asset(network)
     else:
-        balance_info = await BalanceChecker.get_token_balance(
-            token, network, wallet["address"]
-        )
-    balance_str = balance_info.get("balance", "0")
+        ledger_asset = get_ledger_asset(network, token)
+    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    balance_str = str(internal_balance)
 
     context.user_data["withdraw_network"] = network
     context.user_data["withdraw_token"] = token
@@ -3304,8 +3305,11 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-    balance_str = balance_info.get("balance", "0")
+    # Use internal ledger balance instead of on-chain balance
+    # This allows cross-network withdrawals
+    ledger_asset = get_ledger_asset(network)
+    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    balance_str = str(internal_balance)
 
     context.user_data["withdraw_network"] = network
     context.user_data["withdraw_balance"] = balance_str
