@@ -3381,21 +3381,13 @@ async def receive_withdraw_amount(
         symbol = info["symbol"]
         icon = info["icon"]
 
-    keyboard = [
-        [InlineKeyboardButton(
-            "\u274c Cancel",
-            callback_data="cancel_withdraw"
-        )]
-    ]
-
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"{icon} *Withdraw {symbol}*\n\n"
         f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n\n"
         f"\U0001F4DD *Step 2/3:* Enter the destination address:\n\n"
         f"_Reply with the {info['name']} address_",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        parse_mode="Markdown"
     )
     context.user_data["withdraw_msg_id"] = msg.message_id
 
