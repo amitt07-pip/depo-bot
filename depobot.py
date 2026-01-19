@@ -291,13 +291,39 @@ COINGECKO_IDS = {
 
 
 class PriceFetcher:
+    # Cache for prices with timestamp
+    _price_cache = {}
+    _cache_ttl = 300  # 5 minutes cache
+    
+    # Fallback prices (approximate, updated periodically)
+    FALLBACK_PRICES = {
+        "ETH": Decimal("3200"),
+        "BNB": Decimal("600"),
+        "MATIC": Decimal("0.5"),
+        "SOL": Decimal("180"),
+        "TRX": Decimal("0.12"),
+        "LTC": Decimal("100"),
+        "USDT": Decimal("1.0"),
+        "USDC": Decimal("1.0"),
+    }
+    
     @staticmethod
     async def get_price(asset: str) -> Decimal:
         if asset in ["USDT", "USDC"]:
             return Decimal("1.0")
+        
+        # Check cache first
+        import time
+        cache_key = asset
+        if cache_key in PriceFetcher._price_cache:
+            cached_price, cached_time = PriceFetcher._price_cache[cache_key]
+            if time.time() - cached_time < PriceFetcher._cache_ttl:
+                return cached_price
+        
         cg_id = COINGECKO_IDS.get(asset)
         if not cg_id:
-            return Decimal("0")
+            return PriceFetcher.FALLBACK_PRICES.get(asset, Decimal("0"))
+        
         try:
             url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
             async with aiohttp.ClientSession() as session:
@@ -305,10 +331,16 @@ class PriceFetcher:
                     if resp.status == 200:
                         data = await resp.json()
                         price = data.get(cg_id, {}).get("usd", 0)
-                        return Decimal(str(price))
-        except Exception:
-            pass
-        return Decimal("0")
+                        if price > 0:
+                            price_decimal = Decimal(str(price))
+                            # Cache the price
+                            PriceFetcher._price_cache[cache_key] = (price_decimal, time.time())
+                            return price_decimal
+        except Exception as e:
+            logger.warning(f"CoinGecko API error for {asset}: {e}")
+        
+        # Return fallback price if API fails
+        return PriceFetcher.FALLBACK_PRICES.get(asset, Decimal("0"))
 
     @staticmethod
     async def get_conversion_rate(from_asset: str, to_asset: str) -> Decimal:
