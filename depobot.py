@@ -241,7 +241,7 @@ TOKENS = {
                 "decimals": 6
             },
             "SOLANA": {
-                "address": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                "address": "9AHM8xU6rW6sC4hZJcpciaT64tqstcw5o7cWW31eKZB5",
                 "decimals": 6
             }
         }
@@ -264,7 +264,7 @@ TOKENS = {
                 "decimals": 6
             },
             "SOLANA": {
-                "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "address": "9AHM8xU6rW6sC4hZJcpciaT64tqstcw5o7cWW31eKZB5",
                 "decimals": 6
             }
         }
