@@ -4402,6 +4402,10 @@ def main():
             CallbackQueryHandler(
                 show_combo_withdraw,
                 pattern=r"^withdraw_combo_[A-Z]+_[A-Z]+$"
+            ),
+            CallbackQueryHandler(
+                show_token_withdraw_networks,
+                pattern=r"^withdraw_token_[A-Z]+$"
             )
         ],
         states={
