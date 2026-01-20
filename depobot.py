@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import sqlite3
 import logging
@@ -7,6 +8,12 @@ import base64
 import aiohttp
 from typing import Optional
 from decimal import Decimal
+
+try:
+    import qrcode
+    QR_AVAILABLE = True
+except ImportError:
+    QR_AVAILABLE = False
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
@@ -47,6 +54,25 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 def get_banner_path(name: str) -> str:
     """Get the path to a banner image."""
     return os.path.join(ASSETS_DIR, f"{name}.png")
+
+
+def generate_qr_code(data: str) -> io.BytesIO:
+    """Generate a QR code image for the given data and return as BytesIO."""
+    if not QR_AVAILABLE:
+        return None
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
 
 
 async def edit_message_with_banner(
@@ -2661,6 +2687,7 @@ async def show_deposit_address(
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
     network = query.data.split("_")[1]
     user_id = query.from_user.id
@@ -2722,9 +2749,31 @@ async def show_deposit_address(
         f"Tap the address to copy it.\n\n"
         f"*Important:* Only send {info['symbol']} and {info['name']} tokens to this address!"
     )
-    await edit_message_with_banner(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard)
-    )
+
+    # Delete the old message
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    # Generate and send QR code with deposit address
+    qr_image = generate_qr_code(wallet['address'])
+    if qr_image:
+        from telegram import InputFile
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(qr_image, filename="deposit_qr.png"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def show_token_deposit_networks(
@@ -2770,6 +2819,7 @@ async def show_token_deposit_address(
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
     parts = query.data.split("_")
     token = parts[1]
@@ -2826,9 +2876,31 @@ async def show_token_deposit_address(
         f"*Important:* Only send {token_info['symbol']} ({network_info['name']} network) "
         f"to this address!"
     )
-    await edit_message_with_banner(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard)
-    )
+
+    # Delete the old message
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    # Generate and send QR code with deposit address
+    qr_image = generate_qr_code(wallet['address'])
+    if qr_image:
+        from telegram import InputFile
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(qr_image, filename="deposit_qr.png"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2836,6 +2908,7 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     query = update.callback_query
     await query.answer("Loading...")
+    chat_id = query.message.chat_id
 
     parts = query.data.split("_")
     token = parts[2]
@@ -2892,9 +2965,31 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n`{wallet['address']}`"
     )
-    await edit_message_with_banner(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard)
-    )
+
+    # Delete the old message
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    # Generate and send QR code with deposit address
+    qr_image = generate_qr_code(wallet['address'])
+    if qr_image:
+        from telegram import InputFile
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=InputFile(qr_image, filename="deposit_qr.png"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
