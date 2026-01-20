@@ -239,6 +239,10 @@ TOKENS = {
             "TRON": {
                 "address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
                 "decimals": 6
+            },
+            "SOLANA": {
+                "address": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                "decimals": 6
             }
         }
     },
