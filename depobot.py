@@ -2120,8 +2120,10 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if diff > Decimal("0"):
                 db.credit_balance(user_id, ledger_asset, diff, "sync", network)
                 synced.append(f"{ledger_asset}: +{diff:.6f}")
-            # Don't reduce internal balance when on-chain < internal
-            # This allows cross-network withdrawals (deposit on one network, withdraw on another)
+            elif diff < Decimal("0"):
+                # Debit when on-chain < internal (funds were withdrawn or sent out)
+                db.debit_balance(user_id, ledger_asset, abs(diff), "sync", network)
+                synced.append(f"{ledger_asset}: {diff:.6f}")
 
         except Exception as e:
             logger.error(f"Error syncing {network}: {e}")
@@ -2149,8 +2151,10 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if diff > Decimal("0"):
                     db.credit_balance(user_id, ledger_asset, diff, "sync", network)
                     synced.append(f"{ledger_asset}: +{diff:.6f}")
-                # Don't reduce internal balance when on-chain < internal
-                # This allows cross-network withdrawals (deposit on one network, withdraw on another)
+                elif diff < Decimal("0"):
+                    # Debit when on-chain < internal (funds were withdrawn or sent out)
+                    db.debit_balance(user_id, ledger_asset, abs(diff), "sync", network)
+                    synced.append(f"{ledger_asset}: {diff:.6f}")
 
             except Exception as e:
                 logger.error(f"Error syncing {token_key} on {network}: {e}")
