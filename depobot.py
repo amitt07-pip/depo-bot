@@ -2117,13 +2117,14 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             internal_balance = db.get_internal_balance(user_id, ledger_asset)
             diff = onchain_balance - internal_balance
 
-            if diff > Decimal("0"):
-                db.credit_balance(user_id, ledger_asset, diff, "sync", network)
-                synced.append(f"{ledger_asset}: +{diff:.6f}")
-            elif diff < Decimal("0"):
-                # Debit when on-chain < internal (funds were withdrawn or sent out)
-                db.debit_balance(user_id, ledger_asset, abs(diff), "sync", network)
-                synced.append(f"{ledger_asset}: {diff:.6f}")
+            if diff != Decimal("0"):
+                # Directly set internal balance to match on-chain balance
+                db.update_internal_balance(user_id, ledger_asset, onchain_balance)
+                db.log_ledger(user_id, ledger_asset, "sync", str(diff), network)
+                if diff > Decimal("0"):
+                    synced.append(f"{ledger_asset}: +{diff:.6f}")
+                else:
+                    synced.append(f"{ledger_asset}: {diff:.6f}")
 
         except Exception as e:
             logger.error(f"Error syncing {network}: {e}")
@@ -2148,13 +2149,14 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 internal_token = db.get_internal_balance(user_id, ledger_asset)
                 diff = onchain_token - internal_token
 
-                if diff > Decimal("0"):
-                    db.credit_balance(user_id, ledger_asset, diff, "sync", network)
-                    synced.append(f"{ledger_asset}: +{diff:.6f}")
-                elif diff < Decimal("0"):
-                    # Debit when on-chain < internal (funds were withdrawn or sent out)
-                    db.debit_balance(user_id, ledger_asset, abs(diff), "sync", network)
-                    synced.append(f"{ledger_asset}: {diff:.6f}")
+                if diff != Decimal("0"):
+                    # Directly set internal balance to match on-chain balance
+                    db.update_internal_balance(user_id, ledger_asset, onchain_token)
+                    db.log_ledger(user_id, ledger_asset, "sync", str(diff), network)
+                    if diff > Decimal("0"):
+                        synced.append(f"{ledger_asset}: +{diff:.6f}")
+                    else:
+                        synced.append(f"{ledger_asset}: {diff:.6f}")
 
             except Exception as e:
                 logger.error(f"Error syncing {token_key} on {network}: {e}")
