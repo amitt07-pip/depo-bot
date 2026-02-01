@@ -122,11 +122,11 @@ wallet_balances_cache = {}
 NETWORKS = {
     "ETH": {
         "name": "Ethereum",
-        "rpc": "https://eth.llamarpc.com",
+        "rpc": "https://ethereum.publicnode.com",
         "rpc_fallbacks": [
-            "https://rpc.ankr.com/eth",
-            "https://ethereum.publicnode.com",
-            "https://1rpc.io/eth"
+            "https://1rpc.io/eth",
+            "https://eth.drpc.org",
+            "https://rpc.builder0x69.io"
         ],
         "chain_id": 1,
         "symbol": "ETH",
@@ -140,7 +140,7 @@ NETWORKS = {
         "rpc_fallbacks": [
             "https://bsc-dataseed1.defibit.io",
             "https://bsc-dataseed1.ninicoin.io",
-            "https://rpc.ankr.com/bsc"
+            "https://bsc.publicnode.com"
         ],
         "chain_id": 56,
         "symbol": "BNB",
@@ -152,9 +152,9 @@ NETWORKS = {
         "name": "Polygon",
         "rpc": "https://polygon-rpc.com",
         "rpc_fallbacks": [
-            "https://rpc.ankr.com/polygon",
             "https://polygon.publicnode.com",
-            "https://1rpc.io/matic"
+            "https://1rpc.io/matic",
+            "https://polygon.drpc.org"
         ],
         "chain_id": 137,
         "symbol": "MATIC",
@@ -166,8 +166,8 @@ NETWORKS = {
         "name": "Solana",
         "rpc": "https://api.mainnet-beta.solana.com",
         "rpc_fallbacks": [
-            "https://solana-mainnet.rpc.extrnode.com",
-            "https://rpc.ankr.com/solana"
+            "https://solana.publicnode.com",
+            "https://solana-mainnet.rpc.extrnode.com"
         ],
         "symbol": "SOL",
         "explorer": "https://solscan.io",
