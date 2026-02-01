@@ -123,6 +123,11 @@ NETWORKS = {
     "ETH": {
         "name": "Ethereum",
         "rpc": "https://eth.llamarpc.com",
+        "rpc_fallbacks": [
+            "https://rpc.ankr.com/eth",
+            "https://ethereum.publicnode.com",
+            "https://1rpc.io/eth"
+        ],
         "chain_id": 1,
         "symbol": "ETH",
         "explorer": "https://etherscan.io",
@@ -132,6 +137,11 @@ NETWORKS = {
     "BSC": {
         "name": "BNB Chain",
         "rpc": "https://bsc-dataseed.binance.org",
+        "rpc_fallbacks": [
+            "https://bsc-dataseed1.defibit.io",
+            "https://bsc-dataseed1.ninicoin.io",
+            "https://rpc.ankr.com/bsc"
+        ],
         "chain_id": 56,
         "symbol": "BNB",
         "explorer": "https://bscscan.com",
@@ -141,6 +151,11 @@ NETWORKS = {
     "POLYGON": {
         "name": "Polygon",
         "rpc": "https://polygon-rpc.com",
+        "rpc_fallbacks": [
+            "https://rpc.ankr.com/polygon",
+            "https://polygon.publicnode.com",
+            "https://1rpc.io/matic"
+        ],
         "chain_id": 137,
         "symbol": "MATIC",
         "explorer": "https://polygonscan.com",
@@ -150,6 +165,10 @@ NETWORKS = {
     "SOLANA": {
         "name": "Solana",
         "rpc": "https://api.mainnet-beta.solana.com",
+        "rpc_fallbacks": [
+            "https://solana-mainnet.rpc.extrnode.com",
+            "https://rpc.ankr.com/solana"
+        ],
         "symbol": "SOL",
         "explorer": "https://solscan.io",
         "type": "solana",
@@ -158,6 +177,7 @@ NETWORKS = {
     "TRON": {
         "name": "Tron",
         "rpc": "https://api.trongrid.io",
+        "rpc_fallbacks": [],
         "symbol": "TRX",
         "explorer": "https://tronscan.org",
         "type": "tron",
@@ -166,12 +186,35 @@ NETWORKS = {
     "LTC": {
         "name": "Litecoin",
         "rpc": "https://ltc.getblock.io/mainnet/",
+        "rpc_fallbacks": [],
         "symbol": "LTC",
         "explorer": "https://blockchair.com/litecoin",
         "type": "ltc",
         "icon": "\U0001F315"
     }
 }
+
+# Helper function to get Web3 with retry and fallback
+def get_web3_with_retry(network: str, max_retries: int = 3):
+    """Get a Web3 instance, trying fallback RPCs if the primary fails."""
+    network_info = NETWORKS.get(network)
+    if not network_info:
+        return None
+    
+    rpcs = [network_info["rpc"]] + network_info.get("rpc_fallbacks", [])
+    
+    for rpc in rpcs:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 10}))
+            # Test connection
+            w3.eth.block_number
+            return w3
+        except Exception as e:
+            logger.warning(f"RPC {rpc} failed: {e}, trying next...")
+            continue
+    
+    # If all fail, return the primary anyway (let the caller handle the error)
+    return Web3(Web3.HTTPProvider(network_info["rpc"]))
 
 TOKENS = {
     "ETH": {
@@ -812,7 +855,7 @@ class BalanceChecker:
         token_address: str = None
     ) -> dict:
         network_info = NETWORKS[network]
-        w3 = Web3(Web3.HTTPProvider(network_info["rpc"]))
+        w3 = get_web3_with_retry(network)
 
         if token_address:
             contract = w3.eth.contract(
@@ -1028,7 +1071,7 @@ class WithdrawalHandler:
     @staticmethod
     async def check_gas_balance(network: str, address: str, token_address: str = None) -> dict:
         network_info = NETWORKS[network]
-        w3 = Web3(Web3.HTTPProvider(network_info["rpc"]))
+        w3 = get_web3_with_retry(network)
         try:
             native_balance = w3.eth.get_balance(address)
             gas_price = w3.eth.gas_price
@@ -1056,7 +1099,7 @@ class WithdrawalHandler:
         token_address: str = None
     ) -> dict:
         network_info = NETWORKS[network]
-        w3 = Web3(Web3.HTTPProvider(network_info["rpc"]))
+        w3 = get_web3_with_retry(network)
         account = Account.from_key(private_key)
 
         try:
