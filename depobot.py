@@ -1161,6 +1161,40 @@ class WithdrawalHandler:
             keypair = Keypair.from_bytes(base64.b64decode(private_key))
             to_pubkey = Pubkey.from_string(to_address)
             lamports = int(Decimal(amount) * Decimal(10 ** 9))
+            
+            # Check balance before attempting withdrawal
+            async with aiohttp.ClientSession() as session:
+                balance_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getBalance",
+                    "params": [str(keypair.pubkey())]
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=balance_payload
+                ) as resp:
+                    balance_data = await resp.json()
+                    current_balance = balance_data.get("result", {}).get("value", 0)
+                    
+                # Solana transaction fee is typically ~5000 lamports (0.000005 SOL)
+                estimated_fee_lamports = 5000
+                total_needed = lamports + estimated_fee_lamports
+                
+                if current_balance < total_needed:
+                    balance_sol = Decimal(current_balance) / Decimal(10 ** 9)
+                    needed_sol = Decimal(total_needed) / Decimal(10 ** 9)
+                    fee_sol = Decimal(estimated_fee_lamports) / Decimal(10 ** 9)
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Insufficient SOL for transaction.\n\n"
+                            f"Your balance: {float(balance_sol):.6f} SOL\n"
+                            f"Required: {float(needed_sol):.6f} SOL\n"
+                            f"(Amount: {amount} SOL + Fee: ~{float(fee_sol):.6f} SOL)\n\n"
+                            f"Please deposit more SOL to cover the transaction."
+                        )
+                    }
 
             async with aiohttp.ClientSession() as session:
                 payload = {
@@ -1230,6 +1264,29 @@ class WithdrawalHandler:
             from_address = priv_key.public_key.to_base58check_address()
 
             amount_sun = int(Decimal(amount) * Decimal(10 ** 6))
+            
+            # Check balance before attempting withdrawal
+            # Tron bandwidth fee is typically ~0.1 TRX for simple transfers
+            estimated_fee_sun = 100000  # 0.1 TRX in sun
+            total_needed = amount_sun + estimated_fee_sun
+            
+            current_balance = client.get_account_balance(from_address)
+            current_balance_sun = int(Decimal(str(current_balance)) * Decimal(10 ** 6))
+            
+            if current_balance_sun < total_needed:
+                balance_trx = Decimal(current_balance_sun) / Decimal(10 ** 6)
+                needed_trx = Decimal(total_needed) / Decimal(10 ** 6)
+                fee_trx = Decimal(estimated_fee_sun) / Decimal(10 ** 6)
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient TRX for transaction.\n\n"
+                        f"Your balance: {float(balance_trx):.6f} TRX\n"
+                        f"Required: {float(needed_trx):.6f} TRX\n"
+                        f"(Amount: {amount} TRX + Fee: ~{float(fee_trx):.6f} TRX)\n\n"
+                        f"Please deposit more TRX to cover the transaction."
+                    )
+                }
 
             txn = (
                 client.trx.transfer(from_address, to_address, amount_sun)
@@ -1327,10 +1384,17 @@ async def check_callback_auth(update: Update) -> bool:
 
 
 def get_friendly_error(error) -> str:
-    error_str = str(error).lower() if error else ""
+    error_str = str(error) if error else ""
+    error_str_lower = error_str.lower()
 
-    if "insufficient funds" in error_str or "balance 0" in error_str:
-        if "gas" in error_str:
+    # If the error already contains detailed balance/fee info, return it as-is
+    if "your balance:" in error_str_lower and "required" in error_str_lower:
+        return error_str
+    if "have" in error_str_lower and ("need" in error_str_lower or "required" in error_str_lower):
+        return error_str
+
+    if "insufficient funds" in error_str_lower or "balance 0" in error_str_lower:
+        if "gas" in error_str_lower:
             return (
                 "Insufficient native token for gas fees!\n\n"
                 "For token withdrawals (USDT, USDC), you need the native "
