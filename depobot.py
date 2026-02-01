@@ -2341,10 +2341,17 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     synced = []
+    
+    # First, aggregate token balances across all networks
+    # Tokens like USDT/USDC share a single ledger entry across networks
+    token_totals = {"USDT": Decimal("0"), "USDC": Decimal("0")}
+    token_details = {"USDT": [], "USDC": []}
+    
     for wallet in wallets:
         network = wallet["network"]
         address = wallet["address"]
 
+        # Sync native balances (these are per-network, so direct update is fine)
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
             if balance_info.get("error"):
@@ -2367,6 +2374,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error syncing {network}: {e}")
 
+        # Collect token balances across all networks (don't update yet)
         for token_key in ["USDT", "USDC"]:
             token_info = TOKENS.get(token_key, {})
             if network not in token_info.get("networks", {}):
@@ -2383,21 +2391,30 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 onchain_token = Decimal(token_balance_info.get("balance", "0"))
-                ledger_asset = get_ledger_asset(network, token_key)
-                internal_token = db.get_internal_balance(user_id, ledger_asset)
-                diff = onchain_token - internal_token
-
-                if diff != Decimal("0"):
-                    # Directly set internal balance to match on-chain balance
-                    db.update_internal_balance(user_id, ledger_asset, onchain_token)
-                    db.log_ledger(user_id, ledger_asset, "sync", str(diff), network)
-                    if diff > Decimal("0"):
-                        synced.append(f"{ledger_asset}: +{diff:.6f}")
-                    else:
-                        synced.append(f"{ledger_asset}: {diff:.6f}")
+                token_totals[token_key] += onchain_token
+                if onchain_token > Decimal("0"):
+                    token_details[token_key].append(f"{network}: {onchain_token:.6f}")
 
             except Exception as e:
-                logger.error(f"Error syncing {token_key} on {network}: {e}")
+                logger.error(f"Error fetching {token_key} on {network}: {e}")
+
+    # Now update token balances with the aggregated totals
+    for token_key in ["USDT", "USDC"]:
+        total_onchain = token_totals[token_key]
+        ledger_asset = get_ledger_asset(None, token_key)  # Just returns token_key
+        internal_balance = db.get_internal_balance(user_id, ledger_asset)
+        diff = total_onchain - internal_balance
+
+        if diff != Decimal("0"):
+            db.update_internal_balance(user_id, ledger_asset, total_onchain)
+            db.log_ledger(user_id, ledger_asset, "sync", str(diff), "ALL")
+            if diff > Decimal("0"):
+                synced.append(f"{ledger_asset}: +{diff:.6f}")
+            else:
+                synced.append(f"{ledger_asset}: {diff:.6f}")
+            # Add network breakdown if there are details
+            if token_details[token_key]:
+                synced.append(f"  ({', '.join(token_details[token_key])})")
 
     if synced:
         msg = "*Sync Complete!*\n\n*Updated:*\n" + "\n".join(synced)
