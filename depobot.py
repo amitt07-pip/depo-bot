@@ -1293,6 +1293,137 @@ class WithdrawalHandler:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    async def withdraw_solana_token(
+        private_key: str,
+        to_address: str,
+        amount: str,
+        token_mint: str,
+        decimals: int = 6
+    ) -> dict:
+        """Withdraw SPL tokens (USDT/USDC) on Solana."""
+        try:
+            from solders.keypair import Keypair
+            from solders.pubkey import Pubkey
+            from solders.transaction import Transaction
+            from solders.message import Message
+            from solders.hash import Hash
+            from solders.instruction import Instruction, AccountMeta
+            import aiohttp
+            import struct
+
+            keypair = Keypair.from_bytes(base64.b64decode(private_key))
+            to_pubkey = Pubkey.from_string(to_address)
+            mint_pubkey = Pubkey.from_string(token_mint)
+            
+            # SPL Token Program ID
+            TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+            ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+            
+            # Calculate token amount with decimals
+            token_amount = int(Decimal(amount) * Decimal(10 ** decimals))
+            
+            async with aiohttp.ClientSession() as session:
+                # Check SOL balance for gas fees
+                balance_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getBalance",
+                    "params": [str(keypair.pubkey())]
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=balance_payload
+                ) as resp:
+                    balance_data = await resp.json()
+                    sol_balance = balance_data.get("result", {}).get("value", 0)
+                
+                # SPL token transfer needs ~5000 lamports for fee
+                estimated_fee_lamports = 10000  # Slightly higher for token transfers
+                
+                if sol_balance < estimated_fee_lamports:
+                    balance_sol = Decimal(sol_balance) / Decimal(10 ** 9)
+                    fee_sol = Decimal(estimated_fee_lamports) / Decimal(10 ** 9)
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Insufficient SOL for gas fees.\n\n"
+                            f"Your SOL balance: {float(balance_sol):.6f} SOL\n"
+                            f"Required fee: ~{float(fee_sol):.6f} SOL\n\n"
+                            f"Please deposit some SOL to cover the transaction fee."
+                        )
+                    }
+                
+                # Get or derive Associated Token Accounts (ATAs)
+                def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
+                    seeds = [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)]
+                    program_address, _ = Pubkey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
+                    return program_address
+                
+                from_ata = get_associated_token_address(keypair.pubkey(), mint_pubkey)
+                to_ata = get_associated_token_address(to_pubkey, mint_pubkey)
+                
+                # Get latest blockhash
+                blockhash_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": []
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=blockhash_payload
+                ) as resp:
+                    data = await resp.json()
+                    blockhash = Hash.from_string(data["result"]["value"]["blockhash"])
+                
+                # Build SPL Token transfer instruction
+                # Instruction data: [3] (transfer instruction) + [amount as u64 little-endian]
+                transfer_data = bytes([3]) + struct.pack('<Q', token_amount)
+                
+                transfer_ix = Instruction(
+                    program_id=TOKEN_PROGRAM_ID,
+                    accounts=[
+                        AccountMeta(pubkey=from_ata, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=to_ata, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=False),
+                    ],
+                    data=transfer_data
+                )
+                
+                msg = Message.new_with_blockhash([transfer_ix], keypair.pubkey(), blockhash)
+                tx = Transaction.new_unsigned(msg)
+                tx.sign([keypair], blockhash)
+                
+                tx_bytes = bytes(tx)
+                tx_base64 = base64.b64encode(tx_bytes).decode()
+                
+                # Send transaction
+                send_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "sendTransaction",
+                    "params": [tx_base64, {"encoding": "base64"}]
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=send_payload
+                ) as resp:
+                    data = await resp.json()
+                    if "result" in data:
+                        return {
+                            "success": True,
+                            "tx_hash": data["result"],
+                            "explorer_url": f"{NETWORKS['SOLANA']['explorer']}/tx/{data['result']}"
+                        }
+                    error_msg = data.get("error", {})
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get("message", str(error_msg))
+                    return {"success": False, "error": str(error_msg)}
+        except Exception as e:
+            logger.error(f"Solana token withdrawal error: {e}")
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
     async def withdraw_tron(
         private_key: str,
         to_address: str,
@@ -3807,6 +3938,11 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if token_address and info["type"] == "evm":
             result = await WithdrawalHandler.withdraw_evm(
                 network, private_key, address, amount, token_address
+            )
+        elif token_address and info["type"] == "solana":
+            # SPL token withdrawal on Solana (USDT/USDC)
+            result = await WithdrawalHandler.withdraw_solana_token(
+                private_key, address, amount, token_address, decimals=6
             )
         else:
             result = await WithdrawalHandler.withdraw(
