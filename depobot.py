@@ -4720,10 +4720,82 @@ async def transaction_monitor_loop(application):
         await asyncio.sleep(60)
 
 
+async def background_sync_balances():
+    """Background task to sync balances every 30 seconds."""
+    import asyncio
+    logger.info("Background balance sync started - syncing every 30 seconds")
+    await asyncio.sleep(15)  # Offset from transaction monitor
+    
+    while True:
+        try:
+            # Sync balances for all authorized users
+            for user_id in USER_ACCESS.keys():
+                wallets = db.get_all_wallets(user_id)
+                if not wallets:
+                    continue
+                
+                # Aggregate token balances across all networks
+                token_totals = {"USDT": Decimal("0"), "USDC": Decimal("0")}
+                
+                for wallet in wallets:
+                    network = wallet["network"]
+                    address = wallet["address"]
+                    
+                    # Sync native balances
+                    try:
+                        balance_info = await BalanceChecker.get_balance(network, address)
+                        if not balance_info.get("error"):
+                            onchain_balance = Decimal(balance_info.get("balance", "0"))
+                            ledger_asset = get_ledger_asset(network)
+                            internal_balance = db.get_internal_balance(user_id, ledger_asset)
+                            
+                            if onchain_balance != internal_balance:
+                                db.update_internal_balance(user_id, ledger_asset, onchain_balance)
+                                logger.info(f"Background sync: {user_id} {ledger_asset} {internal_balance} -> {onchain_balance}")
+                    except Exception as e:
+                        logger.debug(f"Background sync error for {network}: {e}")
+                    
+                    # Collect token balances
+                    for token_key in ["USDT", "USDC"]:
+                        token_info = TOKENS.get(token_key, {})
+                        if network not in token_info.get("networks", {}):
+                            continue
+                        network_token = token_info["networks"][network]
+                        if network_token.get("native"):
+                            continue
+                        
+                        try:
+                            token_balance_info = await BalanceChecker.get_token_balance(
+                                token_key, network, address
+                            )
+                            if not token_balance_info.get("error"):
+                                onchain_token = Decimal(token_balance_info.get("balance", "0"))
+                                token_totals[token_key] += onchain_token
+                        except Exception as e:
+                            logger.debug(f"Background sync error for {token_key} on {network}: {e}")
+                
+                # Update aggregated token balances
+                for token_key in ["USDT", "USDC"]:
+                    total_onchain = token_totals[token_key]
+                    ledger_asset = get_ledger_asset(None, token_key)
+                    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+                    
+                    if total_onchain != internal_balance:
+                        db.update_internal_balance(user_id, ledger_asset, total_onchain)
+                        logger.info(f"Background sync: {user_id} {ledger_asset} {internal_balance} -> {total_onchain}")
+                
+        except Exception as e:
+            logger.error(f"Background sync error: {e}")
+        
+        await asyncio.sleep(30)
+
+
 async def start_transaction_monitor(application):
     import asyncio
     asyncio.create_task(transaction_monitor_loop(application))
     logger.info("Transaction monitor background task created")
+    asyncio.create_task(background_sync_balances())
+    logger.info("Background balance sync task created")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
