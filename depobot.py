@@ -1508,6 +1508,10 @@ class WithdrawalHandler:
             return await WithdrawalHandler.withdraw_tron(
                 private_key, to_address, amount
             )
+        elif network_info["type"] == "ltc":
+            return {"success": False, "error": "LTC withdrawals are not yet supported. Please contact support."}
+        
+        return {"success": False, "error": f"Unsupported network type: {network_info['type']}"}
 
 
 db = WalletDatabase()
@@ -3971,6 +3975,14 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id, network, "withdraw", amount,
                 result.get("tx_hash"), address, None, "completed"
             )
+            
+            # Debit the internal balance after successful withdrawal
+            if token:
+                ledger_asset = token
+            else:
+                ledger_asset = get_ledger_asset(network)
+            withdraw_amount = Decimal(amount)
+            db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, result.get("tx_hash"))
 
             keyboard = [
                 [InlineKeyboardButton(
