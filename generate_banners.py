@@ -149,7 +149,7 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors):
     print(f"Created {filename}")
 
 banners = [
-    ("VM DEPO BOT", "Secure Crypto Wallet", "welcome.png", 
+    ("VM DEPO BOT 2.0", "Secure Crypto Wallet", "welcome.png", 
      (99, 102, 241), [(10, 10, 30), (20, 20, 50), (30, 25, 60)]),
     
     ("BALANCE", "View Your Assets", "balance.png", 
@@ -220,7 +220,7 @@ def create_profile_picture():
     text_width = text_bbox[2] - text_bbox[0]
     text_height = text_bbox[3] - text_bbox[1]
     text_x = (size - text_width) // 2
-    text_y = (size - text_height) // 2 - 50
+    text_y = (size - text_height) // 2 - 70
     
     for offset in range(10, 0, -2):
         glow_alpha = int(40 * (offset / 10))
@@ -234,8 +234,22 @@ def create_profile_picture():
     sub_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
     sub_width = sub_bbox[2] - sub_bbox[0]
     sub_x = (size - sub_width) // 2
-    sub_y = text_y + text_height + 20
+    sub_y = text_y + text_height + 15
     draw.text((sub_x, sub_y), subtitle, font=subtitle_font, fill=accent_color)
+    
+    try:
+        version_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+    except:
+        version_font = ImageFont.load_default()
+    version_text = "2.0"
+    ver_bbox = draw.textbbox((0, 0), version_text, font=version_font)
+    ver_width = ver_bbox[2] - ver_bbox[0]
+    ver_x = (size - ver_width) // 2
+    ver_y = sub_y + 45
+    for offset in range(6, 0, -2):
+        glow_color = (accent_color[0]//2, accent_color[1]//2, accent_color[2]//2)
+        draw.text((ver_x, ver_y + offset), version_text, font=version_font, fill=glow_color)
+    draw.text((ver_x, ver_y), version_text, font=version_font, fill=(255, 255, 255))
     
     line_y = sub_y + 50
     line_width = 150
