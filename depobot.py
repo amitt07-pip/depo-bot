@@ -4075,6 +4075,13 @@ async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAU
 
     token_info = TOKENS.get(token, {})
     network_info = NETWORKS.get(network, {})
+    
+    # Set the token contract address for non-native tokens
+    token_network_info = token_info.get("networks", {}).get(network, {})
+    if not token_info.get("native") and token_network_info.get("address"):
+        context.user_data["withdraw_token_address"] = token_network_info["address"]
+    else:
+        context.user_data["withdraw_token_address"] = None
 
     wallet = db.get_wallet(user_id, network)
     if not wallet:
