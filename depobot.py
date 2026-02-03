@@ -2106,11 +2106,30 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = "*Deposit*\nSelect asset to receive:"
+    chat_id = update.message.chat_id
 
-    await send_photo_with_banner(
-        update.message, "deposit", text, get_network_keyboard("deposit")
+    text = (
+        "\U0001F4E5 *Deposit*\n\n"
+        "Which token would you like to deposit?\n\n"
+        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "_Tap the button below to see all supported tokens_"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("deposit"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["deposit_msg_id"] = msg.message_id
+
+    return DEPOSIT_TOKEN
 
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2122,11 +2141,30 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = "*Withdraw*\nSelect asset to send:"
+    chat_id = update.message.chat_id
 
-    await send_photo_with_banner(
-        update.message, "withdraw", text, get_network_keyboard("withdraw")
+    text = (
+        "\U0001F4E4 *Withdraw*\n\n"
+        "Which token would you like to withdraw?\n\n"
+        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "_Tap the button below to see all supported tokens_"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+
+    return WITHDRAW_TOKEN
 
 
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5376,6 +5414,7 @@ def main():
 
     deposit_handler = ConversationHandler(
         entry_points=[
+            CommandHandler("deposit", deposit_command),
             CallbackQueryHandler(
                 show_deposit_menu,
                 pattern=r"^menu_deposit$"
@@ -5409,6 +5448,7 @@ def main():
 
     withdraw_handler = ConversationHandler(
         entry_points=[
+            CommandHandler("withdraw", withdraw_command),
             CallbackQueryHandler(
                 show_withdraw_menu,
                 pattern=r"^menu_withdraw$"
@@ -5477,8 +5517,6 @@ def main():
     application.add_handler(CommandHandler("send", send_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
-    application.add_handler(CommandHandler("deposit", deposit_command))
-    application.add_handler(CommandHandler("withdraw", withdraw_command))
     application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CommandHandler("convert", convert_command))
     application.add_handler(CommandHandler("tokens", tokens_command))
