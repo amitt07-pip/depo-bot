@@ -42,6 +42,34 @@ def add_noise_texture(img, intensity=10):
             pixels[x, y] = (r, g, b)
     return img
 
+def add_glitch_effect(img, accent_color, intensity=3):
+    """Add a subtle glitch/scan line effect."""
+    import random
+    width, height = img.size
+    pixels = img.load()
+    
+    for i in range(intensity):
+        y = random.randint(0, height - 1)
+        shift = random.randint(2, 8)
+        for x in range(width - shift):
+            pixels[x, y] = pixels[x + shift, y]
+    
+    for y in range(0, height, 4):
+        for x in range(width):
+            r, g, b = pixels[x, y]
+            pixels[x, y] = (max(0, r - 5), max(0, g - 5), max(0, b - 5))
+    
+    draw = ImageDraw.Draw(img)
+    for i in range(2):
+        y = random.randint(height // 4, 3 * height // 4)
+        glitch_color = (accent_color[0], accent_color[1], accent_color[2])
+        x_start = random.randint(0, width // 4)
+        x_end = x_start + random.randint(50, 150)
+        draw.line([(x_start, y), (x_end, y)], fill=glitch_color, width=1)
+        draw.line([(width - x_end, y + 2), (width - x_start, y + 2)], fill=glitch_color, width=1)
+    
+    return img
+
 def draw_glow_circle(draw, center, radius, color, alpha_steps=20):
     """Draw a glowing circle effect."""
     for i in range(alpha_steps, 0, -1):
@@ -57,26 +85,22 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors):
     
     img = create_modern_gradient(width, height, gradient_colors)
     img = add_noise_texture(img, 5)
+    img = add_glitch_effect(img, accent_color, intensity=4)
     
     draw = ImageDraw.Draw(img)
-    
-    for i in range(3):
-        cx = width * (0.2 + i * 0.3)
-        cy = height * 0.3
-        for r in range(80, 20, -10):
-            alpha = int(15 * (r / 80))
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], 
-                        outline=(accent_color[0], accent_color[1], accent_color[2]), width=1)
     
     draw.rounded_rectangle([(40, 40), (width - 40, height - 40)], 
                           radius=20, outline=accent_color, width=2)
     
-    pill_width = 80
-    pill_height = 30
-    pill_x = (width - pill_width) // 2
-    pill_y = 55
-    draw.rounded_rectangle([(pill_x, pill_y), (pill_x + pill_width, pill_y + pill_height)], 
-                          radius=15, fill=accent_color)
+    corner_size = 25
+    draw.line([(50, 50), (50 + corner_size, 50)], fill=accent_color, width=2)
+    draw.line([(50, 50), (50, 50 + corner_size)], fill=accent_color, width=2)
+    draw.line([(width - 50 - corner_size, 50), (width - 50, 50)], fill=accent_color, width=2)
+    draw.line([(width - 50, 50), (width - 50, 50 + corner_size)], fill=accent_color, width=2)
+    draw.line([(50, height - 50 - corner_size), (50, height - 50)], fill=accent_color, width=2)
+    draw.line([(50, height - 50), (50 + corner_size, height - 50)], fill=accent_color, width=2)
+    draw.line([(width - 50, height - 50 - corner_size), (width - 50, height - 50)], fill=accent_color, width=2)
+    draw.line([(width - 50 - corner_size, height - 50), (width - 50, height - 50)], fill=accent_color, width=2)
     
     try:
         title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
@@ -167,6 +191,7 @@ def create_profile_picture():
     
     img = create_modern_gradient(size, size, gradient_colors)
     img = add_noise_texture(img, 5)
+    img = add_glitch_effect(img, accent_color, intensity=3)
     
     draw = ImageDraw.Draw(img)
     
