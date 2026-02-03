@@ -1528,6 +1528,65 @@ class WithdrawalHandler:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    async def withdraw_tron_token(
+        private_key: str,
+        to_address: str,
+        amount: str,
+        token_address: str,
+        decimals: int = 6
+    ) -> dict:
+        try:
+            from tronpy import Tron
+            from tronpy.keys import PrivateKey
+
+            client = Tron()
+            priv_key = PrivateKey(bytes.fromhex(private_key))
+            from_address = priv_key.public_key.to_base58check_address()
+
+            amount_smallest = int(Decimal(amount) * Decimal(10 ** decimals))
+            
+            current_trx_balance = client.get_account_balance(from_address)
+            current_trx_sun = int(Decimal(str(current_trx_balance)) * Decimal(10 ** 6))
+            estimated_fee_sun = 15_000_000
+            
+            if current_trx_sun < estimated_fee_sun:
+                fee_trx = Decimal(estimated_fee_sun) / Decimal(10 ** 6)
+                balance_trx = Decimal(current_trx_sun) / Decimal(10 ** 6)
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient TRX for gas fees.\n\n"
+                        f"Your TRX balance: {float(balance_trx):.6f} TRX\n"
+                        f"Required for gas: ~{float(fee_trx):.6f} TRX\n\n"
+                        f"Please deposit more TRX to cover the transaction fee."
+                    )
+                }
+
+            contract = client.get_contract(token_address)
+            txn = (
+                contract.functions.transfer(to_address, amount_smallest)
+                .with_owner(from_address)
+                .fee_limit(15_000_000)
+                .build()
+                .sign(priv_key)
+            )
+            result = txn.broadcast()
+
+            if result.get("result"):
+                return {
+                    "success": True,
+                    "tx_hash": result["txid"],
+                    "explorer_url": (
+                        f"{NETWORKS['TRON']['explorer']}"
+                        f"/#/transaction/{result['txid']}"
+                    )
+                }
+            return {"success": False, "error": str(result)}
+        except Exception as e:
+            logger.error(f"Tron token withdrawal error: {e}")
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
     async def withdraw(
         network: str,
         private_key: str,
@@ -4424,8 +4483,11 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 network, private_key, address, amount, token_address
             )
         elif token_address and info["type"] == "solana":
-            # SPL token withdrawal on Solana (USDT/USDC)
             result = await WithdrawalHandler.withdraw_solana_token(
+                private_key, address, amount, token_address, decimals=6
+            )
+        elif token_address and info["type"] == "tron":
+            result = await WithdrawalHandler.withdraw_tron_token(
                 private_key, address, amount, token_address, decimals=6
             )
         else:
