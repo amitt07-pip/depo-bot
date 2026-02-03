@@ -78,33 +78,48 @@ def generate_qr_code(data: str) -> io.BytesIO:
 async def edit_message_with_banner(
     query, banner_name: str, caption: str, reply_markup
 ):
-    """Delete the old message and send a new one with banner image."""
-    chat_id = query.message.chat_id
-    
-    # Delete the old message first
+    """Edit the message caption and keyboard. Falls back to delete/send if needed."""
     try:
-        await query.message.delete()
-    except Exception:
-        pass
-    
-    # Send new message with banner
-    banner_path = get_banner_path(banner_name)
-    if os.path.exists(banner_path):
-        with open(banner_path, "rb") as photo:
-            await query.get_bot().send_photo(
-                chat_id=chat_id,
-                photo=photo,
+        # Check if current message is a photo message
+        if query.message.photo:
+            # Edit the caption and reply markup of the existing photo message
+            await query.message.edit_caption(
                 caption=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
-    else:
-        await query.get_bot().send_message(
-            chat_id=chat_id,
-            text=caption,
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-        )
+        else:
+            # Current message is text, try to edit it
+            await query.message.edit_text(
+                text=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    except Exception:
+        # If editing fails (e.g., message type mismatch), fall back to delete/send
+        chat_id = query.message.chat_id
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        
+        banner_path = get_banner_path(banner_name)
+        if os.path.exists(banner_path):
+            with open(banner_path, "rb") as photo:
+                await query.get_bot().send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+        else:
+            await query.get_bot().send_message(
+                chat_id=chat_id,
+                text=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -3020,13 +3035,24 @@ async def show_deposit_address(
         f"*Important:* Only send {info['symbol']} and {info['name']} tokens to this address!"
     )
 
-    # Delete the old message
+    # Try to edit the message first, fall back to delete/send for QR code
+    try:
+        if query.message.photo:
+            await query.message.edit_caption(
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+    except Exception:
+        pass
+
+    # Need to send new message with QR code
     try:
         await query.message.delete()
     except Exception:
         pass
 
-    # Generate and send QR code with deposit address
     qr_image = generate_qr_code(wallet['address'])
     if qr_image:
         from telegram import InputFile
@@ -3147,13 +3173,24 @@ async def show_token_deposit_address(
         f"to this address!"
     )
 
-    # Delete the old message
+    # Try to edit the message first, fall back to delete/send for QR code
+    try:
+        if query.message.photo:
+            await query.message.edit_caption(
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+    except Exception:
+        pass
+
+    # Need to send new message with QR code
     try:
         await query.message.delete()
     except Exception:
         pass
 
-    # Generate and send QR code with deposit address
     qr_image = generate_qr_code(wallet['address'])
     if qr_image:
         from telegram import InputFile
@@ -3236,13 +3273,24 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"*Address:*\n`{wallet['address']}`"
     )
 
-    # Delete the old message
+    # Try to edit the message first, fall back to delete/send for QR code
+    try:
+        if query.message.photo:
+            await query.message.edit_caption(
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+    except Exception:
+        pass
+
+    # Need to send new message with QR code
     try:
         await query.message.delete()
     except Exception:
         pass
 
-    # Generate and send QR code with deposit address
     qr_image = generate_qr_code(wallet['address'])
     if qr_image:
         from telegram import InputFile
