@@ -384,9 +384,59 @@ ERC20_ABI = [
     }
 ]
 
-WITHDRAW_AMOUNT, WITHDRAW_ADDRESS, WITHDRAW_CONFIRM = range(3)
+WITHDRAW_TOKEN, WITHDRAW_NETWORK, WITHDRAW_CONFIRM_SELECTION, WITHDRAW_AMOUNT, WITHDRAW_ADDRESS, WITHDRAW_CONFIRM = range(6)
+DEPOSIT_TOKEN, DEPOSIT_NETWORK, DEPOSIT_CONFIRM_SELECTION = range(6, 9)
 
 pending_withdrawals = {}
+
+TOKEN_ALIASES = {
+    "usdt": "USDT", "tether": "USDT", "usd tether": "USDT",
+    "usdc": "USDC", "usd coin": "USDC", "circle": "USDC",
+    "eth": "ETH", "ethereum": "ETH", "ether": "ETH",
+    "bnb": "BNB", "binance": "BNB", "binance coin": "BNB",
+    "matic": "MATIC", "polygon": "MATIC", "pol": "MATIC",
+    "sol": "SOL", "solana": "SOL",
+    "trx": "TRX", "tron": "TRX",
+    "ltc": "LTC", "litecoin": "LTC", "lite coin": "LTC",
+}
+
+NETWORK_ALIASES = {
+    "eth": "ETH", "ethereum": "ETH", "eth mainnet": "ETH", "ethereum mainnet": "ETH",
+    "bsc": "BSC", "binance": "BSC", "binance smart chain": "BSC", "bnb chain": "BSC", "bnb": "BSC",
+    "polygon": "POLYGON", "matic": "POLYGON", "poly": "POLYGON",
+    "solana": "SOLANA", "sol": "SOLANA",
+    "tron": "TRON", "trx": "TRON",
+    "ltc": "LTC", "litecoin": "LTC",
+}
+
+def detect_token_from_text(text: str):
+    """Detect token from natural language input."""
+    text_lower = text.lower().strip()
+    for alias, token in TOKEN_ALIASES.items():
+        if alias in text_lower:
+            return token
+    for token in TOKENS.keys():
+        if token.lower() in text_lower:
+            return token
+    return None
+
+def detect_network_from_text(text: str):
+    """Detect network from natural language input."""
+    text_lower = text.lower().strip()
+    for alias, network in NETWORK_ALIASES.items():
+        if alias in text_lower:
+            return network
+    for network in NETWORKS.keys():
+        if network.lower() in text_lower:
+            return network
+    return None
+
+def get_available_networks_for_token(token: str):
+    """Get list of networks that support a given token."""
+    token_info = TOKENS.get(token)
+    if not token_info:
+        return []
+    return list(token_info.get("networks", {}).keys())
 
 COINGECKO_IDS = {
     "ETH": "ethereum",
@@ -2977,12 +3027,248 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
-    text = "*Deposit*\nSelect asset to receive:"
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
-    await edit_message_with_banner(
-        query, "deposit", text, get_network_keyboard("deposit")
+    text = (
+        "\U0001F4E5 *Deposit*\n\n"
+        "Which token would you like to deposit?\n\n"
+        "Just type the token name (e.g., 'USDT', 'ETH', 'I want to deposit SOL')\n\n"
+        "_Tap the button below to see all supported tokens_"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("deposit"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["deposit_msg_id"] = msg.message_id
+
+    return DEPOSIT_TOKEN
+
+
+async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse token from user's natural language input for deposit."""
+    text = update.message.text.strip()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "deposit_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["deposit_msg_id"])
+        except Exception:
+            pass
+
+    token = detect_token_from_text(text)
+
+    if not token:
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("deposit"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Token Not Recognized*\n\n"
+                f"I couldn't understand which token you want to deposit.\n\n"
+                "Please try again (e.g., 'USDT', 'ETH', 'solana')\n\n"
+                "_Tap the button below to see all supported tokens_"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+                [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+            ])
+        )
+        context.user_data["deposit_msg_id"] = msg.message_id
+        return DEPOSIT_TOKEN
+
+    context.user_data["deposit_token"] = token
+    available_networks = get_available_networks_for_token(token)
+
+    if len(available_networks) == 1:
+        context.user_data["deposit_network"] = available_networks[0]
+        return await ask_deposit_confirmation(update, context, chat_id)
+
+    network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
+    networks_str = ", ".join(network_names)
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("deposit"), "rb"),
+        caption=(
+            f"\U0001F4E5 *Deposit {token}*\n\n"
+            f"Which network would you like to use?\n\n"
+            f"_Available networks: {networks_str}_\n\n"
+            "Just type the network name (e.g., 'Polygon', 'BSC', 'Ethereum')"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+    )
+    context.user_data["deposit_msg_id"] = msg.message_id
+
+    return DEPOSIT_NETWORK
+
+
+async def receive_deposit_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse network from user's natural language input for deposit."""
+    text = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "deposit_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["deposit_msg_id"])
+        except Exception:
+            pass
+
+    token = context.user_data.get("deposit_token")
+    available_networks = get_available_networks_for_token(token)
+
+    network = detect_network_from_text(text)
+
+    if not network or network not in available_networks:
+        network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
+        networks_str = ", ".join(network_names)
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("deposit"), "rb"),
+            caption=(
+                f"\u26a0\ufe0f *Network Not Recognized*\n\n"
+                f"I couldn't understand which network you want to use for {token}.\n\n"
+                f"_Available networks: {networks_str}_\n\n"
+                "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["deposit_msg_id"] = msg.message_id
+        return DEPOSIT_NETWORK
+
+    context.user_data["deposit_network"] = network
+    return await ask_deposit_confirmation(update, context, chat_id)
+
+
+async def ask_deposit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Ask user to confirm their token and network selection for deposit."""
+    token = context.user_data.get("deposit_token")
+    network = context.user_data.get("deposit_network")
+
+    token_info = TOKENS.get(token, {})
+    network_info = NETWORKS.get(network, {})
+
+    keyboard = [
+        [
+            InlineKeyboardButton("\u2705 Yes, proceed", callback_data="confirm_deposit_selection"),
+            InlineKeyboardButton("\u274c No, restart", callback_data="menu_deposit")
+        ]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("deposit"), "rb"),
+        caption=(
+            f"\U0001F4E5 *Confirm Deposit*\n\n"
+            f"{token_info.get('icon', '')} *Token:* {token_info.get('name', token)} ({token})\n"
+            f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n\n"
+            "Is this correct?"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["deposit_msg_id"] = msg.message_id
+
+    return DEPOSIT_CONFIRM_SELECTION
+
+
+async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User confirmed their token/network selection, show deposit address."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    token = context.user_data.get("deposit_token")
+    network = context.user_data.get("deposit_network")
+
+    token_info = TOKENS.get(token, {})
+    network_info = NETWORKS.get(network, {})
+
+    wallet = db.get_wallet(user_id, network)
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(f"\u2795 Generate {network_info['name']} Wallet", callback_data=f"gen_{network}")],
+            [InlineKeyboardButton("\U0001F519 Back", callback_data="menu_deposit")]
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"\u26a0\ufe0f *No {network_info['name']} Wallet*\n\nGenerate a wallet first to deposit.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    address = wallet["address"]
+    qr_buffer = generate_qr_code(address)
+
+    if network == "SOLANA":
+        balance = await BalanceChecker.get_solana_balance(address)
+    elif network == "TRON":
+        balance = await BalanceChecker.get_tron_balance(address)
+    elif network == "LTC":
+        balance = await BalanceChecker.get_ltc_balance(address)
+    else:
+        balance = await BalanceChecker.get_evm_balance(address, network)
+
+    if token in ["USDT", "USDC"]:
+        token_balance = await BalanceChecker.get_token_balance(address, network, token)
+        balance_display = f"`{token_balance}` {token}"
+    else:
+        balance_display = f"`{balance}` {token}"
+
+    keyboard = [
+        [InlineKeyboardButton("\U0001F504 Refresh Balance", callback_data=f"refresh_deposit_{network}_{token}")],
+        [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
+    ]
+
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=qr_buffer,
+        caption=(
+            f"\U0001F4E5 *Deposit {token}*\n\n"
+            f"{token_info.get('icon', '')} *Token:* {token}\n"
+            f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n\n"
+            f"\U0001F4CD *Deposit Address:*\n`{address}`\n\n"
+            f"\U0001F4B0 *Current Balance:* {balance_display}\n\n"
+            f"\u26a0\ufe0f _Only send {token} on {network_info.get('name', network)} network!_"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return ConversationHandler.END
 
 
 async def show_deposit_address(
@@ -3722,12 +4008,254 @@ async def show_withdraw_menu(
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
-    text = "*Withdraw*\nSelect asset to send:"
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
-    await edit_message_with_banner(
-        query, "withdraw", text, get_network_keyboard("withdraw")
+    text = (
+        "\U0001F4E4 *Withdraw*\n\n"
+        "Which token would you like to withdraw?\n\n"
+        "Just type the token name (e.g., 'USDT', 'ETH', 'I want to withdraw SOL')\n\n"
+        "_Tap the button below to see all supported tokens_"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+
+    return WITHDRAW_TOKEN
+
+
+async def show_tokens_list_popup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a popup with all supported tokens."""
+    query = update.callback_query
+    
+    tokens_list = []
+    for symbol, info in TOKENS.items():
+        networks = list(info.get("networks", {}).keys())
+        networks_str = ", ".join(networks)
+        tokens_list.append(f"{info.get('icon', '')} {info.get('name', symbol)} ({symbol}) - {networks_str}")
+    
+    popup_text = "Supported Tokens:\n\n" + "\n".join(tokens_list)
+    
+    await query.answer(popup_text, show_alert=True)
+    
+    action = query.data.split("_")[-1]
+    if action == "withdraw":
+        return WITHDRAW_TOKEN
+    elif action == "deposit":
+        return DEPOSIT_TOKEN
+    return None
+
+
+async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse token from user's natural language input."""
+    text = update.message.text.strip()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "withdraw_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["withdraw_msg_id"])
+        except Exception:
+            pass
+
+    token = detect_token_from_text(text)
+
+    if not token:
+        available_tokens = ", ".join(TOKENS.keys())
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("withdraw"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Token Not Recognized*\n\n"
+                f"I couldn't understand which token you want to withdraw.\n\n"
+                f"_Available tokens: {available_tokens}_\n\n"
+                "Please try again (e.g., 'USDT', 'ETH', 'solana')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["withdraw_msg_id"] = msg.message_id
+        return WITHDRAW_TOKEN
+
+    context.user_data["withdraw_token"] = token
+    token_info = TOKENS.get(token, {})
+    available_networks = get_available_networks_for_token(token)
+
+    if len(available_networks) == 1:
+        context.user_data["withdraw_network"] = available_networks[0]
+        return await ask_withdraw_confirmation(update, context, chat_id)
+
+    network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
+    networks_str = ", ".join(network_names)
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=(
+            f"\U0001F4E4 *Withdraw {token}*\n\n"
+            f"Which network would you like to use?\n\n"
+            f"_Available networks: {networks_str}_\n\n"
+            "Just type the network name (e.g., 'Polygon', 'BSC', 'Ethereum')"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+
+    return WITHDRAW_NETWORK
+
+
+async def receive_withdraw_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse network from user's natural language input."""
+    text = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "withdraw_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["withdraw_msg_id"])
+        except Exception:
+            pass
+
+    token = context.user_data.get("withdraw_token")
+    available_networks = get_available_networks_for_token(token)
+
+    network = detect_network_from_text(text)
+
+    if not network or network not in available_networks:
+        network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
+        networks_str = ", ".join(network_names)
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("withdraw"), "rb"),
+            caption=(
+                f"\u26a0\ufe0f *Network Not Recognized*\n\n"
+                f"I couldn't understand which network you want to use for {token}.\n\n"
+                f"_Available networks: {networks_str}_\n\n"
+                "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["withdraw_msg_id"] = msg.message_id
+        return WITHDRAW_NETWORK
+
+    context.user_data["withdraw_network"] = network
+    return await ask_withdraw_confirmation(update, context, chat_id)
+
+
+async def ask_withdraw_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Ask user to confirm their token and network selection."""
+    token = context.user_data.get("withdraw_token")
+    network = context.user_data.get("withdraw_network")
+
+    token_info = TOKENS.get(token, {})
+    network_info = NETWORKS.get(network, {})
+
+    keyboard = [
+        [
+            InlineKeyboardButton("\u2705 Yes, proceed", callback_data="confirm_withdraw_selection"),
+            InlineKeyboardButton("\u274c No, restart", callback_data="menu_withdraw")
+        ]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=(
+            f"\U0001F4E4 *Confirm Withdrawal*\n\n"
+            f"{token_info.get('icon', '')} *Token:* {token_info.get('name', token)} ({token})\n"
+            f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n\n"
+            "Is this correct?"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+
+    return WITHDRAW_CONFIRM_SELECTION
+
+
+async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User confirmed their token/network selection, proceed to amount entry."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    token = context.user_data.get("withdraw_token")
+    network = context.user_data.get("withdraw_network")
+
+    token_info = TOKENS.get(token, {})
+    network_info = NETWORKS.get(network, {})
+
+    wallet = db.get_wallet(user_id, network)
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(f"\u2795 Generate {network_info['name']} Wallet", callback_data=f"gen_{network}")],
+            [InlineKeyboardButton("\U0001F519 Back", callback_data="menu_withdraw")]
+        ]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"\u26a0\ufe0f *No {network_info['name']} Wallet*\n\nGenerate a wallet first to withdraw.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    ledger_asset = token if token in ["USDT", "USDC"] else get_ledger_asset(network)
+    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    balance_str = str(internal_balance)
+
+    context.user_data["withdraw_balance"] = balance_str
+
+    keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="cancel_withdraw")]]
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"\U0001F4E4 *Withdraw {token}*\n\n"
+            f"{token_info.get('icon', '')} *Token:* {token}\n"
+            f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n"
+            f"\U0001F4B0 *Available:* `{balance_str} {token}`\n\n"
+            f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
+            f"_Reply with the amount (e.g., 0.1)_"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+
+    return WITHDRAW_AMOUNT
 
 
 async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4936,8 +5464,45 @@ def main():
         .build()
     )
 
+    deposit_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                show_deposit_menu,
+                pattern=r"^menu_deposit$"
+            )
+        ],
+        states={
+            DEPOSIT_TOKEN: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_deposit_token
+                ),
+                CallbackQueryHandler(show_tokens_list_popup, pattern="^show_tokens_list_deposit$")
+            ],
+            DEPOSIT_NETWORK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_deposit_network
+                )
+            ],
+            DEPOSIT_CONFIRM_SELECTION: [
+                CallbackQueryHandler(confirm_deposit_selection, pattern="^confirm_deposit_selection$"),
+                CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$")
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
+            CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$")
+        ],
+        per_message=False
+    )
+
     withdraw_handler = ConversationHandler(
         entry_points=[
+            CallbackQueryHandler(
+                show_withdraw_menu,
+                pattern=r"^menu_withdraw$"
+            ),
             CallbackQueryHandler(
                 start_withdraw,
                 pattern=r"^withdraw_[A-Z]+$"
@@ -4956,6 +5521,23 @@ def main():
             )
         ],
         states={
+            WITHDRAW_TOKEN: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_withdraw_token
+                ),
+                CallbackQueryHandler(show_tokens_list_popup, pattern="^show_tokens_list_withdraw$")
+            ],
+            WITHDRAW_NETWORK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_withdraw_network
+                )
+            ],
+            WITHDRAW_CONFIRM_SELECTION: [
+                CallbackQueryHandler(confirm_withdraw_selection, pattern="^confirm_withdraw_selection$"),
+                CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$")
+            ],
             WITHDRAW_AMOUNT: [
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
@@ -4994,6 +5576,7 @@ def main():
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
 
+    application.add_handler(deposit_handler)
     application.add_handler(withdraw_handler)
 
     # Convert conversation handler
