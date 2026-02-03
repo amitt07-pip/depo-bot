@@ -4508,6 +4508,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )]
             ]
             
+            max_seconds = 60
+            
             await query.edit_message_text(
                 f"\U0001F4E4 *Transaction Submitted*\n\n"
                 f"{info['icon']} *Network:* {info['name']}\n"
@@ -4515,19 +4517,18 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
                 f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
                 f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                f"\u23f3 *Status:* Waiting for blockchain confirmation...",
+                f"\u23f3 *Blockchain Confirmation:* `0/{max_seconds}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(pending_keyboard)
             )
             
-            # Wait for blockchain confirmation
             confirmed = False
-            max_attempts = 30  # Max 30 attempts (about 60 seconds for EVM)
+            max_attempts = 30
             attempt = 0
             
             while not confirmed and attempt < max_attempts:
                 attempt += 1
-                await asyncio.sleep(2)  # Check every 2 seconds
+                await asyncio.sleep(2)
                 
                 try:
                     if info["type"] == "evm":
@@ -4570,8 +4571,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # For other networks, assume confirmed after submission
                         confirmed = True
                         
-                    # Update status message with confirmation progress
-                    if not confirmed and attempt % 5 == 0:
+                    elapsed_seconds = attempt * 2
+                    if not confirmed and attempt % 3 == 0:
                         await query.edit_message_text(
                             f"\U0001F4E4 *Transaction Submitted*\n\n"
                             f"{info['icon']} *Network:* {info['name']}\n"
@@ -4579,7 +4580,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
                             f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
                             f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                            f"\u23f3 *Status:* Confirming... ({attempt * 2}s)",
+                            f"\u23f3 *Blockchain Confirmation:* `{elapsed_seconds}/{max_seconds}`",
                             parse_mode="Markdown",
                             reply_markup=InlineKeyboardMarkup(pending_keyboard)
                         )
@@ -5208,9 +5209,9 @@ async def check_wallet_transactions(application):
             network_short = "MATIC"
 
         # Filter out small balance changes (noise from RPC inconsistencies)
-        # Use higher threshold for native tokens, lower for stablecoins
+        # Use higher threshold for stablecoins due to Polygon RPC fluctuations
         is_native = token_name is None
-        min_threshold = Decimal("0.0001") if is_native else Decimal("0.01")
+        min_threshold = Decimal("0.0001") if is_native else Decimal("0.5")
         if abs(diff) < min_threshold:
             return
 
