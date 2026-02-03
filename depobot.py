@@ -118,6 +118,7 @@ USER_ACCESS = {
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 
 wallet_balances_cache = {}
+wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
 
 NETWORKS = {
     "ETH": {
@@ -4549,11 +4550,15 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
 
 
 async def check_wallet_transactions(application):
-    global wallet_balances_cache
+    global wallet_balances_cache, wallet_cache_initialized
 
     wallets = db.get_all_wallets_all_interfaces(ALLOWED_USER_ID)
     if not wallets:
         return
+
+    # On first run, just initialize the cache without sending notifications
+    # This prevents spam notifications for existing balances when bot starts
+    is_first_run = not wallet_cache_initialized
 
     async def send_balance_notification(
         network, address, symbol, old_balance, new_balance, interface_id, token_name=None
@@ -4648,7 +4653,7 @@ async def check_wallet_transactions(application):
             symbol = balance_info.get("symbol", network)
             cache_key = f"{network}:{address}:NATIVE"
 
-            if cache_key in wallet_balances_cache:
+            if cache_key in wallet_balances_cache and not is_first_run:
                 old_balance = wallet_balances_cache[cache_key]
                 old_val = Decimal(old_balance) if old_balance else Decimal("0")
                 new_val = Decimal(current_balance) if current_balance else Decimal("0")
@@ -4692,7 +4697,7 @@ async def check_wallet_transactions(application):
                 token_symbol = token_balance_info.get("symbol", token_key)
                 token_cache_key = f"{network}:{address}:{token_key}"
 
-                if token_cache_key in wallet_balances_cache:
+                if token_cache_key in wallet_balances_cache and not is_first_run:
                     old_token_balance = wallet_balances_cache[token_cache_key]
                     old_val = Decimal(old_token_balance) if old_token_balance else Decimal("0")
                     new_val = (
@@ -4718,6 +4723,11 @@ async def check_wallet_transactions(application):
 
             except Exception as e:
                 logger.error(f"Error checking {token_key} balance on {network}: {e}")
+
+    # Mark cache as initialized after first run completes
+    if is_first_run:
+        wallet_cache_initialized = True
+        logger.info("Wallet balance cache initialized - notifications will start from next check")
 
 
 async def transaction_monitor_loop(application):
