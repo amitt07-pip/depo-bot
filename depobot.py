@@ -5225,7 +5225,6 @@ async def check_wallet_transactions(application):
             f"*Amount:* {diff}\n"
             f"*Current Balance:* {new_balance} {symbol}"
         )
-        banner_name = "deposit"
 
         keyboard = [[
             InlineKeyboardButton(
@@ -5234,29 +5233,16 @@ async def check_wallet_transactions(application):
             )
         ]]
 
-        banner_path = get_banner_path(banner_name)
         try:
-            if os.path.exists(banner_path):
-                with open(banner_path, "rb") as photo:
-                    await application.bot.send_photo(
-                        chat_id=ALLOWED_USER_ID,
-                        photo=photo,
-                        caption=msg,
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                if ALLOWED_CHAT_ID:
-                    with open(banner_path, "rb") as photo:
-                        await application.bot.send_photo(
-                            chat_id=ALLOWED_CHAT_ID,
-                            photo=photo,
-                            caption=msg,
-                            parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
-            else:
+            await application.bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            if ALLOWED_CHAT_ID:
                 await application.bot.send_message(
-                    chat_id=ALLOWED_USER_ID,
+                    chat_id=ALLOWED_CHAT_ID,
                     text=msg,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
