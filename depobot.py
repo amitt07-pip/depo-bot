@@ -5,6 +5,7 @@ import sqlite3
 import logging
 import hashlib
 import base64
+import asyncio
 import aiohttp
 from typing import Optional
 from decimal import Decimal
