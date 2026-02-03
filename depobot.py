@@ -1627,18 +1627,19 @@ def get_friendly_error(error) -> str:
 
 
 def get_main_menu_keyboard(current_interface: int = 1, user_id: int = None):
+    """Modern 2x3 grid main menu with clear icons."""
     keyboard = [
         [
-            InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
-            InlineKeyboardButton("Deposit", callback_data="menu_deposit")
+            InlineKeyboardButton("\U0001F4B3 Wallets", callback_data="menu_wallets"),
+            InlineKeyboardButton("\U0001F4E5 Deposit", callback_data="menu_deposit")
         ],
         [
-            InlineKeyboardButton("Withdraw", callback_data="menu_withdraw"),
-            InlineKeyboardButton("Balances", callback_data="menu_balance")
+            InlineKeyboardButton("\U0001F4E4 Withdraw", callback_data="menu_withdraw"),
+            InlineKeyboardButton("\U0001F4CA Balances", callback_data="menu_balance")
         ],
         [
-            InlineKeyboardButton("Convert", callback_data="menu_convert"),
-            InlineKeyboardButton("New Wallet", callback_data="menu_generate")
+            InlineKeyboardButton("\U0001F504 Convert", callback_data="menu_convert"),
+            InlineKeyboardButton("\u2795 New Wallet", callback_data="menu_generate")
         ]
     ]
     
@@ -1648,52 +1649,62 @@ def get_main_menu_keyboard(current_interface: int = 1, user_id: int = None):
         if other_interface in user_interfaces:
             keyboard.append([
                 InlineKeyboardButton(
-                    f"Switch to Interface {other_interface}",
+                    f"\U0001F500 Switch Interface",
                     callback_data=f"switch_interface_{other_interface}"
                 )
             ])
     
     keyboard.append([
-        InlineKeyboardButton("Help", callback_data="menu_help")
+        InlineKeyboardButton("\u2753 Help", callback_data="menu_help")
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_token_keyboard():
+    """Token selection keyboard with icons."""
     keyboard = []
+    row = []
     for token_key, token_info in TOKENS.items():
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{token_info['icon']} {token_info['name']} ({token_info['symbol']})",
-                callback_data=f"token_{token_key}"
-            )
-        ])
+        btn = InlineKeyboardButton(
+            f"{token_info['icon']} {token_info['symbol']}",
+            callback_data=f"token_{token_key}"
+        )
+        row.append(btn)
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_token_network_keyboard(token: str):
+    """Network selection for a specific token with 2-column layout."""
     token_info = TOKENS.get(token)
     if not token_info:
         return get_back_button("menu_tokens")
 
     keyboard = []
+    row = []
     for network in token_info["networks"].keys():
         network_info = NETWORKS.get(network)
         if network_info:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{network_info['icon']} {network_info['name']}",
-                    callback_data=f"tokenbal_{token}_{network}"
-                )
-            ])
+            btn = InlineKeyboardButton(
+                f"{network_info['icon']} {network_info['name']}",
+                callback_data=f"tokenbal_{token}_{network}"
+            )
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row:
+        keyboard.append(row)
     keyboard.append([
-        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_tokens")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_tokens"),
+        InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -1729,7 +1740,7 @@ def get_network_keyboard(action: str, include_tokens: bool = True):
 
 
 def get_generate_network_keyboard():
-    """Keyboard for generate wallet - shows only networks (not token/network combos)."""
+    """Keyboard for generate wallet - shows only networks with 2-column layout."""
     keyboard = []
     row = []
 
@@ -1747,18 +1758,27 @@ def get_generate_network_keyboard():
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_back_button(callback_data: str = "main_menu"):
+def get_back_button(callback_data: str = "main_menu", include_home: bool = False):
+    """Back button with optional home button."""
+    if include_home and callback_data != "main_menu":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("\U0001F519 Back", callback_data=callback_data),
+                InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+            ]
+        ])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("\U0001F519 Back", callback_data=callback_data)]
     ])
 
 
 def get_wallet_card_keyboard(network: str):
+    """Wallet action buttons with consistent 2-column layout."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -1781,7 +1801,8 @@ def get_wallet_card_keyboard(network: str):
             )
         ],
         [
-            InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+            InlineKeyboardButton("\U0001F519 Back", callback_data="menu_wallets"),
+            InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1816,19 +1837,21 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
     if len(user_interfaces) > 1:
         interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
         menu_text = (
-            f"*VM CRYPTO BOT*\n\n"
+            f"\U0001F4B0 *VM CRYPTO BOT*\n"
+            f"{'=' * 20}\n\n"
             f"\U0001F4BC *{interface_info['name']}*\n"
             f"_{interface_info['desc']}_\n\n"
-            f"Wallets: {wallet_count}\n"
-            f"Balance: ${total_usdt_value:.2f} USD\n\n"
-            f"Choose an option below:"
+            f"\U0001F4B3 Wallets: `{wallet_count}`\n"
+            f"\U0001F4B5 Balance: `${total_usdt_value:.2f} USD`\n\n"
+            f"Select an option:"
         )
     else:
         menu_text = (
-            f"*VM CRYPTO BOT*\n\n"
-            f"Wallets: {wallet_count}\n"
-            f"Balance: ${total_usdt_value:.2f} USD\n\n"
-            f"Choose an option below:"
+            f"\U0001F4B0 *VM CRYPTO BOT*\n"
+            f"{'=' * 20}\n\n"
+            f"\U0001F4B3 Wallets: `{wallet_count}`\n"
+            f"\U0001F4B5 Balance: `${total_usdt_value:.2f} USD`\n\n"
+            f"Select an option:"
         )
     return menu_text
 
@@ -2721,31 +2744,47 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wallets = db.get_all_wallets(user_id)
 
     if not wallets:
-        text = "*Wallets*\n\nNo wallets found.\nCreate your first wallet."
+        text = (
+            f"\U0001F4B3 *My Wallets*\n"
+            f"{'=' * 20}\n\n"
+            f"No wallets found.\n"
+            f"Create your first wallet to get started."
+        )
         keyboard = [
-            [InlineKeyboardButton("Create Wallet", callback_data="menu_generate")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
+            [InlineKeyboardButton("\u2795 Create Wallet", callback_data="menu_generate")],
+            [InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]
         ]
         await edit_message_with_banner(
             query, "wallets", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
-    text = f"*Wallets* ({len(wallets)})"
+    text = (
+        f"\U0001F4B3 *My Wallets*\n"
+        f"{'=' * 20}\n\n"
+        f"You have `{len(wallets)}` wallet(s).\n"
+        f"Select a wallet to view details:"
+    )
     keyboard = []
+    row = []
 
     for wallet in wallets:
         network = wallet["network"]
         info = NETWORKS[network]
-        keyboard.append([
-            InlineKeyboardButton(
-                info['name'],
-                callback_data=f"wallet_{network}"
-            )
-        ])
+        btn = InlineKeyboardButton(
+            f"{info['icon']} {info['name']}",
+            callback_data=f"wallet_{network}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton("\u2795 Add Wallet", callback_data="menu_generate")])
+    keyboard.append([InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")])
 
     await edit_message_with_banner(
         query, "wallets", text, InlineKeyboardMarkup(keyboard)
@@ -2768,17 +2807,18 @@ async def show_wallet_details(
     if not wallet:
         await edit_message_with_banner(
             query, "wallet",
-            f"*Wallet Not Found*\n\nNo wallet exists for {NETWORKS[network]['name']}",
-            get_back_button("menu_wallets")
+            f"\u26A0\uFE0F *Wallet Not Found*\n\nNo wallet exists for {NETWORKS[network]['name']}",
+            get_back_button("menu_wallets", include_home=True)
         )
         return
 
     info = NETWORKS[network]
     text = (
-        f"*{info['name']} Wallet*\n\n"
-        f"*Address:*\n`{wallet['address']}`\n\n"
-        f"*Balance:* Tap refresh to check\n\n"
-        f"*Network:* {info['name']}"
+        f"{info['icon']} *{info['name']} Wallet*\n"
+        f"{'=' * 20}\n\n"
+        f"\U0001F4CD *Address:*\n`{wallet['address']}`\n\n"
+        f"\U0001F4B0 *Balance:* Tap refresh to check\n\n"
+        f"\U0001F310 *Network:* {info['name']}"
     )
     await edit_message_with_banner(
         query, "wallet", text, get_wallet_card_keyboard(network)
@@ -2942,7 +2982,11 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    text = "*Deposit*\nSelect asset to receive:"
+    text = (
+        f"\U0001F4E5 *Deposit*\n"
+        f"{'=' * 20}\n\n"
+        f"Select the asset you want to receive:"
+    )
 
     await edit_message_with_banner(
         query, "deposit", text, get_network_keyboard("deposit")
@@ -2967,14 +3011,18 @@ async def show_deposit_address(
     if not wallet:
         keyboard = [
             [InlineKeyboardButton(
-                f"Generate {info['name']} Wallet",
+                f"\u2795 Generate {info['name']} Wallet",
                 callback_data=f"gen_{network}"
             )],
-            [InlineKeyboardButton("Back", callback_data="menu_deposit")]
+            [
+                InlineKeyboardButton("\U0001F519 Back", callback_data="menu_deposit"),
+                InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+            ]
         ]
         await edit_message_with_banner(
             query, "deposit",
-            f"*No Wallet Found*\n\nYou don't have a {info['name']} wallet yet.\n"
+            f"\u26A0\uFE0F *No Wallet Found*\n\n"
+            f"You don't have a {info['name']} wallet yet.\n"
             f"Generate one first to get a deposit address.",
             InlineKeyboardMarkup(keyboard)
         )
@@ -2994,7 +3042,7 @@ async def show_deposit_address(
         )],
         [
             InlineKeyboardButton(
-                "\U0001F504 Refresh Balance",
+                "\U0001F504 Refresh",
                 callback_data=f"refresh_{network}"
             ),
             InlineKeyboardButton(
@@ -3002,22 +3050,19 @@ async def show_deposit_address(
                 callback_data=f"withdraw_{network}"
             )
         ],
-        [InlineKeyboardButton(
-            "\U0001F519 Back",
-            callback_data="menu_deposit"
-        )],
-        [InlineKeyboardButton(
-            "\U0001F3E0 Main Menu",
-            callback_data="main_menu"
-        )]
+        [
+            InlineKeyboardButton("\U0001F519 Back", callback_data="menu_deposit"),
+            InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+        ]
     ]
 
     text = (
-        f"*Deposit {info['symbol']}*\n\n"
-        f"*Network:* {info['name']}\n\n"
-        f"*Your Deposit Address:*\n`{wallet['address']}`\n\n"
-        f"Tap the address to copy it.\n\n"
-        f"*Important:* Only send {info['symbol']} and {info['name']} tokens to this address!"
+        f"{info['icon']} *Deposit {info['symbol']}*\n"
+        f"{'=' * 20}\n\n"
+        f"\U0001F310 *Network:* {info['name']}\n\n"
+        f"\U0001F4CD *Your Address:*\n`{wallet['address']}`\n\n"
+        f"_Tap the address to copy it._\n\n"
+        f"\u26A0\uFE0F *Important:* Only send {info['symbol']} and {info['name']} tokens to this address!"
     )
 
     # Delete the old message
@@ -3497,21 +3542,25 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("All Balances", callback_data="balance_all")]
+        [InlineKeyboardButton("\U0001F4CA All Balances", callback_data="balance_all")]
     ]
 
     row = []
     for key, info in NETWORKS.items():
-        row.append(InlineKeyboardButton(info['name'], callback_data=f"balance_{key}"))
+        row.append(InlineKeyboardButton(f"{info['icon']} {info['name']}", callback_data=f"balance_{key}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")])
 
-    text = "*Balances*\nSelect network to check:"
+    text = (
+        f"\U0001F4CA *Balances*\n"
+        f"{'=' * 20}\n\n"
+        f"Select a network to check balance:"
+    )
 
     await edit_message_with_banner(
         query, "balance", text, InlineKeyboardMarkup(keyboard)
@@ -3531,19 +3580,23 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wallets = db.get_all_wallets(user_id)
         if not wallets:
             await edit_message_with_banner(
-                query, "balance", "*No Wallets*\nGenerate a wallet first.",
-                get_back_button("menu_balance")
+                query, "balance", 
+                f"\u26A0\uFE0F *No Wallets*\n\nGenerate a wallet first to check balances.",
+                get_back_button("menu_balance", include_home=True)
             )
             return
 
         await edit_message_with_banner(
-            query, "balance", "*Fetching all balances...*", None
+            query, "balance", "\U0001F504 *Fetching all balances...*", None
         )
 
-        text = "*Your Balances*\n\n"
+        text = (
+            f"\U0001F4CA *Your Balances*\n"
+            f"{'=' * 20}\n\n"
+        )
         
         # Show on-chain native balances
-        text += "*On-Chain:*\n"
+        text += "\U0001F310 *On-Chain:*\n"
         for wallet in wallets:
             net = wallet["network"]
             info = NETWORKS[net]
@@ -3555,14 +3608,14 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Show internal ledger balances (including USDT/USDC)
         internal_balances = db.get_all_internal_balances(user_id)
         if internal_balances:
-            text += "\n*Internal Ledger:*\n"
+            text += "\n\U0001F4B0 *Internal Ledger:*\n"
             for asset, balance in internal_balances.items():
                 if balance > Decimal("0"):
-                    text += f"\U0001F4B0 {asset}: `{balance:.6f}`\n"
+                    text += f"\U0001F4B5 {asset}: `{balance:.6f}`\n"
 
         keyboard = [
-            [InlineKeyboardButton("Refresh", callback_data="balance_all")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
+            [InlineKeyboardButton("\U0001F504 Refresh", callback_data="balance_all")],
+            [InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]
         ]
 
         await edit_message_with_banner(
@@ -3575,26 +3628,33 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not wallet:
             keyboard = [
                 [InlineKeyboardButton(
-                    f"Generate {info['name']} Wallet", callback_data=f"gen_{network}"
+                    f"\u2795 Generate {info['name']} Wallet", callback_data=f"gen_{network}"
                 )],
-                [InlineKeyboardButton("Back", callback_data="menu_balance")]
+                [
+                    InlineKeyboardButton("\U0001F519 Back", callback_data="menu_balance"),
+                    InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+                ]
             ]
             await edit_message_with_banner(
-                query, "balance", f"*No {info['name']} Wallet*\nGenerate one first.",
+                query, "balance", 
+                f"\u26A0\uFE0F *No {info['name']} Wallet*\n\nGenerate one first.",
                 InlineKeyboardMarkup(keyboard)
             )
             return
 
         await edit_message_with_banner(
-            query, "balance", f"*Fetching {info['name']} balances...*", None
+            query, "balance", f"\U0001F504 *Fetching {info['name']} balances...*", None
         )
 
         balance_info = await BalanceChecker.get_balance(network, wallet["address"])
         native_balance = balance_info.get("balance", "Error")
         native_symbol = balance_info.get("symbol", info["symbol"])
 
-        text = f"*{info['name']} Balances*\n\n"
-        text += f"*On-Chain:*\n"
+        text = (
+            f"{info['icon']} *{info['name']} Balances*\n"
+            f"{'=' * 20}\n\n"
+        )
+        text += f"\U0001F310 *On-Chain:*\n"
         text += f"{info['icon']} Native: `{native_balance} {native_symbol}`\n"
 
         for token_key, token_info in TOKENS.items():
@@ -3616,8 +3676,8 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ledger_asset = get_ledger_asset(network)
         internal_native = db.get_internal_balance(user_id, ledger_asset)
         
-        text += f"\n*Internal Ledger:*\n"
-        text += f"\U0001F4B0 {ledger_asset}: `{internal_native:.6f}`\n"
+        text += f"\n\U0001F4B0 *Internal Ledger:*\n"
+        text += f"\U0001F4B5 {ledger_asset}: `{internal_native:.6f}`\n"
         
         # Check for USDT/USDC internal balances on this network
         for token_key in ["USDT", "USDC"]:
@@ -3627,17 +3687,19 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not net_info.get("native"):
                     token_ledger_asset = get_ledger_asset(network, token_key)
                     internal_token = db.get_internal_balance(user_id, token_ledger_asset)
-                    text += f"\U0001F4B0 {token_ledger_asset}: `{internal_token:.6f}`\n"
+                    text += f"\U0001F4B5 {token_ledger_asset}: `{internal_token:.6f}`\n"
 
-        text += f"\n*Address:*\n`{wallet['address']}`"
+        text += f"\n\U0001F4CD *Address:*\n`{wallet['address']}`"
 
         keyboard = [
             [
-                InlineKeyboardButton("Refresh", callback_data=f"balance_{network}"),
-                InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")
+                InlineKeyboardButton("\U0001F504 Refresh", callback_data=f"balance_{network}"),
+                InlineKeyboardButton("\U0001F4E4 Withdraw", callback_data=f"withdraw_{network}")
             ],
-            [InlineKeyboardButton("Back", callback_data="menu_balance")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
+            [
+                InlineKeyboardButton("\U0001F519 Back", callback_data="menu_balance"),
+                InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+            ]
         ]
 
         await edit_message_with_banner(
@@ -3654,7 +3716,11 @@ async def show_withdraw_menu(
     query = update.callback_query
     await query.answer()
 
-    text = "*Withdraw*\nSelect asset to send:"
+    text = (
+        f"\U0001F4E4 *Withdraw*\n"
+        f"{'=' * 20}\n\n"
+        f"Select the asset you want to send:"
+    )
 
     await edit_message_with_banner(
         query, "withdraw", text, get_network_keyboard("withdraw")
@@ -4104,7 +4170,21 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    help_text = "*Help*\n\n/send TOKEN NETWORK\nExample: /send USDT BSC"
+    help_text = (
+        f"\u2753 *Help & Commands*\n"
+        f"{'=' * 20}\n\n"
+        f"\U0001F4DD *Available Commands:*\n\n"
+        f"`/start` - Open main menu\n"
+        f"`/balance` - Check all balances\n"
+        f"`/deposit` - Get deposit addresses\n"
+        f"`/withdraw` - Withdraw funds\n"
+        f"`/convert` - Convert between assets\n"
+        f"`/send TOKEN NETWORK` - Quick send\n\n"
+        f"\U0001F4A1 *Example:*\n"
+        f"`/send USDT BSC`\n\n"
+        f"\U0001F4AC *Need help?*\n"
+        f"Contact support for assistance."
+    )
 
     await edit_message_with_banner(
         query, "help", help_text, get_back_button("main_menu")
@@ -4134,30 +4214,45 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not assets_with_balance:
         keyboard = [
-            [InlineKeyboardButton("Deposit", callback_data="menu_deposit")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
+            [InlineKeyboardButton("\U0001F4E5 Deposit", callback_data="menu_deposit")],
+            [InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]
         ]
-        text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
+        text = (
+            f"\U0001F504 *Convert*\n"
+            f"{'=' * 20}\n\n"
+            f"\u26A0\uFE0F No assets to convert.\n"
+            f"Deposit funds first."
+        )
         await edit_message_with_banner(
             query, "convert", text, InlineKeyboardMarkup(keyboard)
         )
         return
 
     keyboard = []
+    row = []
     for asset in assets_with_balance:
         bal = balances.get(asset, Decimal("0"))
         token_info = TOKENS.get(asset, {})
-        icon = token_info.get("icon", "")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{icon} {asset} ({bal:.6f})",
-                callback_data=f"convert_from_{asset}"
-            )
-        ])
+        icon = token_info.get("icon", "\U0001F4B0")
+        btn = InlineKeyboardButton(
+            f"{icon} {asset} ({bal:.4f})",
+            callback_data=f"convert_from_{asset}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")])
 
-    text = "*Convert*\nSelect asset to convert:"
+    text = (
+        f"\U0001F504 *Convert*\n"
+        f"{'=' * 20}\n\n"
+        f"Select the asset you want to convert:"
+    )
 
     await edit_message_with_banner(
         query, "convert", text, InlineKeyboardMarkup(keyboard)
@@ -4179,23 +4274,32 @@ async def show_convert_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
 
     keyboard = []
+    row = []
     for asset in to_assets:
         token_info = TOKENS.get(asset, {})
-        icon = token_info.get("icon", "")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{icon} {asset}",
-                callback_data=f"convert_to_{asset}"
-            )
-        ])
+        icon = token_info.get("icon", "\U0001F4B0")
+        btn = InlineKeyboardButton(
+            f"{icon} {asset}",
+            callback_data=f"convert_to_{asset}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("Back", callback_data="menu_convert")])
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+    keyboard.append([
+        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_convert"),
+        InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")
+    ])
 
     text = (
-        f"*Convert {from_asset}*\n\n"
-        f"Available: {balance:.6f} {from_asset}\n\n"
-        f"Select asset to convert to:"
+        f"\U0001F504 *Convert {from_asset}*\n"
+        f"{'=' * 20}\n\n"
+        f"\U0001F4B0 *Available:* `{balance:.6f} {from_asset}`\n\n"
+        f"Select the asset to convert to:"
     )
     await edit_message_with_banner(
         query, "convert", text, InlineKeyboardMarkup(keyboard)
