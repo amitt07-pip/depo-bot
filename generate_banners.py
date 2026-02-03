@@ -238,18 +238,18 @@ def create_profile_picture():
     draw.text((sub_x, sub_y), subtitle, font=subtitle_font, fill=accent_color)
     
     try:
-        version_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        version_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 52)
     except:
         version_font = ImageFont.load_default()
-    version_text = "2.0"
+    version_text = "< 2.0 />"
     ver_bbox = draw.textbbox((0, 0), version_text, font=version_font)
     ver_width = ver_bbox[2] - ver_bbox[0]
     ver_x = (size - ver_width) // 2
     ver_y = sub_y + 45
     for offset in range(6, 0, -2):
-        glow_color = (accent_color[0]//2, accent_color[1]//2, accent_color[2]//2)
-        draw.text((ver_x, ver_y + offset), version_text, font=version_font, fill=glow_color)
-    draw.text((ver_x, ver_y), version_text, font=version_font, fill=(255, 255, 255))
+        glow_color = (0, 255, 100)
+        draw.text((ver_x, ver_y + offset), version_text, font=version_font, fill=(0, glow_color[1]//4, glow_color[2]//4))
+    draw.text((ver_x, ver_y), version_text, font=version_font, fill=(0, 255, 150))
     
     line_y = sub_y + 50
     line_width = 150
