@@ -4794,10 +4794,10 @@ async def transaction_monitor_loop(application):
 
 
 async def background_sync_balances():
-    """Background task to sync balances every 30 seconds."""
+    """Background task to sync balances every 120 seconds."""
     import asyncio
-    logger.info("Background balance sync started - syncing every 30 seconds")
-    await asyncio.sleep(15)  # Offset from transaction monitor
+    logger.info("Background balance sync started - syncing every 120 seconds")
+    await asyncio.sleep(30)  # Offset from transaction monitor
     
     while True:
         try:
@@ -4822,11 +4822,19 @@ async def background_sync_balances():
                             ledger_asset = get_ledger_asset(network)
                             internal_balance = db.get_internal_balance(user_id, ledger_asset)
                             
-                            if onchain_balance != internal_balance:
+                            # Only log significant changes (> 0.01)
+                            diff = abs(onchain_balance - internal_balance)
+                            if diff > Decimal("0.01"):
                                 db.update_internal_balance(user_id, ledger_asset, onchain_balance)
                                 logger.info(f"Background sync: {user_id} {ledger_asset} {internal_balance} -> {onchain_balance}")
+                            elif onchain_balance != internal_balance:
+                                # Still update but don't log small changes
+                                db.update_internal_balance(user_id, ledger_asset, onchain_balance)
                     except Exception as e:
                         logger.debug(f"Background sync error for {network}: {e}")
+                    
+                    # Add delay between RPC calls to avoid rate limiting
+                    await asyncio.sleep(2)
                     
                     # Collect token balances
                     for token_key in ["USDT", "USDC"]:
@@ -4846,6 +4854,9 @@ async def background_sync_balances():
                                 token_totals[token_key] += onchain_token
                         except Exception as e:
                             logger.debug(f"Background sync error for {token_key} on {network}: {e}")
+                        
+                        # Add delay between RPC calls to avoid rate limiting
+                        await asyncio.sleep(2)
                 
                 # Update aggregated token balances
                 for token_key in ["USDT", "USDC"]:
@@ -4853,14 +4864,19 @@ async def background_sync_balances():
                     ledger_asset = get_ledger_asset(None, token_key)
                     internal_balance = db.get_internal_balance(user_id, ledger_asset)
                     
-                    if total_onchain != internal_balance:
+                    # Only log significant changes (> 0.01)
+                    diff = abs(total_onchain - internal_balance)
+                    if diff > Decimal("0.01"):
                         db.update_internal_balance(user_id, ledger_asset, total_onchain)
                         logger.info(f"Background sync: {user_id} {ledger_asset} {internal_balance} -> {total_onchain}")
+                    elif total_onchain != internal_balance:
+                        # Still update but don't log small changes
+                        db.update_internal_balance(user_id, ledger_asset, total_onchain)
                 
         except Exception as e:
             logger.error(f"Background sync error: {e}")
         
-        await asyncio.sleep(30)
+        await asyncio.sleep(120)
 
 
 async def start_transaction_monitor(application):
