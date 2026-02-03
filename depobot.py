@@ -608,37 +608,13 @@ class WalletDatabase:
         conn.commit()
         conn.close()
 
-    def get_current_interface(self, user_id: int) -> int:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT current_interface FROM user_settings WHERE user_id = ?",
-            (user_id,)
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return row[0] if row else 1
-
-    def set_current_interface(self, user_id: int, interface_id: int):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO user_settings (user_id, current_interface, updated_at) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP)",
-            (user_id, interface_id)
-        )
-        conn.commit()
-        conn.close()
-
-    def get_wallet(self, user_id: int, network: str, interface_id: int = None) -> Optional[dict]:
-        if interface_id is None:
-            interface_id = self.get_current_interface(user_id)
+    def get_wallet(self, user_id: int, network: str) -> Optional[dict]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT address, encrypted_private_key FROM wallets "
-            "WHERE user_id = ? AND network = ? AND interface_id = ?",
-            (user_id, network, interface_id)
+            "WHERE user_id = ? AND network = ?",
+            (user_id, network)
         )
         row = cursor.fetchone()
         conn.close()
@@ -651,45 +627,29 @@ class WalletDatabase:
         user_id: int,
         network: str,
         address: str,
-        encrypted_private_key: str,
-        interface_id: int = None
+        encrypted_private_key: str
     ):
-        if interface_id is None:
-            interface_id = self.get_current_interface(user_id)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO wallets "
-            "(user_id, network, address, encrypted_private_key, interface_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, network, address, encrypted_private_key, interface_id)
+            "(user_id, network, address, encrypted_private_key) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, network, address, encrypted_private_key)
         )
         conn.commit()
         conn.close()
 
-    def get_all_wallets(self, user_id: int, interface_id: int = None) -> list:
-        if interface_id is None:
-            interface_id = self.get_current_interface(user_id)
+    def get_all_wallets(self, user_id: int) -> list:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT network, address FROM wallets WHERE user_id = ? AND interface_id = ?",
-            (user_id, interface_id)
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        return [{"network": row[0], "address": row[1]} for row in rows]
-
-    def get_all_wallets_all_interfaces(self, user_id: int) -> list:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT network, address, interface_id FROM wallets WHERE user_id = ?",
+            "SELECT network, address FROM wallets WHERE user_id = ?",
             (user_id,)
         )
         rows = cursor.fetchall()
         conn.close()
-        return [{"network": row[0], "address": row[1], "interface_id": row[2]} for row in rows]
+        return [{"network": row[0], "address": row[1]} for row in rows]
 
     def log_transaction(
         self,
@@ -1606,33 +1566,6 @@ def is_authorized(user_id: int) -> bool:
     return user_id in USER_ACCESS
 
 
-def get_user_interfaces(user_id: int) -> list:
-    """Get list of interfaces a user has access to.
-    
-    Admin users in USER_ACCESS get their configured interfaces.
-    All other users get Interface 1 by default.
-    """
-    if user_id in USER_ACCESS:
-        return USER_ACCESS.get(user_id, [1])
-    return [1]
-
-
-def get_effective_interface(user_id: int) -> int:
-    """Get the user's current interface, ensuring it's one they have access to.
-    
-    If the stored interface is not allowed, reset to the first allowed interface.
-    """
-    current = db.get_current_interface(user_id)
-    allowed = get_user_interfaces(user_id)
-    if not allowed:
-        return 1
-    if current not in allowed:
-        new_interface = allowed[0]
-        db.set_current_interface(user_id, new_interface)
-        return new_interface
-    return current
-
-
 async def check_callback_auth(update: Update) -> bool:
     query = update.callback_query
     user_id = query.from_user.id
@@ -1709,7 +1642,7 @@ def get_friendly_error(error) -> str:
     return "Something went wrong. Please try again later."
 
 
-def get_main_menu_keyboard(current_interface: int = 1, user_id: int = None):
+def get_main_menu_keyboard():
     keyboard = [
         [
             InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
@@ -1722,23 +1655,11 @@ def get_main_menu_keyboard(current_interface: int = 1, user_id: int = None):
         [
             InlineKeyboardButton("Convert", callback_data="menu_convert"),
             InlineKeyboardButton("New Wallet", callback_data="menu_generate")
+        ],
+        [
+            InlineKeyboardButton("Help", callback_data="menu_help")
         ]
     ]
-    
-    user_interfaces = get_user_interfaces(user_id) if user_id else [1, 2]
-    if len(user_interfaces) > 1:
-        other_interface = 2 if current_interface == 1 else 1
-        if other_interface in user_interfaces:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"Switch to Interface {other_interface}",
-                    callback_data=f"switch_interface_{other_interface}"
-                )
-            ])
-    
-    keyboard.append([
-        InlineKeyboardButton("Help", callback_data="menu_help")
-    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -1876,13 +1797,12 @@ def format_address(address: str) -> str:
     return address
 
 
-def build_main_menu_text(user_id: int, interface_id: int) -> str:
-    """Build main menu text with wallet count and balance for the given interface.
+def build_main_menu_text(user_id: int) -> str:
+    """Build main menu text with wallet count and balance.
     
     Uses internal ledger balance for fast response (no RPC calls).
-    Shows interface info only for admin users with multiple interfaces.
     """
-    wallets = db.get_all_wallets(user_id, interface_id)
+    wallets = db.get_all_wallets(user_id)
     wallet_count = len(wallets) if wallets else 0
 
     total_usdt_value = Decimal("0")
@@ -1894,25 +1814,12 @@ def build_main_menu_text(user_id: int, interface_id: int) -> str:
             except Exception:
                 pass
 
-    user_interfaces = get_user_interfaces(user_id)
-    
-    if len(user_interfaces) > 1:
-        interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
-        menu_text = (
-            f"*VM CRYPTO BOT*\n\n"
-            f"\U0001F4BC *{interface_info['name']}*\n"
-            f"_{interface_info['desc']}_\n\n"
-            f"Wallets: {wallet_count}\n"
-            f"Balance: ${total_usdt_value:.2f} USD\n\n"
-            f"Choose an option below:"
-        )
-    else:
-        menu_text = (
-            f"*VM CRYPTO BOT*\n\n"
-            f"Wallets: {wallet_count}\n"
-            f"Balance: ${total_usdt_value:.2f} USD\n\n"
-            f"Choose an option below:"
-        )
+    menu_text = (
+        f"*VM CRYPTO BOT*\n\n"
+        f"Wallets: {wallet_count}\n"
+        f"Balance: ${total_usdt_value:.2f} USD\n\n"
+        f"Choose an option below:"
+    )
     return menu_text
 
 
@@ -1927,89 +1834,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-    current_interface = db.get_current_interface(user_id)
-    user_interfaces = get_user_interfaces(user_id)
 
-    if len(user_interfaces) == 1:
-        selected_interface = user_interfaces[0]
-        db.set_current_interface(user_id, selected_interface)
-        menu_text = build_main_menu_text(user_id, selected_interface)
-        
-        # Use public banner (without tagline) for regular users
-        if user_id in USER_ACCESS:
-            banner_path = get_banner_path("welcome")
-        else:
-            banner_path = get_banner_path("welcome_public")
-        if os.path.exists(banner_path):
-            with open(banner_path, "rb") as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=menu_text,
-                    parse_mode="Markdown",
-                    reply_markup=get_main_menu_keyboard(selected_interface, user_id)
-                )
-        else:
-            await update.message.reply_text(
-                menu_text,
-                parse_mode="Markdown",
-                reply_markup=get_main_menu_keyboard(selected_interface, user_id)
-            )
-        return
-
-    welcome_text = (
-        f"Welcome, *{user_name}*\n\n"
-        f"*VM CRYPTO BOT*\n\n"
-        f"Select an interface to continue:"
-    )
-
-    keyboard = []
-    for iface in user_interfaces:
-        interface_info = INTERFACE_INFO.get(iface, {"name": f"Interface {iface}", "desc": ""})
-        btn_text = f"{interface_info['name']}" + (" (Active)" if current_interface == iface else "")
-        keyboard.append([
-            InlineKeyboardButton(btn_text, callback_data=f"select_interface_{iface}")
-        ])
-
+    menu_text = build_main_menu_text(user_id)
+    
     banner_path = get_banner_path("welcome")
     if os.path.exists(banner_path):
         with open(banner_path, "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
-                caption=welcome_text,
+                caption=menu_text,
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=get_main_menu_keyboard()
             )
     else:
         await update.message.reply_text(
-            welcome_text,
+            menu_text,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=get_main_menu_keyboard()
         )
-
-
-async def select_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_callback_auth(update):
-        return
-    query = update.callback_query
-
-    user_id = query.from_user.id
-    selected_interface = int(query.data.split("_")[-1])
-    
-    user_interfaces = get_user_interfaces(user_id)
-    if selected_interface not in user_interfaces:
-        await query.answer("You don't have access to this interface.", show_alert=True)
-        return
-    
-    db.set_current_interface(user_id, selected_interface)
-
-    interface_info = INTERFACE_INFO.get(selected_interface, {"name": f"Interface {selected_interface}", "desc": ""})
-    await query.answer(f"{interface_info['desc']}")
-
-    menu_text = build_main_menu_text(user_id, selected_interface)
-
-    await edit_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(selected_interface, user_id)
-    )
 
 
 async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2569,12 +2411,12 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for uid in wallet_users:
             # Get all wallets for this user
             cursor.execute(
-                "SELECT network, interface_id FROM wallets WHERE user_id = ?",
+                "SELECT network FROM wallets WHERE user_id = ?",
                 (uid,)
             )
             user_wallets = cursor.fetchall()
 
-            for network, interface_id in user_wallets:
+            for (network,) in user_wallets:
                 ledger_asset = get_ledger_asset(network)
 
                 # Check if internal balance exists
@@ -2757,41 +2599,10 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user_id = query.from_user.id
-    current_interface = get_effective_interface(user_id)
-    menu_text = build_main_menu_text(user_id, current_interface)
+    menu_text = build_main_menu_text(user_id)
 
-    # Use public banner (without tagline) for regular users
-    banner_name = "welcome" if user_id in USER_ACCESS else "welcome_public"
-    # Always send new message to ensure banner image changes (e.g., returning from QR code screen)
     await send_new_message_with_banner(
-        query, banner_name, menu_text, get_main_menu_keyboard(current_interface, user_id)
-    )
-
-
-async def switch_interface(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_callback_auth(update):
-        return
-    query = update.callback_query
-
-    user_id = query.from_user.id
-    new_interface = int(query.data.split("_")[-1])
-    
-    user_interfaces = get_user_interfaces(user_id)
-    if new_interface not in user_interfaces:
-        await query.answer("You don't have access to this interface.", show_alert=True)
-        return
-    
-    db.set_current_interface(user_id, new_interface)
-
-    interface_info = INTERFACE_INFO.get(new_interface, {"name": f"Interface {new_interface}", "desc": ""})
-    await query.answer(f"{interface_info['desc']}")
-
-    menu_text = build_main_menu_text(user_id, new_interface)
-
-    # Use public banner (without tagline) for regular users
-    banner_name = "welcome" if user_id in USER_ACCESS else "welcome_public"
-    await edit_message_with_banner(
-        query, banner_name, menu_text, get_main_menu_keyboard(new_interface, user_id)
+        query, "welcome", menu_text, get_main_menu_keyboard()
     )
 
 
@@ -3231,15 +3042,6 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
     address = wallet["address"]
     qr_buffer = generate_qr_code(address)
 
-    if network == "SOLANA":
-        balance = await BalanceChecker.get_solana_balance(address)
-    elif network == "TRON":
-        balance = await BalanceChecker.get_tron_balance(address)
-    elif network == "LTC":
-        balance = await BalanceChecker.get_ltc_balance(address)
-    else:
-        balance = await BalanceChecker.get_evm_balance(address, network)
-
     if token in ["USDT", "USDC"]:
         token_balance_result = await BalanceChecker.get_token_balance(token, network, address)
         if "error" in token_balance_result:
@@ -3247,7 +3049,22 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
         else:
             balance_display = f"`{token_balance_result.get('balance', '0')}` {token}"
     else:
-        balance_display = f"`{balance}` {token}"
+        if network == "SOLANA":
+            balance_result = await BalanceChecker.get_solana_balance(address)
+        elif network == "TRON":
+            balance_result = await BalanceChecker.get_tron_balance(address)
+        elif network == "LTC":
+            balance_result = await BalanceChecker.get_ltc_balance(address)
+        else:
+            balance_result = await BalanceChecker.get_evm_balance(address, network)
+        
+        if isinstance(balance_result, dict):
+            if "error" in balance_result:
+                balance_display = f"`0` {token}"
+            else:
+                balance_display = f"`{balance_result.get('balance', '0')}` {token}"
+        else:
+            balance_display = f"`{balance_result}` {token}"
 
     keyboard = [
         [InlineKeyboardButton("\U0001F504 Refresh Balance", callback_data=f"refresh_deposit_{network}_{token}")],
@@ -4713,10 +4530,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 CONVERTIBLE_ASSETS = ["ETH", "BNB", "MATIC", "SOL", "TRX", "LTC", "USDT", "USDC"]
 
-INTERFACE_INFO = {
-    1: {"name": "Interface 1", "desc": "Logged into Work account [CR]"},
-    2: {"name": "Interface 2", "desc": "Logged into Main account"}
-}
 
 CONVERT_AMOUNT = 10
 
@@ -5152,7 +4965,7 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
 async def check_wallet_transactions(application):
     global wallet_balances_cache, wallet_cache_initialized
 
-    wallets = db.get_all_wallets_all_interfaces(ALLOWED_USER_ID)
+    wallets = db.get_all_wallets(ALLOWED_USER_ID)
     if not wallets:
         return
 
@@ -5161,7 +4974,7 @@ async def check_wallet_transactions(application):
     is_first_run = not wallet_cache_initialized
 
     async def send_balance_notification(
-        network, address, symbol, old_balance, new_balance, interface_id, token_name=None
+        network, address, symbol, old_balance, new_balance, token_name=None
     ):
         old_val = Decimal(old_balance) if old_balance else Decimal("0")
         new_val = Decimal(new_balance) if new_balance else Decimal("0")
@@ -5187,27 +5000,17 @@ async def check_wallet_transactions(application):
         if abs(diff) < min_threshold:
             return
 
-        interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
-        interface_label = f"{interface_info['name']} - {interface_info['desc']}"
+        # Only send notifications for deposits, not withdrawals
+        if diff <= 0:
+            return
 
-        if diff > 0:
-            msg = (
-                f"*Deposit Detected!*\n\n"
-                f"*Interface:* {interface_label}\n"
-                f"*Token:* {symbol} [{network_short}]\n"
-                f"*Amount:* `+{diff}`\n"
-                f"*Balance:* `{new_balance} {symbol}`"
-            )
-            banner_name = "deposit"
-        else:
-            msg = (
-                f"*Withdrawal Detected!*\n\n"
-                f"*Interface:* {interface_label}\n"
-                f"*Token:* {symbol} [{network_short}]\n"
-                f"*Amount:* `{diff}`\n"
-                f"*Balance:* `{new_balance} {symbol}`"
-            )
-            banner_name = "withdraw"
+        msg = (
+            f"_*Deposit Confirmed*_\n\n"
+            f"*Token:* {symbol} [{network_short}]\n"
+            f"*Amount:* {diff}\n"
+            f"*Current Balance:* {new_balance} {symbol}"
+        )
+        banner_name = "deposit"
 
         keyboard = [[
             InlineKeyboardButton(
@@ -5270,8 +5073,7 @@ async def check_wallet_transactions(application):
                     logger.info(f"Credited {diff} {ledger_asset} to internal balance")
 
                 await send_balance_notification(
-                    network, address, symbol, old_balance, current_balance,
-                    wallet.get("interface_id", 1)
+                    network, address, symbol, old_balance, current_balance
                 )
 
             wallet_balances_cache[cache_key] = current_balance
@@ -5318,8 +5120,7 @@ async def check_wallet_transactions(application):
 
                     await send_balance_notification(
                         network, address, token_symbol,
-                        old_token_balance, current_token_balance,
-                        wallet.get("interface_id", 1), token_key
+                        old_token_balance, current_token_balance, token_key
                     )
 
                 wallet_balances_cache[token_cache_key] = current_token_balance
@@ -5609,12 +5410,6 @@ def main():
 
     application.add_handler(
         CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(select_interface, pattern=r"^select_interface_\d+$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(switch_interface, pattern=r"^switch_interface_\d+$")
     )
     application.add_handler(
         CallbackQueryHandler(show_wallets_menu, pattern="^menu_wallets$")
