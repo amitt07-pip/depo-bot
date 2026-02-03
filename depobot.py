@@ -75,51 +75,71 @@ def generate_qr_code(data: str) -> io.BytesIO:
     return bio
 
 
-async def edit_message_with_banner(
-    query, banner_name: str, caption: str, reply_markup
-):
-    """Edit the message caption and keyboard. Falls back to delete/send if needed."""
+async def edit_message_caption(query, caption: str, reply_markup):
+    """Edit only the message caption and keyboard (keeps same image). For menu navigation within same section."""
     try:
-        # Check if current message is a photo message
         if query.message.photo:
-            # Edit the caption and reply markup of the existing photo message
             await query.message.edit_caption(
                 caption=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
         else:
-            # Current message is text, try to edit it
             await query.message.edit_text(
                 text=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
     except Exception:
-        # If editing fails (e.g., message type mismatch), fall back to delete/send
-        chat_id = query.message.chat_id
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        
-        banner_path = get_banner_path(banner_name)
-        if os.path.exists(banner_path):
-            with open(banner_path, "rb") as photo:
-                await query.get_bot().send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=reply_markup
-                )
-        else:
-            await query.get_bot().send_message(
+        pass
+
+
+async def send_new_message_with_banner(query, banner_name: str, caption: str, reply_markup):
+    """Delete current message and send new one with banner image. For changing sections or returning to main menu."""
+    chat_id = query.message.chat_id
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    
+    banner_path = get_banner_path(banner_name)
+    if os.path.exists(banner_path):
+        with open(banner_path, "rb") as photo:
+            await query.get_bot().send_photo(
                 chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+    else:
+        await query.get_bot().send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+
+
+async def edit_message_with_banner(
+    query, banner_name: str, caption: str, reply_markup
+):
+    """Edit the message caption and keyboard. Falls back to delete/send if needed."""
+    try:
+        if query.message.photo:
+            await query.message.edit_caption(
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text(
                 text=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
+    except Exception:
+        await send_new_message_with_banner(query, banner_name, caption, reply_markup)
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -2694,7 +2714,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Use public banner (without tagline) for regular users
     banner_name = "welcome" if user_id in USER_ACCESS else "welcome_public"
-    await edit_message_with_banner(
+    # Always send new message to ensure banner image changes (e.g., returning from QR code screen)
+    await send_new_message_with_banner(
         query, banner_name, menu_text, get_main_menu_keyboard(current_interface, user_id)
     )
 
