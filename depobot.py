@@ -3241,8 +3241,11 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
         balance = await BalanceChecker.get_evm_balance(address, network)
 
     if token in ["USDT", "USDC"]:
-        token_balance = await BalanceChecker.get_token_balance(address, network, token)
-        balance_display = f"`{token_balance}` {token}"
+        token_balance_result = await BalanceChecker.get_token_balance(token, network, address)
+        if "error" in token_balance_result:
+            balance_display = f"`0` {token}"
+        else:
+            balance_display = f"`{token_balance_result.get('balance', '0')}` {token}"
     else:
         balance_display = f"`{balance}` {token}"
 
