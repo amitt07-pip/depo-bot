@@ -160,7 +160,7 @@ for title, subtitle, filename, accent, gradient in banners:
     create_banner(title, subtitle, filename, accent, gradient)
 
 def create_profile_picture():
-    """Create a professional circular profile picture matching the banner theme."""
+    """Create a professional profile picture matching the banner theme."""
     size = 512
     accent_color = (99, 102, 241)
     gradient_colors = [(10, 10, 30), (20, 20, 50), (30, 25, 60)]
@@ -170,17 +170,22 @@ def create_profile_picture():
     
     draw = ImageDraw.Draw(img)
     
-    center = size // 2
-    for r in range(180, 60, -20):
-        draw.ellipse([center - r, center - r, center + r, center + r], 
-                    outline=accent_color, width=2)
+    draw.rounded_rectangle([(40, 40), (size - 40, size - 40)], 
+                          radius=25, outline=accent_color, width=3)
     
-    draw.rounded_rectangle([(60, 60), (size - 60, size - 60)], 
-                          radius=30, outline=accent_color, width=3)
+    corner_size = 30
+    draw.line([(50, 50), (50 + corner_size, 50)], fill=accent_color, width=2)
+    draw.line([(50, 50), (50, 50 + corner_size)], fill=accent_color, width=2)
+    draw.line([(size - 50 - corner_size, 50), (size - 50, 50)], fill=accent_color, width=2)
+    draw.line([(size - 50, 50), (size - 50, 50 + corner_size)], fill=accent_color, width=2)
+    draw.line([(50, size - 50 - corner_size), (50, size - 50)], fill=accent_color, width=2)
+    draw.line([(50, size - 50), (50 + corner_size, size - 50)], fill=accent_color, width=2)
+    draw.line([(size - 50, size - 50 - corner_size), (size - 50, size - 50)], fill=accent_color, width=2)
+    draw.line([(size - 50 - corner_size, size - 50), (size - 50, size - 50)], fill=accent_color, width=2)
     
     try:
-        title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
-        subtitle_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 24)
+        title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 100)
+        subtitle_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 32)
     except:
         title_font = ImageFont.load_default()
         subtitle_font = ImageFont.load_default()
@@ -190,11 +195,13 @@ def create_profile_picture():
     text_width = text_bbox[2] - text_bbox[0]
     text_height = text_bbox[3] - text_bbox[1]
     text_x = (size - text_width) // 2
-    text_y = (size - text_height) // 2 - 30
+    text_y = (size - text_height) // 2 - 50
     
-    for offset in range(6, 0, -2):
-        shadow_color = (accent_color[0]//4, accent_color[1]//4, accent_color[2]//4)
-        draw.text((text_x, text_y + offset), text, font=title_font, fill=shadow_color)
+    for offset in range(10, 0, -2):
+        glow_alpha = int(40 * (offset / 10))
+        glow_color = (accent_color[0]//3, accent_color[1]//3, accent_color[2]//3)
+        draw.text((text_x - offset//2, text_y + offset), text, font=title_font, fill=glow_color)
+        draw.text((text_x + offset//2, text_y + offset), text, font=title_font, fill=glow_color)
     
     draw.text((text_x, text_y), text, font=title_font, fill=(255, 255, 255))
     
@@ -202,18 +209,23 @@ def create_profile_picture():
     sub_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
     sub_width = sub_bbox[2] - sub_bbox[0]
     sub_x = (size - sub_width) // 2
-    sub_y = text_y + text_height + 10
+    sub_y = text_y + text_height + 20
     draw.text((sub_x, sub_y), subtitle, font=subtitle_font, fill=accent_color)
+    
+    line_y = sub_y + 50
+    line_width = 150
+    draw.line([(size//2 - line_width//2, line_y), (size//2 + line_width//2, line_y)], 
+              fill=accent_color, width=2)
     
     tagline = "Securely Made By Venom"
     try:
-        tagline_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 16)
+        tagline_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 18)
     except:
         tagline_font = ImageFont.load_default()
     tag_bbox = draw.textbbox((0, 0), tagline, font=tagline_font)
     tag_width = tag_bbox[2] - tag_bbox[0]
     tag_x = (size - tag_width) // 2
-    tag_y = size - 90
+    tag_y = size - 85
     draw.text((tag_x, tag_y), tagline, font=tagline_font, fill=(150, 150, 180))
     
     assets_dir = "/home/ubuntu/repos/depo-bot/assets"
