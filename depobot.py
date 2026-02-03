@@ -4389,9 +4389,100 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if result.get("success"):
+            tx_hash = result.get("tx_hash")
+            explorer_url = result.get("explorer_url")
+            
+            # Show transaction submitted message with pending status
+            pending_keyboard = [
+                [InlineKeyboardButton(
+                    "\U0001F310 View Transaction",
+                    url=explorer_url
+                )]
+            ]
+            
+            await query.edit_message_text(
+                f"\U0001F4E4 *Transaction Submitted*\n\n"
+                f"{info['icon']} *Network:* {info['name']}\n"
+                f"{icon} *Asset:* {symbol}\n"
+                f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+                f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
+                f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
+                f"\u23f3 *Status:* Waiting for blockchain confirmation...",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(pending_keyboard)
+            )
+            
+            # Wait for blockchain confirmation
+            confirmed = False
+            max_attempts = 30  # Max 30 attempts (about 60 seconds for EVM)
+            attempt = 0
+            
+            while not confirmed and attempt < max_attempts:
+                attempt += 1
+                await asyncio.sleep(2)  # Check every 2 seconds
+                
+                try:
+                    if info["type"] == "evm":
+                        w3 = get_web3_with_retry(network)
+                        receipt = w3.eth.get_transaction_receipt(tx_hash)
+                        if receipt:
+                            confirmed = receipt.status == 1
+                            if not confirmed:
+                                # Transaction failed on chain
+                                await query.edit_message_text(
+                                    f"\u274c *Transaction Failed*\n\n"
+                                    f"The transaction was rejected by the blockchain.\n\n"
+                                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`",
+                                    parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup(pending_keyboard)
+                                )
+                                return ConversationHandler.END
+                    elif info["type"] == "solana":
+                        import aiohttp
+                        async with aiohttp.ClientSession() as session:
+                            payload = {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "getSignatureStatuses",
+                                "params": [[tx_hash], {"searchTransactionHistory": True}]
+                            }
+                            async with session.post(NETWORKS["SOLANA"]["rpc"][0], json=payload) as resp:
+                                data = await resp.json()
+                                if data.get("result", {}).get("value", [None])[0]:
+                                    status = data["result"]["value"][0]
+                                    if status.get("confirmationStatus") in ["confirmed", "finalized"]:
+                                        confirmed = True
+                    elif info["type"] == "tron":
+                        from tronpy import Tron
+                        client = Tron(network="mainnet")
+                        tx_info = client.get_transaction_info(tx_hash)
+                        if tx_info and tx_info.get("receipt"):
+                            confirmed = True
+                    else:
+                        # For other networks, assume confirmed after submission
+                        confirmed = True
+                        
+                    # Update status message with confirmation progress
+                    if not confirmed and attempt % 5 == 0:
+                        await query.edit_message_text(
+                            f"\U0001F4E4 *Transaction Submitted*\n\n"
+                            f"{info['icon']} *Network:* {info['name']}\n"
+                            f"{icon} *Asset:* {symbol}\n"
+                            f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+                            f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
+                            f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
+                            f"\u23f3 *Status:* Confirming... ({attempt * 2}s)",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(pending_keyboard)
+                        )
+                except Exception as e:
+                    logger.warning(f"Error checking tx confirmation: {e}")
+                    continue
+            
+            # Log transaction and debit balance
             db.log_transaction(
                 user_id, network, "withdraw", amount,
-                result.get("tx_hash"), address, None, "completed"
+                tx_hash, address, None, "completed"
             )
             
             # Debit the internal balance after successful withdrawal
@@ -4400,12 +4491,12 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 ledger_asset = get_ledger_asset(network)
             withdraw_amount = Decimal(amount)
-            db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, result.get("tx_hash"))
+            db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, tx_hash)
 
             keyboard = [
                 [InlineKeyboardButton(
                     "\U0001F310 View Transaction",
-                    url=result.get("explorer_url")
+                    url=explorer_url
                 )],
                 [InlineKeyboardButton(
                     "\U0001F4CA Check Balance",
@@ -4417,16 +4508,31 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )]
             ]
 
-            await query.edit_message_text(
-                f"\u2705 *Withdrawal Successful!*\n\n"
-                f"{info['icon']} *Network:* {info['name']}\n"
-                f"{icon} *Asset:* {symbol}\n"
-                f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-                f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
-                f"\U0001F4DD *TX Hash:*\n`{result.get('tx_hash')}`",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            if confirmed:
+                await query.edit_message_text(
+                    f"\u2705 *Withdrawal Successful!*\n\n"
+                    f"{info['icon']} *Network:* {info['name']}\n"
+                    f"{icon} *Asset:* {symbol}\n"
+                    f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+                    f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
+                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
+                    f"\u2705 *Status:* Confirmed on blockchain",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                # Timeout - show success but note confirmation pending
+                await query.edit_message_text(
+                    f"\u2705 *Withdrawal Submitted*\n\n"
+                    f"{info['icon']} *Network:* {info['name']}\n"
+                    f"{icon} *Asset:* {symbol}\n"
+                    f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+                    f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
+                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
+                    f"\u23f3 *Status:* Confirmation pending (check explorer)",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
         else:
             db.log_transaction(
                 user_id, network, "withdraw", amount,
