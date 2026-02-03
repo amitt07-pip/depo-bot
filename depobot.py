@@ -410,24 +410,22 @@ NETWORK_ALIASES = {
 }
 
 def detect_token_from_text(text: str):
-    """Detect token from natural language input."""
+    """Detect token from exact match input."""
     text_lower = text.lower().strip()
-    for alias, token in TOKEN_ALIASES.items():
-        if alias in text_lower:
-            return token
+    if text_lower in TOKEN_ALIASES:
+        return TOKEN_ALIASES[text_lower]
     for token in TOKENS.keys():
-        if token.lower() in text_lower:
+        if token.lower() == text_lower:
             return token
     return None
 
 def detect_network_from_text(text: str):
-    """Detect network from natural language input."""
+    """Detect network from exact match input."""
     text_lower = text.lower().strip()
-    for alias, network in NETWORK_ALIASES.items():
-        if alias in text_lower:
-            return network
+    if text_lower in NETWORK_ALIASES:
+        return NETWORK_ALIASES[text_lower]
     for network in NETWORKS.keys():
-        if network.lower() in text_lower:
+        if network.lower() == text_lower:
             return network
     return None
 
@@ -3037,7 +3035,7 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "\U0001F4E5 *Deposit*\n\n"
         "Which token would you like to deposit?\n\n"
-        "Just type the token name (e.g., 'USDT', 'ETH', 'I want to deposit SOL')\n\n"
+        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
         "_Tap the button below to see all supported tokens_"
     )
 
@@ -4018,7 +4016,7 @@ async def show_withdraw_menu(
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
         "Which token would you like to withdraw?\n\n"
-        "Just type the token name (e.g., 'USDT', 'ETH', 'I want to withdraw SOL')\n\n"
+        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
         "_Tap the button below to see all supported tokens_"
     )
 
@@ -4042,18 +4040,20 @@ async def show_withdraw_menu(
 async def show_tokens_list_popup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show a popup with all supported tokens."""
     query = update.callback_query
+    await query.answer()
     
-    tokens_list = []
-    for symbol, info in TOKENS.items():
-        networks = list(info.get("networks", {}).keys())
-        networks_str = ", ".join(networks)
-        tokens_list.append(f"{info.get('icon', '')} {info.get('name', symbol)} ({symbol}) - {networks_str}")
+    tokens_list = ", ".join([f"{info.get('icon', '')} {symbol}" for symbol, info in TOKENS.items()])
+    popup_text = f"Supported: {tokens_list}"
     
-    popup_text = "Supported Tokens:\n\n" + "\n".join(tokens_list)
-    
-    await query.answer(popup_text, show_alert=True)
-    
+    chat_id = query.message.chat_id
     action = query.data.split("_")[-1]
+    
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"\U0001F4CB *Supported Tokens*\n\n{popup_text}\n\n_Type the token name to continue_",
+        parse_mode="Markdown"
+    )
+    
     if action == "withdraw":
         return WITHDRAW_TOKEN
     elif action == "deposit":
