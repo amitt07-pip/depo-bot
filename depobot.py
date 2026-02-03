@@ -4580,8 +4580,11 @@ async def check_wallet_transactions(application):
         elif network == "POLYGON":
             network_short = "MATIC"
 
+        # Filter out small balance changes (noise from RPC inconsistencies)
+        # Use higher threshold for native tokens, lower for stablecoins
         is_native = token_name is None
-        if is_native and abs(diff) < Decimal("0.0001"):
+        min_threshold = Decimal("0.0001") if is_native else Decimal("0.01")
+        if abs(diff) < min_threshold:
             return
 
         interface_info = INTERFACE_INFO.get(interface_id, {"name": f"Interface {interface_id}", "desc": ""})
