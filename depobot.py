@@ -2319,7 +2319,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if usdt_balance > 0:
                 context.user_data["withdraw_token"] = "USDT"
                 token_info = TOKENS.get("USDT", {})
-                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("contract")
+                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("address")
                 text = (
                     "\U0001F4E4 *Quick Withdraw USDT*\n\n"
                     f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
@@ -2330,7 +2330,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif usdc_balance > 0:
                 context.user_data["withdraw_token"] = "USDC"
                 token_info = TOKENS.get("USDC", {})
-                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("contract")
+                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("address")
                 text = (
                     "\U0001F4E4 *Quick Withdraw USDC*\n\n"
                     f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
@@ -4865,7 +4865,7 @@ async def receive_withdraw_quick_network(
     if usdt_balance > 0:
         context.user_data["withdraw_token"] = "USDT"
         token_info = TOKENS.get("USDT", {})
-        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("contract")
+        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("address")
         text = (
             "\U0001F4E4 *Quick Withdraw USDT*\n\n"
             f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
@@ -4876,7 +4876,7 @@ async def receive_withdraw_quick_network(
     elif usdc_balance > 0:
         context.user_data["withdraw_token"] = "USDC"
         token_info = TOKENS.get("USDC", {})
-        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("contract")
+        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("address")
         text = (
             "\U0001F4E4 *Quick Withdraw USDC*\n\n"
             f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
