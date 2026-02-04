@@ -2548,6 +2548,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any active conversation and return to main menu."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+    
+    context.user_data.clear()
+    
+    if user_id in pending_withdrawals:
+        del pending_withdrawals[user_id]
+    
+    await update.message.reply_text(
+        "\u274c *Cancelled*\n\n"
+        "Current operation has been cancelled.\n"
+        "Use /start to return to the main menu.",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -6307,7 +6331,7 @@ async def check_wallet_transactions(application):
         notification_cooldowns[cooldown_key] = current_time
 
         msg = (
-            f"_*Deposit Confirmed*_\n\n"
+            f"*_Deposit Confirmed_*\n\n"
             f"*Token:* {symbol} [{network_short}]\n"
             f"*Amount:* {diff}\n"
             f"*Current Balance:* {new_balance} {symbol}"
@@ -6590,6 +6614,7 @@ def main():
             ]
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
             CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$")
         ],
@@ -6661,6 +6686,7 @@ def main():
             ]
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(cancel_withdraw, pattern="^cancel_withdraw$"),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
             CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$")
@@ -6689,6 +6715,7 @@ def main():
             ]
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
         ],
         per_message=False
@@ -6712,6 +6739,7 @@ def main():
             ]
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
         ],
         per_message=False
@@ -6723,6 +6751,7 @@ def main():
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
 
@@ -6761,6 +6790,7 @@ def main():
             ]
         },
         fallbacks=[
+            CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$"),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
         ],
