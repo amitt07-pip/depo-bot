@@ -397,6 +397,7 @@ DEPOSIT_TOKEN, DEPOSIT_NETWORK, DEPOSIT_CONFIRM_SELECTION = range(6, 9)
 GENERATE_NETWORK, GENERATE_CONFIRM = range(9, 11)
 BALANCE_NETWORK = 11
 CONVERT_FROM_ASSET, CONVERT_TO_ASSET, CONVERT_AMOUNT_AI = range(12, 15)
+WITHDRAW_QUICK_NETWORK = 15
 
 pending_withdrawals = {}
 
@@ -446,6 +447,50 @@ def get_available_networks_for_token(token: str):
     if not token_info:
         return []
     return list(token_info.get("networks", {}).keys())
+
+def detect_network_from_address(address: str):
+    """Detect network type from wallet address format.
+    
+    Returns:
+        - Single network key (e.g., 'TRX', 'SOL', 'LTC') if uniquely identifiable
+        - List of possible networks (e.g., ['ETH', 'BSC', 'POLYGON']) for EVM addresses
+        - None if address format is not recognized
+    """
+    address = address.strip()
+    
+    if address.startswith('T') and len(address) == 34:
+        return 'TRX'
+    
+    if address.startswith('L') or address.startswith('M') or address.startswith('ltc1'):
+        if len(address) >= 26 and len(address) <= 62:
+            return 'LTC'
+    
+    if len(address) >= 32 and len(address) <= 44:
+        import re
+        if re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address):
+            if not address.startswith('0x') and not address.startswith('T'):
+                return 'SOL'
+    
+    if address.startswith('0x') and len(address) == 42:
+        return ['ETH', 'BSC', 'POLYGON']
+    
+    return None
+
+def is_valid_address(address: str, network: str) -> bool:
+    """Validate if address format is correct for the given network."""
+    address = address.strip()
+    
+    if network in ['ETH', 'BSC', 'POLYGON']:
+        return address.startswith('0x') and len(address) == 42
+    elif network == 'TRX':
+        return address.startswith('T') and len(address) == 34
+    elif network == 'SOL':
+        import re
+        return len(address) >= 32 and len(address) <= 44 and re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address)
+    elif network == 'LTC':
+        return (address.startswith('L') or address.startswith('M') or address.startswith('ltc1')) and len(address) >= 26
+    
+    return False
 
 COINGECKO_IDS = {
     "ETH": "ethereum",
@@ -2217,12 +2262,126 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.message.chat_id
+    
+    if context.args and len(context.args) >= 1:
+        address = context.args[0].strip()
+        detected = detect_network_from_address(address)
+        
+        if detected is None:
+            text = (
+                "\U0001F4E4 *Withdraw*\n\n"
+                "\u274c Invalid address format.\n\n"
+                "Please provide a valid wallet address.\n\n"
+                "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin_"
+            )
+            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=open(get_banner_path("withdraw"), "rb"),
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return ConversationHandler.END
+        
+        context.user_data["withdraw_address"] = address
+        
+        if isinstance(detected, list):
+            context.user_data["withdraw_possible_networks"] = detected
+            networks_str = " / ".join(detected)
+            text = (
+                "\U0001F4E4 *Quick Withdraw*\n\n"
+                f"\U0001F4CD Address: `{address[:8]}...{address[-6:]}`\n\n"
+                f"This is an EVM address. Which network?\n\n"
+                f"Type: `{networks_str}`"
+            )
+            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=open(get_banner_path("withdraw"), "rb"),
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_QUICK_NETWORK
+        else:
+            context.user_data["withdraw_network"] = detected
+            balances = db.get_all_internal_balances(user_id)
+            usdt_balance = balances.get("USDT", Decimal("0"))
+            usdc_balance = balances.get("USDC", Decimal("0"))
+            
+            network_info = NETWORKS.get(detected, {})
+            network_name = network_info.get("name", detected)
+            native_token = network_info.get("native_token", detected)
+            native_balance = balances.get(native_token, Decimal("0"))
+            
+            if usdt_balance > 0:
+                context.user_data["withdraw_token"] = "USDT"
+                token_info = TOKENS.get("USDT", {})
+                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("contract")
+                text = (
+                    "\U0001F4E4 *Quick Withdraw USDT*\n\n"
+                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+                    f"\U0001F310 Network: *{network_name}*\n"
+                    f"\U0001F4B0 Balance: `{usdt_balance:.4f} USDT`\n\n"
+                    "Enter the amount to withdraw:"
+                )
+            elif usdc_balance > 0:
+                context.user_data["withdraw_token"] = "USDC"
+                token_info = TOKENS.get("USDC", {})
+                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("contract")
+                text = (
+                    "\U0001F4E4 *Quick Withdraw USDC*\n\n"
+                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+                    f"\U0001F310 Network: *{network_name}*\n"
+                    f"\U0001F4B0 Balance: `{usdc_balance:.4f} USDC`\n\n"
+                    "Enter the amount to withdraw:"
+                )
+            elif native_balance > 0:
+                context.user_data["withdraw_token"] = native_token
+                context.user_data["withdraw_contract"] = None
+                text = (
+                    f"\U0001F4E4 *Quick Withdraw {native_token}*\n\n"
+                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+                    f"\U0001F310 Network: *{network_name}*\n"
+                    f"\U0001F4B0 Balance: `{native_balance:.6f} {native_token}`\n\n"
+                    "Enter the amount to withdraw:"
+                )
+            else:
+                text = (
+                    "\U0001F4E4 *Quick Withdraw*\n\n"
+                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+                    f"\U0001F310 Network: *{network_name}*\n\n"
+                    "\u274c No balance available on this network.\n"
+                    "Please deposit funds first."
+                )
+                keyboard = [[InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]]
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=open(get_banner_path("withdraw"), "rb"),
+                    caption=text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return ConversationHandler.END
+            
+            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=open(get_banner_path("withdraw"), "rb"),
+                caption=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
 
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
         "Which token would you like to withdraw?\n\n"
         "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
-        "_Tap the button below to see all supported tokens_"
+        "_Tip: Use `/withdraw <address>` for quick withdraw_"
     )
 
     keyboard = [
@@ -4651,6 +4810,120 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WITHDRAW_AMOUNT
 
 
+async def receive_withdraw_quick_network(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """Handle network selection for quick withdraw with EVM address."""
+    user_input = update.message.text.strip().upper()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+    
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    
+    prev_msg_id = context.user_data.get("withdraw_msg_id")
+    if prev_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
+        except Exception:
+            pass
+    
+    possible_networks = context.user_data.get("withdraw_possible_networks", [])
+    address = context.user_data.get("withdraw_address")
+    
+    network = detect_network_from_text(user_input)
+    if not network or network not in possible_networks:
+        networks_str = " / ".join(possible_networks)
+        text = (
+            "\U0001F4E4 *Quick Withdraw*\n\n"
+            f"\u274c Invalid network. Please type one of:\n`{networks_str}`"
+        )
+        keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("withdraw"), "rb"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data["withdraw_msg_id"] = msg.message_id
+        return WITHDRAW_QUICK_NETWORK
+    
+    context.user_data["withdraw_network"] = network
+    balances = db.get_all_internal_balances(user_id)
+    usdt_balance = balances.get("USDT", Decimal("0"))
+    usdc_balance = balances.get("USDC", Decimal("0"))
+    
+    network_info = NETWORKS.get(network, {})
+    network_name = network_info.get("name", network)
+    native_token = network_info.get("native_token", network)
+    native_balance = balances.get(native_token, Decimal("0"))
+    
+    if usdt_balance > 0:
+        context.user_data["withdraw_token"] = "USDT"
+        token_info = TOKENS.get("USDT", {})
+        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("contract")
+        text = (
+            "\U0001F4E4 *Quick Withdraw USDT*\n\n"
+            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+            f"\U0001F310 Network: *{network_name}*\n"
+            f"\U0001F4B0 Balance: `{usdt_balance:.4f} USDT`\n\n"
+            "Enter the amount to withdraw:"
+        )
+    elif usdc_balance > 0:
+        context.user_data["withdraw_token"] = "USDC"
+        token_info = TOKENS.get("USDC", {})
+        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("contract")
+        text = (
+            "\U0001F4E4 *Quick Withdraw USDC*\n\n"
+            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+            f"\U0001F310 Network: *{network_name}*\n"
+            f"\U0001F4B0 Balance: `{usdc_balance:.4f} USDC`\n\n"
+            "Enter the amount to withdraw:"
+        )
+    elif native_balance > 0:
+        context.user_data["withdraw_token"] = native_token
+        context.user_data["withdraw_contract"] = None
+        text = (
+            f"\U0001F4E4 *Quick Withdraw {native_token}*\n\n"
+            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+            f"\U0001F310 Network: *{network_name}*\n"
+            f"\U0001F4B0 Balance: `{native_balance:.6f} {native_token}`\n\n"
+            "Enter the amount to withdraw:"
+        )
+    else:
+        text = (
+            "\U0001F4E4 *Quick Withdraw*\n\n"
+            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+            f"\U0001F310 Network: *{network_name}*\n\n"
+            "\u274c No balance available on this network.\n"
+            "Please deposit funds first."
+        )
+        keyboard = [[InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]]
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("withdraw"), "rb"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+    
+    keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+    return WITHDRAW_AMOUNT
+
+
 async def receive_withdraw_amount(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -6324,6 +6597,12 @@ def main():
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     receive_withdraw_amount
+                )
+            ],
+            WITHDRAW_QUICK_NETWORK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_withdraw_quick_network
                 )
             ],
             WITHDRAW_ADDRESS: [
