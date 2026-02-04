@@ -188,11 +188,17 @@ NETWORKS = {
     },
     "POLYGON": {
         "name": "Polygon",
-        "rpc": "https://polygon-rpc.com",
+        "rpc": "https://polygon.llamarpc.com",
         "rpc_fallbacks": [
+            "https://polygon-mainnet.public.blastapi.io",
+            "https://polygon.meowrpc.com",
+            "https://polygon-bor-rpc.publicnode.com",
             "https://polygon.publicnode.com",
             "https://1rpc.io/matic",
-            "https://polygon.drpc.org"
+            "https://polygon.drpc.org",
+            "https://polygon-rpc.com",
+            "https://rpc-mainnet.maticvigil.com",
+            "https://matic-mainnet.chainstacklabs.com"
         ],
         "chain_id": 137,
         "symbol": "MATIC",
