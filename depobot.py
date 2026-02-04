@@ -394,6 +394,8 @@ ERC20_ABI = [
 
 WITHDRAW_TOKEN, WITHDRAW_NETWORK, WITHDRAW_CONFIRM_SELECTION, WITHDRAW_AMOUNT, WITHDRAW_ADDRESS, WITHDRAW_CONFIRM = range(6)
 DEPOSIT_TOKEN, DEPOSIT_NETWORK, DEPOSIT_CONFIRM_SELECTION = range(6, 9)
+GENERATE_NETWORK, GENERATE_CONFIRM = range(9, 11)
+BALANCE_NETWORK = 11
 
 pending_withdrawals = {}
 
@@ -2102,26 +2104,31 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    chat_id = update.message.chat_id
+    network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+    networks_str = ", ".join(network_names)
+
+    text = (
+        "\U0001F4B0 *Check Balance*\n\n"
+        "Which network would you like to check?\n\n"
+        f"_Available networks: {networks_str}_\n\n"
+        "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
+    )
+
     keyboard = [
-        [InlineKeyboardButton("All Balances", callback_data="balance_all")]
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    row = []
-    for key, info in NETWORKS.items():
-        row.append(InlineKeyboardButton(info['name'], callback_data=f"balance_{key}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
-
-    text = "*Balances*\nSelect network to check:"
-
-    await send_photo_with_banner(
-        update.message, "balance", text, InlineKeyboardMarkup(keyboard)
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("balance"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    context.user_data["balance_msg_id"] = msg.message_id
+
+    return BALANCE_NETWORK
 
 
 async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2243,18 +2250,31 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    keyboard = []
-    for key, info in NETWORKS.items():
-        keyboard.append([
-            InlineKeyboardButton(info['name'], callback_data=f"gen_{key}")
-        ])
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
+    chat_id = update.message.chat_id
+    network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+    networks_str = ", ".join(network_names)
 
-    text = "*Generate Wallet*\nSelect network:"
-
-    await send_photo_with_banner(
-        update.message, "generate", text, InlineKeyboardMarkup(keyboard)
+    text = (
+        "\U0001F4B3 *Generate Wallet*\n\n"
+        "Which network would you like to generate a wallet for?\n\n"
+        f"_Available networks: {networks_str}_\n\n"
+        "Just type the network name (e.g., 'Ethereum', 'BSC', 'Solana')"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("generate"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["generate_msg_id"] = msg.message_id
+
+    return GENERATE_NETWORK
 
 
 async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2834,12 +2854,172 @@ async def show_generate_menu(
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
-    text = "*Generate Wallet*\nSelect network:"
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
-    await edit_message_with_banner(
-        query, "generate", text, get_generate_network_keyboard()
+    network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+    networks_str = ", ".join(network_names)
+
+    text = (
+        "\U0001F4B3 *Generate Wallet*\n\n"
+        "Which network would you like to generate a wallet for?\n\n"
+        f"_Available networks: {networks_str}_\n\n"
+        "Just type the network name (e.g., 'Ethereum', 'BSC', 'Solana')"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("generate"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["generate_msg_id"] = msg.message_id
+
+    return GENERATE_NETWORK
+
+
+async def receive_generate_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse network from user's input for wallet generation."""
+    text = update.message.text.strip()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "generate_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["generate_msg_id"])
+        except Exception:
+            pass
+
+    network = detect_network_from_text(text)
+
+    if not network:
+        network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+        networks_str = ", ".join(network_names)
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("generate"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Network Not Recognized*\n\n"
+                f"I couldn't understand which network you want.\n\n"
+                f"_Available networks: {networks_str}_\n\n"
+                "Please try again (e.g., 'Ethereum', 'BSC', 'Polygon')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["generate_msg_id"] = msg.message_id
+        return GENERATE_NETWORK
+
+    context.user_data["generate_network"] = network
+    info = NETWORKS[network]
+
+    existing = db.get_wallet(user_id, network)
+    if existing:
+        keyboard = [
+            [
+                InlineKeyboardButton("Yes, Replace", callback_data="confirm_generate_ai"),
+                InlineKeyboardButton("Cancel", callback_data="main_menu")
+            ]
+        ]
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("generate"), "rb"),
+            caption=(
+                f"\u26a0\ufe0f *Warning*\n\n"
+                f"You already have a {info['name']} wallet.\n"
+                f"Generating a new one will replace it.\n\n"
+                f"Do you want to proceed?"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data["generate_msg_id"] = msg.message_id
+        return GENERATE_CONFIRM
+
+    return await do_generate_wallet_ai(update, context, chat_id, network, user_id)
+
+
+async def confirm_generate_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirm wallet generation after warning."""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    network = context.user_data.get("generate_network")
+    
+    if not network:
+        await query.message.delete()
+        return ConversationHandler.END
+    
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    
+    return await do_generate_wallet_ai(update, context, chat_id, network, user_id)
+
+
+async def do_generate_wallet_ai(update, context, chat_id: int, network: str, user_id: int):
+    """Generate wallet using AI conversational flow."""
+    info = NETWORKS[network]
+    logger.info(f"User {user_id} generating {network} wallet via AI flow")
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("generate"), "rb"),
+        caption=f"*Generating {info['name']} wallet...*",
+        parse_mode="Markdown"
+    )
+
+    try:
+        address, private_key = WalletGenerator.generate_wallet(network)
+        encrypted_key = CryptoUtils.encrypt_private_key(private_key)
+        db.save_wallet(user_id, network, address, encrypted_key)
+        logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Check Balance", callback_data=f"refresh_{network}"),
+                InlineKeyboardButton("Deposit", callback_data=f"deposit_{network}")
+            ],
+            [InlineKeyboardButton("Generate Another", callback_data="menu_generate")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
+        ]
+
+        await msg.edit_caption(
+            caption=(
+                f"\u2705 *Wallet Generated!*\n\n"
+                f"*Network:* {info['name']}\n"
+                f"*Address:*\n`{address}`"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error generating wallet: {e}")
+        await msg.edit_caption(
+            caption=f"\u274c *Error*\n\n{str(e)}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_generate")]])
+        )
+
+    return ConversationHandler.END
 
 
 async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3773,27 +3953,215 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+    networks_str = ", ".join(network_names)
+
+    text = (
+        "\U0001F4B0 *Check Balance*\n\n"
+        "Which network would you like to check?\n\n"
+        f"_Available networks: {networks_str}_\n\n"
+        "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
+    )
 
     keyboard = [
-        [InlineKeyboardButton("All Balances", callback_data="balance_all")]
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    row = []
-    for key, info in NETWORKS.items():
-        row.append(InlineKeyboardButton(info['name'], callback_data=f"balance_{key}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
-
-    text = "*Balances*\nSelect network to check:"
-
-    await edit_message_with_banner(
-        query, "balance", text, InlineKeyboardMarkup(keyboard)
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("balance"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    context.user_data["balance_msg_id"] = msg.message_id
+
+    return BALANCE_NETWORK
+
+
+async def receive_balance_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse network from user's input for balance check."""
+    text = update.message.text.strip().lower()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "balance_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["balance_msg_id"])
+        except Exception:
+            pass
+
+    if text == "all":
+        return await do_check_balance_all(update, context, chat_id, user_id)
+
+    network = detect_network_from_text(text)
+
+    if not network:
+        network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
+        networks_str = ", ".join(network_names)
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("balance"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Network Not Recognized*\n\n"
+                f"I couldn't understand which network you want.\n\n"
+                f"_Available networks: {networks_str}_\n\n"
+                "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["balance_msg_id"] = msg.message_id
+        return BALANCE_NETWORK
+
+    return await do_check_balance_network(update, context, chat_id, user_id, network)
+
+
+async def do_check_balance_all(update, context, chat_id: int, user_id: int):
+    """Check all balances using AI conversational flow."""
+    wallets = db.get_all_wallets(user_id)
+    if not wallets:
+        keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("balance"), "rb"),
+            caption="*No Wallets*\nGenerate a wallet first.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("balance"), "rb"),
+        caption="*Fetching all balances...*",
+        parse_mode="Markdown"
+    )
+
+    text = "*Your Balances*\n\n"
+    
+    text += "*On-Chain:*\n"
+    for wallet in wallets:
+        net = wallet["network"]
+        info = NETWORKS[net]
+        balance_info = await BalanceChecker.get_balance(net, wallet["address"])
+        balance_str = balance_info.get("balance", "Error")
+        symbol = balance_info.get("symbol", info["symbol"])
+        text += f"{info['icon']} {info['name']}: `{balance_str} {symbol}`\n"
+    
+    internal_balances = db.get_all_internal_balances(user_id)
+    if internal_balances:
+        text += "\n*Internal Ledger:*\n"
+        for asset, balance in internal_balances.items():
+            if balance > Decimal("0"):
+                text += f"\U0001F4B0 {asset}: `{balance:.6f}`\n"
+
+    keyboard = [
+        [InlineKeyboardButton("Check Another", callback_data="menu_balance")],
+        [InlineKeyboardButton("Home", callback_data="main_menu")]
+    ]
+
+    await msg.edit_caption(
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ConversationHandler.END
+
+
+async def do_check_balance_network(update, context, chat_id: int, user_id: int, network: str):
+    """Check balance for a specific network using AI conversational flow."""
+    wallet = db.get_wallet(user_id, network)
+    info = NETWORKS[network]
+
+    if not wallet:
+        keyboard = [
+            [InlineKeyboardButton(f"Generate {info['name']} Wallet", callback_data=f"gen_{network}")],
+            [InlineKeyboardButton("Home", callback_data="main_menu")]
+        ]
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("balance"), "rb"),
+            caption=f"*No {info['name']} Wallet*\nGenerate one first.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("balance"), "rb"),
+        caption=f"*Fetching {info['name']} balances...*",
+        parse_mode="Markdown"
+    )
+
+    balance_info = await BalanceChecker.get_balance(network, wallet["address"])
+    native_balance = balance_info.get("balance", "Error")
+    native_symbol = balance_info.get("symbol", info["symbol"])
+
+    text = f"*{info['name']} Balances*\n\n"
+    text += f"*On-Chain:*\n"
+    text += f"{info['icon']} Native: `{native_balance} {native_symbol}`\n"
+
+    for token_key, token_info in TOKENS.items():
+        if network in token_info.get("networks", {}):
+            net_info = token_info["networks"][network]
+            if net_info.get("native"):
+                continue
+            try:
+                result = await BalanceChecker.get_token_balance(
+                    token_key, network, wallet["address"]
+                )
+                if result and "balance" in result and not result.get("error"):
+                    bal_str = result["balance"]
+                    text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
+            except Exception:
+                pass
+
+    ledger_asset = get_ledger_asset(network)
+    internal_native = db.get_internal_balance(user_id, ledger_asset)
+    
+    text += f"\n*Internal Ledger:*\n"
+    text += f"\U0001F4B0 {ledger_asset}: `{internal_native:.6f}`\n"
+    
+    for token_key in ["USDT", "USDC"]:
+        token_info = TOKENS.get(token_key, {})
+        if network in token_info.get("networks", {}):
+            net_info = token_info["networks"][network]
+            if not net_info.get("native"):
+                token_ledger_asset = get_ledger_asset(network, token_key)
+                internal_token = db.get_internal_balance(user_id, token_ledger_asset)
+                text += f"\U0001F4B0 {token_ledger_asset}: `{internal_token:.6f}`\n"
+
+    text += f"\n*Address:*\n`{wallet['address']}`"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Check Another", callback_data="menu_balance"),
+            InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")
+        ],
+        [InlineKeyboardButton("Home", callback_data="main_menu")]
+    ]
+
+    await msg.edit_caption(
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ConversationHandler.END
 
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5591,12 +5959,59 @@ def main():
         per_message=False
     )
 
+    # Generate wallet conversation handler
+    generate_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("generate", generate_command),
+            CallbackQueryHandler(
+                show_generate_menu,
+                pattern=r"^menu_generate$"
+            )
+        ],
+        states={
+            GENERATE_NETWORK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_generate_network
+                )
+            ],
+            GENERATE_CONFIRM: [
+                CallbackQueryHandler(confirm_generate_ai, pattern="^confirm_generate_ai$")
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+        ],
+        per_message=False
+    )
+
+    # Balance check conversation handler
+    balance_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("balance", balance_command),
+            CallbackQueryHandler(
+                show_balance_menu,
+                pattern=r"^menu_balance$"
+            )
+        ],
+        states={
+            BALANCE_NETWORK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_balance_network
+                )
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+        ],
+        per_message=False
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", start))
     application.add_handler(CommandHandler("send", send_command))
-    application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
-    application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CommandHandler("convert", convert_command))
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -5605,6 +6020,8 @@ def main():
 
     application.add_handler(deposit_handler)
     application.add_handler(withdraw_handler)
+    application.add_handler(generate_handler)
+    application.add_handler(balance_handler)
 
     # Convert conversation handler
     convert_handler = ConversationHandler(
@@ -5642,9 +6059,6 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(refresh_balance, pattern=r"^refresh_[A-Z]+$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_generate_menu, pattern="^menu_generate$")
     )
     application.add_handler(
         CallbackQueryHandler(generate_wallet, pattern=r"^gen_[A-Z]+$")
@@ -5702,9 +6116,6 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^ignore$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_balance_menu, pattern="^menu_balance$")
     )
     application.add_handler(
         CallbackQueryHandler(check_balance, pattern=r"^balance_")
