@@ -396,6 +396,7 @@ WITHDRAW_TOKEN, WITHDRAW_NETWORK, WITHDRAW_CONFIRM_SELECTION, WITHDRAW_AMOUNT, W
 DEPOSIT_TOKEN, DEPOSIT_NETWORK, DEPOSIT_CONFIRM_SELECTION = range(6, 9)
 GENERATE_NETWORK, GENERATE_CONFIRM = range(9, 11)
 BALANCE_NETWORK = 11
+CONVERT_FROM_ASSET, CONVERT_TO_ASSET, CONVERT_AMOUNT_AI = range(12, 15)
 
 pending_withdrawals = {}
 
@@ -2286,6 +2287,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    chat_id = update.message.chat_id
     balances = db.get_all_internal_balances(user_id)
     assets_with_balance = [
         asset for asset in CONVERTIBLE_ASSETS
@@ -2298,25 +2300,32 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_photo_with_banner(
             update.message, "convert", text, InlineKeyboardMarkup(keyboard)
         )
-        return
+        return ConversationHandler.END
 
-    keyboard = []
-    for asset in assets_with_balance:
-        balance = balances.get(asset, 0)
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{asset} ({balance:.4f})",
-                callback_data=f"convert_from_{asset}"
-            )
-        ])
+    balances_str = ", ".join([f"{a} ({balances.get(a, 0):.4f})" for a in assets_with_balance])
 
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
-
-    text = "*Convert*\nSelect asset to convert from:"
-
-    await send_photo_with_banner(
-        update.message, "convert", text, InlineKeyboardMarkup(keyboard)
+    text = (
+        "\U0001F504 *Convert Assets*\n\n"
+        "Which asset would you like to convert FROM?\n\n"
+        f"_Your balances: {balances_str}_\n\n"
+        "Just type the asset name (e.g., 'ETH', 'USDT', 'BNB')"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["convert_msg_id"] = msg.message_id
+    context.user_data["convert_balances"] = {a: str(balances.get(a, 0)) for a in assets_with_balance}
+
+    return CONVERT_FROM_ASSET
 
 
 async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5129,6 +5138,12 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
     user_id = query.from_user.id
     balances = db.get_all_internal_balances(user_id)
@@ -5141,30 +5156,357 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
         text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
-        await edit_message_with_banner(
-            query, "convert", text, InlineKeyboardMarkup(keyboard)
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return
+        return ConversationHandler.END
 
-    keyboard = []
-    for asset in assets_with_balance:
-        bal = balances.get(asset, Decimal("0"))
-        token_info = TOKENS.get(asset, {})
-        icon = token_info.get("icon", "")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{icon} {asset} ({bal:.6f})",
-                callback_data=f"convert_from_{asset}"
-            )
-        ])
+    balances_str = ", ".join([f"{a} ({balances.get(a, 0):.4f})" for a in assets_with_balance])
 
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
-
-    text = "*Convert*\nSelect asset to convert:"
-
-    await edit_message_with_banner(
-        query, "convert", text, InlineKeyboardMarkup(keyboard)
+    text = (
+        "\U0001F504 *Convert Assets*\n\n"
+        "Which asset would you like to convert FROM?\n\n"
+        f"_Your balances: {balances_str}_\n\n"
+        "Just type the asset name (e.g., 'ETH', 'USDT', 'BNB')"
     )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["convert_msg_id"] = msg.message_id
+    context.user_data["convert_balances"] = {a: str(balances.get(a, 0)) for a in assets_with_balance}
+
+    return CONVERT_FROM_ASSET
+
+
+async def receive_convert_from_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse the 'from' asset from user's input for conversion."""
+    text = update.message.text.strip().upper()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "convert_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
+        except Exception:
+            pass
+
+    balances = context.user_data.get("convert_balances", {})
+    
+    from_asset = None
+    if text in CONVERTIBLE_ASSETS:
+        from_asset = text
+    else:
+        text_lower = text.lower()
+        if text_lower in TOKEN_ALIASES:
+            potential = TOKEN_ALIASES[text_lower]
+            if potential in CONVERTIBLE_ASSETS:
+                from_asset = potential
+
+    if not from_asset or from_asset not in balances:
+        balances_str = ", ".join([f"{a} ({balances.get(a, '0')})" for a in balances.keys()])
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Asset Not Recognized*\n\n"
+                f"I couldn't understand which asset you want to convert.\n\n"
+                f"_Your balances: {balances_str}_\n\n"
+                "Please type a valid asset name (e.g., 'ETH', 'USDT', 'BNB')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["convert_msg_id"] = msg.message_id
+        return CONVERT_FROM_ASSET
+
+    context.user_data["convert_from"] = from_asset
+    balance = Decimal(balances.get(from_asset, "0"))
+
+    to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
+    to_assets_str = ", ".join(to_assets)
+
+    text = (
+        f"\U0001F504 *Convert {from_asset}*\n\n"
+        f"Available: {balance:.6f} {from_asset}\n\n"
+        f"Which asset would you like to convert TO?\n\n"
+        f"_Available: {to_assets_str}_\n\n"
+        "Just type the asset name (e.g., 'USDT', 'ETH', 'BNB')"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["convert_msg_id"] = msg.message_id
+
+    return CONVERT_TO_ASSET
+
+
+async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and parse the 'to' asset from user's input for conversion."""
+    text = update.message.text.strip().upper()
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "convert_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
+        except Exception:
+            pass
+
+    from_asset = context.user_data.get("convert_from")
+    
+    to_asset = None
+    if text in CONVERTIBLE_ASSETS and text != from_asset:
+        to_asset = text
+    else:
+        text_lower = text.lower()
+        if text_lower in TOKEN_ALIASES:
+            potential = TOKEN_ALIASES[text_lower]
+            if potential in CONVERTIBLE_ASSETS and potential != from_asset:
+                to_asset = potential
+
+    if not to_asset:
+        to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
+        to_assets_str = ", ".join(to_assets)
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Asset Not Recognized*\n\n"
+                f"I couldn't understand which asset you want to convert to.\n\n"
+                f"_Available: {to_assets_str}_\n\n"
+                "Please type a valid asset name (e.g., 'USDT', 'ETH', 'BNB')"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["convert_msg_id"] = msg.message_id
+        return CONVERT_TO_ASSET
+
+    context.user_data["convert_to"] = to_asset
+    
+    balances = context.user_data.get("convert_balances", {})
+    balance = Decimal(balances.get(from_asset, "0"))
+    context.user_data["convert_balance"] = str(balance)
+
+    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
+
+    text = (
+        f"\U0001F504 *Convert {from_asset} to {to_asset}*\n\n"
+        f"Available: {balance:.6f} {from_asset}\n"
+        f"Rate: 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
+        f"Enter the amount of {from_asset} to convert:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["convert_msg_id"] = msg.message_id
+
+    return CONVERT_AMOUNT_AI
+
+
+async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive and process the conversion amount from user's input."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return ConversationHandler.END
+
+    chat_id = update.message.chat_id
+    amount_str = update.message.text.strip()
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if "convert_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
+        except Exception:
+            pass
+
+    try:
+        amount = Decimal(amount_str)
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+    except Exception:
+        from_asset = context.user_data.get("convert_from")
+        to_asset = context.user_data.get("convert_to")
+        balance_str = context.user_data.get("convert_balance", "0")
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=(
+                f"\u26a0\ufe0f *Invalid Amount*\n\n"
+                f"Please enter a valid number.\n\n"
+                f"Available: {balance_str} {from_asset}"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["convert_msg_id"] = msg.message_id
+        return CONVERT_AMOUNT_AI
+
+    balance_str = context.user_data.get("convert_balance", "0")
+    try:
+        balance = Decimal(balance_str)
+    except Exception:
+        balance = Decimal("0")
+
+    from_asset = context.user_data.get("convert_from")
+    to_asset = context.user_data.get("convert_to")
+
+    if amount > balance:
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=(
+                f"\u26a0\ufe0f *Insufficient Balance*\n\n"
+                f"You have {balance_str} {from_asset}.\n\n"
+                f"Please enter a smaller amount."
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        )
+        context.user_data["convert_msg_id"] = msg.message_id
+        return CONVERT_AMOUNT_AI
+
+    context.user_data["convert_amount"] = str(amount)
+
+    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
+    to_amount = amount * rate
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Confirm", callback_data="confirm_convert_ai"),
+            InlineKeyboardButton("Cancel", callback_data="main_menu")
+        ]
+    ]
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=(
+            f"\U0001F504 *Confirm Conversion*\n\n"
+            f"*From:* {amount:.6f} {from_asset}\n"
+            f"*To:* {to_amount:.6f} {to_asset}\n"
+            f"*Rate:* 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
+            f"Confirm this conversion?"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["convert_msg_id"] = msg.message_id
+
+    return ConversationHandler.END
+
+
+async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute the conversion after confirmation."""
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    from_asset = context.user_data.get("convert_from")
+    to_asset = context.user_data.get("convert_to")
+    amount_str = context.user_data.get("convert_amount", "0")
+    amount = Decimal(amount_str)
+
+    msg = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=f"*Processing conversion...*",
+        parse_mode="Markdown"
+    )
+
+    try:
+        rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
+        to_amount = amount * rate
+
+        success = db.convert_balance(user_id, from_asset, to_asset, amount, to_amount)
+
+        if success:
+            keyboard = [
+                [InlineKeyboardButton("Convert More", callback_data="menu_convert")],
+                [InlineKeyboardButton("Home", callback_data="main_menu")]
+            ]
+            await msg.edit_caption(
+                caption=(
+                    f"\u2705 *Conversion Successful!*\n\n"
+                    f"*Converted:* {amount:.6f} {from_asset}\n"
+                    f"*Received:* {to_amount:.6f} {to_asset}\n"
+                    f"*Rate:* 1 {from_asset} = {rate:.6f} {to_asset}"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
+            await msg.edit_caption(
+                caption=f"\u274c *Conversion Failed*\n\nInsufficient balance.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    except Exception as e:
+        logger.error(f"Conversion error: {e}")
+        keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
+        await msg.edit_caption(
+            caption=f"\u274c *Conversion Failed*\n\n{str(e)}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def show_convert_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6012,7 +6354,6 @@ def main():
     application.add_handler(CommandHandler("menu", start))
     application.add_handler(CommandHandler("send", send_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
-    application.add_handler(CommandHandler("convert", convert_command))
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("sync", sync_command))
@@ -6023,30 +6364,46 @@ def main():
     application.add_handler(generate_handler)
     application.add_handler(balance_handler)
 
-    # Convert conversation handler
-    convert_handler = ConversationHandler(
+    # Convert conversation handler (AI flow)
+    convert_handler_ai = ConversationHandler(
         entry_points=[
+            CommandHandler("convert", convert_command),
             CallbackQueryHandler(
-                show_convert_amount,
-                pattern=r"^convert_to_[A-Z]+$"
+                show_convert_menu,
+                pattern=r"^menu_convert$"
             )
         ],
         states={
-            CONVERT_AMOUNT: [
+            CONVERT_FROM_ASSET: [
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
-                    receive_convert_amount
+                    receive_convert_from_asset
+                )
+            ],
+            CONVERT_TO_ASSET: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_convert_to_asset
+                )
+            ],
+            CONVERT_AMOUNT_AI: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_convert_amount_ai
                 )
             ]
         },
         fallbacks=[
             CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$"),
-            CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
-            CallbackQueryHandler(show_convert_menu, pattern="^menu_convert$")
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
         ],
         per_message=False
     )
-    application.add_handler(convert_handler)
+    application.add_handler(convert_handler_ai)
+    
+    application.add_handler(
+        CallbackQueryHandler(confirm_convert_ai, pattern="^confirm_convert_ai$")
+    )
 
     application.add_handler(
         CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
@@ -6128,18 +6485,6 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_help, pattern="^menu_help$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_convert_menu, pattern="^menu_convert$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_convert_to, pattern=r"^convert_from_[A-Z]+$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(execute_convert, pattern="^confirm_convert$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$")
     )
     application.add_handler(
         CallbackQueryHandler(show_tokens_menu, pattern="^menu_tokens$")
