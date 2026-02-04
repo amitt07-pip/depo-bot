@@ -4963,6 +4963,8 @@ async def receive_withdraw_amount(
     context.user_data["withdraw_amount"] = amount
     network = context.user_data.get("withdraw_network")
     token = context.user_data.get("withdraw_token")
+    address = context.user_data.get("withdraw_address")
+    token_address = context.user_data.get("withdraw_contract")
     info = NETWORKS[network]
 
     if token:
@@ -4972,6 +4974,49 @@ async def receive_withdraw_amount(
     else:
         symbol = info["symbol"]
         icon = info["icon"]
+
+    if address:
+        user_id = update.effective_user.id
+        pending_withdrawals[user_id] = {
+            "network": network,
+            "amount": amount,
+            "address": address,
+            "token": token,
+            "token_address": token_address
+        }
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "\u2705 Confirm Withdrawal",
+                    callback_data="exec_withdraw"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "\u274c Cancel",
+                    callback_data="cancel_withdraw"
+                )
+            ]
+        ]
+        
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
+            f"Please review and confirm:\n\n"
+            f"{'='*30}\n"
+            f"{info['icon']} *Network:* {info['name']}\n"
+            f"{icon} *Asset:* {symbol}\n"
+            f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+            f"\U0001F4CD *To:*\n`{address}`\n"
+            f"{'='*30}\n\n"
+            f"\u26a0\ufe0f *Warning:* This action cannot be undone!\n"
+            f"Please verify the address carefully.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data["withdraw_msg_id"] = msg.message_id
+        return WITHDRAW_CONFIRM
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
