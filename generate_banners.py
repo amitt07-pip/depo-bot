@@ -79,7 +79,7 @@ def draw_glow_circle(draw, center, radius, color, alpha_steps=20):
         draw.ellipse([center[0] - r, center[1] - r, center[0] + r, center[1] + r], 
                      fill=None, outline=glow_color, width=2)
 
-def create_banner(title, subtitle, filename, accent_color, gradient_colors):
+def create_banner(title, subtitle, filename, accent_color, gradient_colors, extra_info=None):
     """Create a professional banner image with modern design."""
     width, height = 800, 400
     
@@ -107,16 +107,22 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors):
         subtitle_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
         handle_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
         tagline_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 18)
+        info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
     except:
         title_font = ImageFont.load_default()
         subtitle_font = ImageFont.load_default()
         handle_font = ImageFont.load_default()
         tagline_font = ImageFont.load_default()
+        info_font = ImageFont.load_default()
+    
+    if extra_info:
+        title_y = 75
+    else:
+        title_y = 130
     
     title_bbox = draw.textbbox((0, 0), title, font=title_font)
     title_width = title_bbox[2] - title_bbox[0]
     title_x = (width - title_width) // 2
-    title_y = 130
     
     for offset in range(8, 0, -2):
         shadow_color = (accent_color[0]//4, accent_color[1]//4, accent_color[2]//4)
@@ -127,10 +133,24 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors):
     subtitle_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
     subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
     subtitle_x = (width - subtitle_width) // 2
-    subtitle_y = 200
+    if extra_info:
+        subtitle_y = 140
+    else:
+        subtitle_y = 200
     draw.text((subtitle_x, subtitle_y), subtitle, font=subtitle_font, fill=(200, 200, 220))
     
-    line_y = 260
+    if extra_info:
+        info_y = 185
+        for line in extra_info:
+            info_bbox = draw.textbbox((0, 0), line, font=info_font)
+            info_width = info_bbox[2] - info_bbox[0]
+            info_x = (width - info_width) // 2
+            draw.text((info_x, info_y), line, font=info_font, fill=(180, 180, 200))
+            info_y += 22
+        line_y = info_y + 15
+    else:
+        line_y = 260
+    
     line_width = 200
     draw.line([(width//2 - line_width//2, line_y), (width//2 + line_width//2, line_y)], 
               fill=accent_color, width=2)
@@ -148,40 +168,47 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors):
     img.save(os.path.join(assets_dir, filename), quality=95)
     print(f"Created {filename}")
 
-banners = [
-    ("VM DEPO BOT 2.0", "Secure Crypto Wallet", "welcome.png", 
-     (99, 102, 241), [(10, 10, 30), (20, 20, 50), (30, 25, 60)]),
-    
-    ("BALANCE", "View Your Assets", "balance.png", 
-     (34, 197, 94), [(10, 25, 20), (15, 40, 30), (20, 50, 35)]),
-    
-    ("DEPOSIT", "Receive Crypto", "deposit.png", 
-     (59, 130, 246), [(10, 15, 35), (15, 25, 55), (20, 35, 70)]),
-    
-    ("WITHDRAW", "Send Crypto", "withdraw.png", 
-     (239, 68, 68), [(35, 10, 15), (50, 15, 20), (60, 20, 25)]),
-    
-    ("WALLETS", "Manage Wallets", "wallets.png", 
-     (168, 85, 247), [(25, 10, 35), (35, 15, 50), (45, 20, 60)]),
-    
-    ("CONVERT", "Swap Assets", "convert.png", 
-     (236, 72, 153), [(35, 10, 25), (50, 15, 35), (60, 20, 45)]),
-    
-    ("GENERATE", "Create Wallet", "generate.png", 
-     (20, 184, 166), [(10, 30, 28), (15, 45, 40), (20, 55, 50)]),
-    
-    ("HELP", "Support & Guide", "help.png", 
-     (251, 191, 36), [(30, 25, 10), (45, 38, 15), (55, 48, 20)]),
-    
-    ("TOKENS", "Supported Assets", "tokens.png", 
-     (249, 115, 22), [(35, 20, 10), (50, 30, 15), (60, 38, 20)]),
-    
-    ("TRANSACTION", "Activity Log", "transaction.png", 
-     (139, 92, 246), [(20, 15, 35), (30, 22, 50), (40, 28, 60)]),
+welcome_info = [
+    "Your secure multi-chain crypto wallet manager",
+    "",
+    "Networks: Ethereum | BSC | Polygon | Solana | Tron | LTC",
+    "Tokens: USDT | USDC | ETH | BNB | MATIC | SOL | TRX | LTC",
 ]
 
-for title, subtitle, filename, accent, gradient in banners:
-    create_banner(title, subtitle, filename, accent, gradient)
+banners = [
+    ("VM DEPO BOT 2.0", "Secure Crypto Wallet", "welcome.png", 
+     (99, 102, 241), [(10, 10, 30), (20, 20, 50), (30, 25, 60)], welcome_info),
+    
+    ("BALANCE", "View Your Assets", "balance.png", 
+     (34, 197, 94), [(10, 25, 20), (15, 40, 30), (20, 50, 35)], None),
+    
+    ("DEPOSIT", "Receive Crypto", "deposit.png", 
+     (59, 130, 246), [(10, 15, 35), (15, 25, 55), (20, 35, 70)], None),
+    
+    ("WITHDRAW", "Send Crypto", "withdraw.png", 
+     (239, 68, 68), [(35, 10, 15), (50, 15, 20), (60, 20, 25)], None),
+    
+    ("WALLETS", "Manage Wallets", "wallets.png", 
+     (168, 85, 247), [(25, 10, 35), (35, 15, 50), (45, 20, 60)], None),
+    
+    ("CONVERT", "Swap Assets", "convert.png", 
+     (236, 72, 153), [(35, 10, 25), (50, 15, 35), (60, 20, 45)], None),
+    
+    ("GENERATE", "Create Wallet", "generate.png", 
+     (20, 184, 166), [(10, 30, 28), (15, 45, 40), (20, 55, 50)], None),
+    
+    ("HELP", "Support & Guide", "help.png", 
+     (251, 191, 36), [(30, 25, 10), (45, 38, 15), (55, 48, 20)], None),
+    
+    ("TOKENS", "Supported Assets", "tokens.png", 
+     (249, 115, 22), [(35, 20, 10), (50, 30, 15), (60, 38, 20)], None),
+    
+    ("TRANSACTION", "Activity Log", "transaction.png", 
+     (139, 92, 246), [(20, 15, 35), (30, 22, 50), (40, 28, 60)], None),
+]
+
+for title, subtitle, filename, accent, gradient, extra in banners:
+    create_banner(title, subtitle, filename, accent, gradient, extra)
 
 def create_profile_picture():
     """Create a professional profile picture matching the banner theme."""

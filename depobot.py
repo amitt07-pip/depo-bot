@@ -1885,10 +1885,10 @@ def build_main_menu_text(user_id: int) -> str:
                 pass
 
     menu_text = (
-        f"*VM CRYPTO BOT*\n\n"
-        f"Wallets: {wallet_count}\n"
-        f"Balance: ${total_usdt_value:.2f} USD\n\n"
-        f"Choose an option below:"
+        f"\U0001F4BC *Your Portfolio*\n\n"
+        f"Wallets: `{wallet_count}`\n"
+        f"Balance: `${total_usdt_value:.2f} USD`\n\n"
+        "_Select an option below to get started_"
     )
     return menu_text
 
