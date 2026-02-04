@@ -4964,7 +4964,7 @@ async def receive_withdraw_amount(
     network = context.user_data.get("withdraw_network")
     token = context.user_data.get("withdraw_token")
     address = context.user_data.get("withdraw_address")
-    token_address = context.user_data.get("withdraw_contract")
+    token_address = context.user_data.get("withdraw_contract") or context.user_data.get("withdraw_token_address")
     info = NETWORKS[network]
 
     if token:
