@@ -155,6 +155,7 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
+notification_cooldowns = {}  # Track last notification time per token to prevent spam
 
 NETWORKS = {
     "ETH": {
@@ -5178,7 +5179,8 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
 
 
 async def check_wallet_transactions(application):
-    global wallet_balances_cache, wallet_cache_initialized
+    global wallet_balances_cache, wallet_cache_initialized, notification_cooldowns
+    import time
 
     wallets = db.get_all_wallets(ALLOWED_USER_ID)
     if not wallets:
@@ -5218,6 +5220,14 @@ async def check_wallet_transactions(application):
         # Only send notifications for deposits, not withdrawals
         if diff <= 0:
             return
+        
+        # Cooldown: Don't send notification for same token/network within 5 minutes
+        cooldown_key = f"{network}:{token_name or 'NATIVE'}"
+        current_time = time.time()
+        last_notification = notification_cooldowns.get(cooldown_key, 0)
+        if current_time - last_notification < 300:  # 5 minute cooldown
+            return
+        notification_cooldowns[cooldown_key] = current_time
 
         msg = (
             f"_*Deposit Confirmed*_\n\n"
@@ -5282,6 +5292,9 @@ async def check_wallet_transactions(application):
         except Exception as e:
             logger.error(f"Error checking native balance for {network}: {e}")
 
+        # Add delay between RPC calls to avoid rate limiting
+        await asyncio.sleep(3)
+
         for token_key in ["USDT", "USDC"]:
             token_info = TOKENS.get(token_key, {})
             if network not in token_info.get("networks", {}):
@@ -5328,6 +5341,9 @@ async def check_wallet_transactions(application):
 
             except Exception as e:
                 logger.error(f"Error checking {token_key} balance on {network}: {e}")
+            
+            # Add delay between token balance checks to avoid rate limiting
+            await asyncio.sleep(3)
 
     # Mark cache as initialized after first run completes
     if is_first_run:
@@ -5337,21 +5353,21 @@ async def check_wallet_transactions(application):
 
 async def transaction_monitor_loop(application):
     import asyncio
-    logger.info("Transaction monitor started - checking every 60 seconds")
+    logger.info("Transaction monitor started - checking every 180 seconds")
     await asyncio.sleep(10)
     while True:
         try:
             await check_wallet_transactions(application)
         except Exception as e:
             logger.error(f"Transaction monitor error: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(180)  # 3 minutes between checks to reduce RPC calls
 
 
 async def background_sync_balances():
-    """Background task to sync balances every 120 seconds."""
+    """Background task to sync balances every 300 seconds (5 minutes)."""
     import asyncio
-    logger.info("Background balance sync started - syncing every 120 seconds")
-    await asyncio.sleep(30)  # Offset from transaction monitor
+    logger.info("Background balance sync started - syncing every 300 seconds")
+    await asyncio.sleep(60)  # Offset from transaction monitor
     
     while True:
         try:
@@ -5430,7 +5446,7 @@ async def background_sync_balances():
         except Exception as e:
             logger.error(f"Background sync error: {e}")
         
-        await asyncio.sleep(120)
+        await asyncio.sleep(300)  # 5 minutes between syncs to reduce RPC calls
 
 
 async def start_transaction_monitor(application):
