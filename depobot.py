@@ -2925,16 +2925,23 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
-        return
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
+    
+    if user_id in pending_withdrawals:
+        del pending_withdrawals[user_id]
+    context.user_data.clear()
+
     menu_text = build_main_menu_text(user_id)
 
     await send_new_message_with_banner(
         query, "welcome", menu_text, get_main_menu_keyboard()
     )
+    
+    return ConversationHandler.END
 
 
 async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6087,22 +6094,19 @@ async def execute_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
-        return
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
 
-    context.user_data.pop("convert_from", None)
-    context.user_data.pop("convert_to", None)
-    context.user_data.pop("convert_amount", None)
-    context.user_data.pop("convert_to_amount", None)
-    context.user_data.pop("convert_rate", None)
-    context.user_data.pop("convert_balance", None)
+    context.user_data.clear()
 
     await query.edit_message_text(
         "*Conversion Cancelled*",
         parse_mode="Markdown",
         reply_markup=get_back_button("main_menu")
     )
+    
+    return ConversationHandler.END
 
 
 async def show_tokens_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
