@@ -2572,6 +2572,90 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check USDT balance for any external address with auto network detection."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "\u26a0\ufe0f *Usage:* `/check <address>`\n\n"
+            "Example:\n"
+            "`/check 0x1234...` - Check EVM address (ETH/BSC/Polygon)\n"
+            "`/check T1234...` - Check Tron address",
+            parse_mode="Markdown"
+        )
+        return
+    
+    address = args[0].strip()
+    detected = detect_network_from_address(address)
+    
+    if not detected:
+        await update.message.reply_text(
+            "\u274c *Invalid Address*\n\n"
+            "Could not detect network from address format.\n"
+            "Supported formats:\n"
+            "\u2022 EVM (0x...)\n"
+            "\u2022 Tron (T...)\n"
+            "\u2022 Solana (base58)",
+            parse_mode="Markdown"
+        )
+        return
+    
+    loading_msg = await update.message.reply_text(
+        "\u23f3 *Checking USDT Balance...*\n\n"
+        f"Address: `{address[:8]}...{address[-6:]}`",
+        parse_mode="Markdown"
+    )
+    
+    result_lines = [
+        "\U0001F4B0 *USDT Balance Check*\n",
+        f"\U0001F4CD Address: `{address[:8]}...{address[-6:]}`\n"
+    ]
+    
+    try:
+        if isinstance(detected, list):
+            result_lines.append("\n*EVM Networks:*\n")
+            for network in detected:
+                try:
+                    balance_info = await BalanceChecker.get_token_balance("USDT", network, address)
+                    balance = balance_info.get("balance", "0")
+                    network_name = NETWORKS[network]["name"]
+                    result_lines.append(f"\u2022 {network_name}: `{balance}` USDT\n")
+                except Exception as e:
+                    logger.error(f"Error checking {network}: {e}")
+                    result_lines.append(f"\u2022 {network}: Error\n")
+        else:
+            network = detected
+            network_name = NETWORKS.get(network, {}).get("name", network)
+            result_lines.append(f"\n*Network:* {network_name}\n\n")
+            
+            try:
+                balance_info = await BalanceChecker.get_token_balance("USDT", network, address)
+                balance = balance_info.get("balance", "0")
+                result_lines.append(f"\U0001F4B5 *USDT Balance:* `{balance}`")
+            except Exception as e:
+                logger.error(f"Error checking {network}: {e}")
+                result_lines.append(f"\u274c Error checking balance: {str(e)}")
+        
+        await loading_msg.edit_text(
+            "".join(result_lines),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in check_command: {e}")
+        await loading_msg.edit_text(
+            f"\u274c *Error*\n\nFailed to check balance: {str(e)}",
+            parse_mode="Markdown"
+        )
+
+
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -6756,6 +6840,7 @@ def main():
     application.add_handler(CommandHandler("tokens", tokens_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("check", check_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
 
