@@ -156,6 +156,7 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
 notification_cooldowns = {}  # Track last notification time per token to prevent spam
+notifications_enabled = True  # Global flag to enable/disable deposit notifications
 
 NETWORKS = {
     "ETH": {
@@ -2608,6 +2609,20 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    if isinstance(detected, list):
+        valid = is_valid_address(address, detected[0])
+    else:
+        valid = is_valid_address(address, detected)
+    
+    if not valid:
+        await update.message.reply_text(
+            "\u274c *Invalid Address Format*\n\n"
+            "The address format is not valid for the detected network.\n"
+            "Please check the address and try again.",
+            parse_mode="Markdown"
+        )
+        return
+    
     loading_msg = await update.message.reply_text(
         "\u23f3 *Checking USDT Balance...*\n\n"
         f"Address: `{address[:8]}...{address[-6:]}`",
@@ -2654,6 +2669,65 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\u274c *Error*\n\nFailed to check balance: {str(e)}",
             parse_mode="Markdown"
         )
+
+
+async def notification_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle deposit notifications on/off."""
+    global notifications_enabled
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+    
+    status = "\u2705 Enabled" if notifications_enabled else "\u274c Disabled"
+    
+    keyboard = []
+    if notifications_enabled:
+        keyboard.append([InlineKeyboardButton("\u23f8 Stop Notifications", callback_data="notif_stop")])
+    else:
+        keyboard.append([InlineKeyboardButton("\u25b6 Resume Notifications", callback_data="notif_resume")])
+    keyboard.append([InlineKeyboardButton("\U0001F519 Back to Menu", callback_data="main_menu")])
+    
+    await update.message.reply_text(
+        "\U0001F514 *Notification Settings*\n\n"
+        f"*Current Status:* {status}\n\n"
+        "Deposit notifications alert you when funds are received in your wallets.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def toggle_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle notification toggle buttons."""
+    global notifications_enabled
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data.split("_")[1]
+    
+    if action == "stop":
+        notifications_enabled = False
+        status = "\u274c Disabled"
+        keyboard = [[InlineKeyboardButton("\u25b6 Resume Notifications", callback_data="notif_resume")]]
+    else:
+        notifications_enabled = True
+        status = "\u2705 Enabled"
+        keyboard = [[InlineKeyboardButton("\u23f8 Stop Notifications", callback_data="notif_stop")]]
+    
+    keyboard.append([InlineKeyboardButton("\U0001F519 Back to Menu", callback_data="main_menu")])
+    
+    await query.edit_message_text(
+        "\U0001F514 *Notification Settings*\n\n"
+        f"*Current Status:* {status}\n\n"
+        "Deposit notifications alert you when funds are received in your wallets.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6410,6 +6484,10 @@ async def check_wallet_transactions(application):
         if diff <= 0:
             return
         
+        # Check if notifications are enabled
+        if not notifications_enabled:
+            return
+        
         # Cooldown: Don't send notification for same token/network within 5 minutes
         cooldown_key = f"{network}:{token_name or 'NATIVE'}"
         current_time = time.time()
@@ -6841,6 +6919,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("check", check_command))
+    application.add_handler(CommandHandler("notification", notification_command))
+    application.add_handler(CommandHandler("notifications", notification_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
 
@@ -6986,6 +7066,9 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(check_token_balance, pattern=r"^tokenbal_[A-Z]+_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(toggle_notifications, pattern=r"^notif_(stop|resume)$")
     )
 
     application.add_handler(
