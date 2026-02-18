@@ -1463,6 +1463,20 @@ class WithdrawalHandler:
                 from_ata = get_associated_token_address(keypair.pubkey(), mint_pubkey)
                 to_ata = get_associated_token_address(to_pubkey, mint_pubkey)
                 
+                # Check if destination ATA exists
+                ata_check_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getAccountInfo",
+                    "params": [str(to_ata), {"encoding": "base64"}]
+                }
+                async with session.post(
+                    NETWORKS["SOLANA"]["rpc"],
+                    json=ata_check_payload
+                ) as resp:
+                    ata_data = await resp.json()
+                    to_ata_exists = ata_data.get("result", {}).get("value") is not None
+                
                 # Get latest blockhash
                 blockhash_payload = {
                     "jsonrpc": "2.0",
@@ -1477,6 +1491,28 @@ class WithdrawalHandler:
                     data = await resp.json()
                     blockhash = Hash.from_string(data["result"]["value"]["blockhash"])
                 
+                # Build instructions list
+                instructions = []
+                
+                # If destination ATA doesn't exist, create it first
+                if not to_ata_exists:
+                    SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
+                    SYSVAR_RENT_ID = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
+                    
+                    create_ata_ix = Instruction(
+                        program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
+                        accounts=[
+                            AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=True),
+                            AccountMeta(pubkey=to_ata, is_signer=False, is_writable=True),
+                            AccountMeta(pubkey=to_pubkey, is_signer=False, is_writable=False),
+                            AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
+                            AccountMeta(pubkey=SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
+                            AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
+                        ],
+                        data=bytes()
+                    )
+                    instructions.append(create_ata_ix)
+                
                 # Build SPL Token transfer instruction
                 # Instruction data: [3] (transfer instruction) + [amount as u64 little-endian]
                 transfer_data = bytes([3]) + struct.pack('<Q', token_amount)
@@ -1490,8 +1526,9 @@ class WithdrawalHandler:
                     ],
                     data=transfer_data
                 )
+                instructions.append(transfer_ix)
                 
-                msg = Message.new_with_blockhash([transfer_ix], keypair.pubkey(), blockhash)
+                msg = Message.new_with_blockhash(instructions, keypair.pubkey(), blockhash)
                 tx = Transaction.new_unsigned(msg)
                 tx.sign([keypair], blockhash)
                 
