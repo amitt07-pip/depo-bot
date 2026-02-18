@@ -189,17 +189,15 @@ NETWORKS = {
     },
     "POLYGON": {
         "name": "Polygon",
-        "rpc": "https://polygon.llamarpc.com",
+        "rpc": "https://polygon-bor-rpc.publicnode.com",
         "rpc_fallbacks": [
-            "https://polygon-mainnet.public.blastapi.io",
-            "https://polygon.meowrpc.com",
-            "https://polygon-bor-rpc.publicnode.com",
             "https://polygon.publicnode.com",
             "https://1rpc.io/matic",
-            "https://polygon.drpc.org",
             "https://polygon-rpc.com",
             "https://rpc-mainnet.maticvigil.com",
-            "https://matic-mainnet.chainstacklabs.com"
+            "https://matic-mainnet.chainstacklabs.com",
+            "https://polygon.blockpi.network/v1/rpc/public",
+            "https://rpc.ankr.com/polygon"
         ],
         "chain_id": 137,
         "symbol": "MATIC",
