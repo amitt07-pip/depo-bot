@@ -470,7 +470,7 @@ def detect_network_from_address(address: str):
         import re
         if re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address):
             if not address.startswith('0x') and not address.startswith('T'):
-                return 'SOL'
+                return 'SOLANA'
     
     if address.startswith('0x') and len(address) == 42:
         return ['ETH', 'BSC', 'POLYGON']
