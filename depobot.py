@@ -3747,7 +3747,7 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
         elif network == "LTC":
             balance_result = await BalanceChecker.get_ltc_balance(address)
         else:
-            balance_result = await BalanceChecker.get_evm_balance(address, network)
+            balance_result = await BalanceChecker.get_evm_balance(network, address)
         
         if isinstance(balance_result, dict):
             if "error" in balance_result:
@@ -3758,24 +3758,34 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
             balance_display = f"`{balance_result}` {token}"
 
     keyboard = [
-        [InlineKeyboardButton("\U0001F504 Refresh Balance", callback_data=f"refresh_deposit_{network}_{token}")],
+        [InlineKeyboardButton("\U0001F504 Refresh Balance", callback_data=f"refresh_dep_{token}_{network}")],
         [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
     ]
 
-    await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=qr_buffer,
-        caption=(
-            f"\U0001F4E5 *Deposit {token}*\n\n"
-            f"{token_info.get('icon', '')} *Token:* {token}\n"
-            f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n\n"
-            f"\U0001F4CD *Deposit Address:*\n`{address}`\n\n"
-            f"\U0001F4B0 *Current Balance:* {balance_display}\n\n"
-            f"\u26a0\ufe0f _Only send {token} on {network_info.get('name', network)} network!_"
-        ),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    caption_text = (
+        f"\U0001F4E5 *Deposit {token}*\n\n"
+        f"{token_info.get('icon', '')} *Token:* {token}\n"
+        f"{network_info.get('icon', '')} *Network:* {network_info.get('name', network)}\n\n"
+        f"\U0001F4CD *Deposit Address:*\n`{address}`\n\n"
+        f"\U0001F4B0 *Current Balance:* {balance_display}\n\n"
+        f"\u26a0\ufe0f _Only send {token} on {network_info.get('name', network)} network!_"
     )
+
+    if qr_buffer:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=qr_buffer,
+            caption=caption_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=caption_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     return ConversationHandler.END
 
