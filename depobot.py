@@ -61,19 +61,23 @@ def generate_qr_code(data: str) -> io.BytesIO:
     """Generate a QR code image for the given data and return as BytesIO."""
     if not QR_AVAILABLE:
         return None
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        bio = io.BytesIO()
+        img.save(bio, format="PNG")
+        bio.seek(0)
+        return bio
+    except Exception as e:
+        logger.warning(f"QR code generation failed: {e}")
+        return None
 
 
 async def edit_message_caption(query, caption: str, reply_markup):
@@ -401,42 +405,53 @@ WITHDRAW_QUICK_NETWORK = 15
 pending_withdrawals = {}
 
 TOKEN_ALIASES = {
-    "usdt": "USDT", "tether": "USDT", "usd tether": "USDT",
-    "usdc": "USDC", "usd coin": "USDC", "circle": "USDC",
-    "eth": "ETH", "ethereum": "ETH", "ether": "ETH",
-    "bnb": "BNB", "binance": "BNB", "binance coin": "BNB",
-    "matic": "MATIC", "polygon": "MATIC", "pol": "MATIC",
-    "sol": "SOL", "solana": "SOL",
-    "trx": "TRX", "tron": "TRX",
-    "ltc": "LTC", "litecoin": "LTC", "lite coin": "LTC",
+    "usdt": "USDT", "tether": "USDT", "usd tether": "USDT", "ut": "USDT",
+    "tether usd": "USDT", "usdt trc20": "USDT", "usdt bep20": "USDT", "usdterc20": "USDT",
+    "usdc": "USDC", "usd coin": "USDC", "circle": "USDC", "uc": "USDC",
+    "usd": "USDT", "dollar": "USDT", "dollars": "USDT",
+    "eth": "ETH", "ethereum": "ETH", "ether": "ETH", "etherium": "ETH", "etherem": "ETH",
+    "bnb": "BNB", "binance": "BNB", "binance coin": "BNB", "bsc": "BNB",
+    "matic": "MATIC", "polygon": "MATIC", "pol": "MATIC", "poly": "MATIC",
+    "sol": "SOL", "solana": "SOL", "solan": "SOL",
+    "trx": "TRX", "tron": "TRX", "tronix": "TRX", "trn": "TRX",
+    "ltc": "LTC", "litecoin": "LTC", "lite coin": "LTC", "lite": "LTC", "lc": "LTC",
 }
 
 NETWORK_ALIASES = {
     "eth": "ETH", "ethereum": "ETH", "eth mainnet": "ETH", "ethereum mainnet": "ETH",
+    "erc20": "ETH", "erc-20": "ETH", "etherium": "ETH", "etherem": "ETH", "ether": "ETH",
     "bsc": "BSC", "binance": "BSC", "binance smart chain": "BSC", "bnb chain": "BSC", "bnb": "BSC",
-    "polygon": "POLYGON", "matic": "POLYGON", "poly": "POLYGON",
-    "solana": "SOLANA", "sol": "SOLANA",
-    "tron": "TRON", "trx": "TRON",
-    "ltc": "LTC", "litecoin": "LTC",
+    "bep20": "BSC", "bep-20": "BSC", "bnb smart chain": "BSC", "smartchain": "BSC", "binance chain": "BSC",
+    "polygon": "POLYGON", "matic": "POLYGON", "poly": "POLYGON", "pol": "POLYGON",
+    "matic network": "POLYGON", "polygon mainnet": "POLYGON", "polyg": "POLYGON",
+    "solana": "SOLANA", "sol": "SOLANA", "solan": "SOLANA",
+    "tron": "TRON", "trx": "TRON", "trc20": "TRON", "trc-20": "TRON", "tronix": "TRON", "trn": "TRON",
+    "ltc": "LTC", "litecoin": "LTC", "lite": "LTC", "lite coin": "LTC",
 }
 
 def detect_token_from_text(text: str):
-    """Detect token from exact match input."""
+    """Detect token from user input with fuzzy matching."""
     text_lower = text.lower().strip()
     if text_lower in TOKEN_ALIASES:
         return TOKEN_ALIASES[text_lower]
     for token in TOKENS.keys():
         if token.lower() == text_lower:
             return token
+    for alias, token in TOKEN_ALIASES.items():
+        if alias in text_lower or text_lower in alias:
+            return token
     return None
 
 def detect_network_from_text(text: str):
-    """Detect network from exact match input."""
+    """Detect network from user input with fuzzy matching."""
     text_lower = text.lower().strip()
     if text_lower in NETWORK_ALIASES:
         return NETWORK_ALIASES[text_lower]
     for network in NETWORKS.keys():
         if network.lower() == text_lower:
+            return network
+    for alias, network in NETWORK_ALIASES.items():
+        if alias in text_lower or text_lower in alias:
             return network
     return None
 
@@ -7124,7 +7139,7 @@ def main():
     application.add_error_handler(error_handler)
 
     logger.info("Starting Depo Bot with enhanced UI...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
