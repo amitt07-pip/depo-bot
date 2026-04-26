@@ -358,6 +358,15 @@ TOKENS = {
                 "decimals": 6
             }
         }
+    },
+    "LTC": {
+        "name": "Litecoin",
+        "symbol": "LTC",
+        "icon": "\U0001F315",
+        "native": True,
+        "networks": {
+            "LTC": {"native": True, "decimals": 8}
+        }
     }
 }
 
@@ -2030,19 +2039,20 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    if not args or len(args) < 2:
+    if not args:
         usage_text = (
             "\U0001F4E4 *Send Command Usage*\n"
             "\u2501" * 24 + "\n\n"
-            "\U0001F4DD *Format:* `/send <token> <network>`\n\n"
+            "\U0001F4DD *Format:* `/send <token> [network]`\n\n"
             "\U0001F4A1 *Examples:*\n"
             "    `/send USDT BSC`\n"
             "    `/send USDC ETH`\n"
-            "    `/send ETH ETH`\n"
-            "    `/send BNB BSC`\n"
-            "    `/send SOL SOLANA`\n"
-            "    `/send TRX TRON`\n"
-            "    `/send LTC LTC`\n\n"
+            "    `/send ETH`\n"
+            "    `/send BNB`\n"
+            "    `/send SOL`\n"
+            "    `/send TRX`\n"
+            "    `/send LTC`\n\n"
+            "_Network is auto-detected for single-network tokens_\n\n"
             "\U0001F4B5 *Available Tokens:*\n"
             "    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC\n\n"
             "\U0001F310 *Available Networks:*\n"
@@ -2051,32 +2061,27 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(usage_text, parse_mode="Markdown")
         return
 
-    token = args[0].upper()
-    network = args[1].upper()
+    token = detect_token_from_text(args[0])
+    if not token:
+        token = args[0].upper()
 
-    token_aliases = {
-        "ETHEREUM": "ETH",
-        "BITCOIN": "BTC",
-        "LITECOIN": "LTC",
-        "SOLANA": "SOL",
-        "TRON": "TRX",
-        "POLYGON": "MATIC",
-        "BNB": "BNB",
-        "BINANCE": "BNB",
-    }
-    network_aliases = {
-        "ETHEREUM": "ETH",
-        "BINANCE": "BSC",
-        "BNB": "BSC",
-        "BNBCHAIN": "BSC",
-        "POLY": "POLYGON",
-        "SOL": "SOLANA",
-        "TRX": "TRON",
-        "LITECOIN": "LTC",
-    }
-
-    token = token_aliases.get(token, token)
-    network = network_aliases.get(network, network)
+    if len(args) >= 2:
+        network = detect_network_from_text(args[1])
+        if not network:
+            network = args[1].upper()
+    else:
+        available = get_available_networks_for_token(token)
+        if len(available) == 1:
+            network = available[0]
+        else:
+            networks_str = ", ".join(available) if available else "N/A"
+            await update.message.reply_text(
+                f"\U0001F4E4 *Send {token}*\n\n"
+                f"Multiple networks available: `{networks_str}`\n\n"
+                f"Please specify: `/send {token} <network>`",
+                parse_mode="Markdown"
+            )
+            return
 
     if network not in NETWORKS:
         await update.message.reply_text(
