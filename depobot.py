@@ -156,6 +156,7 @@ USER_ACCESS = {
     7103743713: [2],
 }
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
+TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
@@ -475,14 +476,14 @@ def detect_network_from_address(address: str):
     """Detect network type from wallet address format.
     
     Returns:
-        - Single network key (e.g., 'TRX', 'SOL', 'LTC') if uniquely identifiable
+        - Single network key (e.g., 'TRON', 'SOLANA', 'LTC') if uniquely identifiable
         - List of possible networks (e.g., ['ETH', 'BSC', 'POLYGON']) for EVM addresses
         - None if address format is not recognized
     """
     address = address.strip()
     
     if address.startswith('T') and len(address) == 34:
-        return 'TRX'
+        return 'TRON'
     
     if address.startswith('L') or address.startswith('M') or address.startswith('ltc1'):
         if len(address) >= 26 and len(address) <= 62:
@@ -505,9 +506,9 @@ def is_valid_address(address: str, network: str) -> bool:
     
     if network in ['ETH', 'BSC', 'POLYGON']:
         return address.startswith('0x') and len(address) == 42
-    elif network == 'TRX':
+    elif network == 'TRON':
         return address.startswith('T') and len(address) == 34
-    elif network == 'SOL':
+    elif network == 'SOLANA':
         import re
         return len(address) >= 32 and len(address) <= 44 and re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address)
     elif network == 'LTC':
@@ -1034,9 +1035,12 @@ class BalanceChecker:
     @staticmethod
     async def get_tron_balance(address: str) -> dict:
         import aiohttp
+        headers = {}
+        if TRONGRID_API_KEY:
+            headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
         async with aiohttp.ClientSession() as session:
             url = f"{NETWORKS['TRON']['rpc']}/v1/accounts/{address}"
-            async with session.get(url) as resp:
+            async with session.get(url, headers=headers) as resp:
                 data = await resp.json()
                 if "data" in data and len(data["data"]) > 0:
                     balance = data["data"][0].get("balance", 0)
@@ -1105,9 +1109,12 @@ class BalanceChecker:
     async def get_tron_token_balance(address: str, token_address: str) -> dict:
         import aiohttp
         try:
+            headers = {}
+            if TRONGRID_API_KEY:
+                headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
             async with aiohttp.ClientSession() as session:
                 url = f"{NETWORKS['TRON']['rpc']}/v1/accounts/{address}"
-                async with session.get(url) as resp:
+                async with session.get(url, headers=headers) as resp:
                     data = await resp.json()
                     if "data" in data and len(data["data"]) > 0:
                         trc20 = data["data"][0].get("trc20", [])
@@ -1592,8 +1599,13 @@ class WithdrawalHandler:
         try:
             from tronpy import Tron
             from tronpy.keys import PrivateKey
+            from tronpy.providers import HTTPProvider
 
-            client = Tron()
+            if TRONGRID_API_KEY:
+                provider = HTTPProvider(NETWORKS['TRON']['rpc'], api_key=TRONGRID_API_KEY)
+                client = Tron(provider=provider)
+            else:
+                client = Tron()
             priv_key = PrivateKey(bytes.fromhex(private_key))
             from_address = priv_key.public_key.to_base58check_address()
 
@@ -1654,8 +1666,13 @@ class WithdrawalHandler:
         try:
             from tronpy import Tron
             from tronpy.keys import PrivateKey
+            from tronpy.providers import HTTPProvider
 
-            client = Tron()
+            if TRONGRID_API_KEY:
+                provider = HTTPProvider(NETWORKS['TRON']['rpc'], api_key=TRONGRID_API_KEY)
+                client = Tron(provider=provider)
+            else:
+                client = Tron()
             priv_key = PrivateKey(bytes.fromhex(private_key))
             from_address = priv_key.public_key.to_base58check_address()
 
