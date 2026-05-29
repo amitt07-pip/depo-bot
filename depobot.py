@@ -7,8 +7,11 @@ import hashlib
 import base64
 import asyncio
 import aiohttp
+import re
 from typing import Optional
 from decimal import Decimal
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 try:
     import qrcode
@@ -515,6 +518,121 @@ def is_valid_address(address: str, network: str) -> bool:
         return (address.startswith('L') or address.startswith('M') or address.startswith('ltc1')) and len(address) >= 26
     
     return False
+
+
+EXPLORER_DOMAIN_NETWORK = {
+    "etherscan.io": "ETH",
+    "bscscan.com": "BSC",
+    "polygonscan.com": "POLYGON",
+    "solscan.io": "SOLANA",
+    "tronscan.org": "TRON",
+    "blockchair.com": "LTC",
+    "blockcypher.com": "LTC",
+}
+
+TX_PATH_KEYWORDS = {"tx", "transaction", "transactions"}
+ADDRESS_PATH_KEYWORDS = {"address", "account", "accounts", "addresses"}
+
+
+def parse_explorer_link(text: str):
+    """Parse a block explorer URL.
+
+    Returns a tuple (kind, network, value) where kind is 'tx' or 'address',
+    or None if the text is not a recognised explorer link.
+    """
+    text = text.strip()
+    if "." not in text:
+        return None
+
+    url = text if "://" in text else "https://" + text
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    host = host.split(":")[0]
+
+    network = None
+    for domain, net in EXPLORER_DOMAIN_NETWORK.items():
+        if host == domain or host.endswith("." + domain):
+            network = net
+            break
+    if not network:
+        return None
+
+    combined = (parsed.path or "") + "/" + (parsed.fragment or "")
+    segments = [s for s in re.split(r"[/#?&=]", combined) if s]
+
+    for i, seg in enumerate(segments):
+        low = seg.lower()
+        if low in TX_PATH_KEYWORDS and i + 1 < len(segments):
+            return ("tx", network, segments[i + 1])
+        if low in ADDRESS_PATH_KEYWORDS and i + 1 < len(segments):
+            return ("address", network, segments[i + 1])
+    return None
+
+
+def detect_tx_hash(text: str):
+    """Detect a raw transaction hash/signature.
+
+    Returns (network_or_list, normalized_hash) or None.
+    """
+    t = text.strip()
+
+    if re.fullmatch(r"0x[0-9a-fA-F]{64}", t):
+        return (["ETH", "BSC", "POLYGON"], t)
+    if re.fullmatch(r"[0-9a-fA-F]{64}", t):
+        return (["TRON", "LTC"], t)
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", t):
+        return ("SOLANA", t)
+    return None
+
+
+def lookup_token_by_address(network: str, token_address: str):
+    """Find a configured token (symbol + decimals) by its contract address."""
+    if not token_address:
+        return None
+    ta = token_address.lower()
+    for symbol, info in TOKENS.items():
+        net = info.get("networks", {}).get(network)
+        if net and net.get("address") and net["address"].lower() == ta:
+            return {"symbol": symbol, "decimals": net.get("decimals", 18)}
+    return None
+
+
+def format_ist(ts) -> str:
+    """Format a unix timestamp (seconds) as Indian Standard Time."""
+    if not ts:
+        return "Unknown"
+    try:
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc) + timedelta(hours=5, minutes=30)
+        return dt.strftime("%d %b %Y, %I:%M:%S %p") + " IST"
+    except Exception:
+        return "Unknown"
+
+
+def tx_explorer_url(network: str, tx_hash: str) -> str:
+    """Build the explorer URL for a transaction on a given network."""
+    explorer = NETWORKS.get(network, {}).get("explorer", "")
+    if network == "TRON":
+        return f"{explorer}/#/transaction/{tx_hash}"
+    if network == "LTC":
+        return f"{explorer}/transaction/{tx_hash}"
+    return f"{explorer}/tx/{tx_hash}"
+
+
+def address_explorer_url(network: str, address: str) -> str:
+    """Build the explorer URL for an address on a given network."""
+    explorer = NETWORKS.get(network, {}).get("explorer", "")
+    if network == "TRON":
+        return f"{explorer}/#/address/{address}"
+    if network == "LTC":
+        return f"{explorer}/address/{address}"
+    return f"{explorer}/address/{address}"
+
 
 COINGECKO_IDS = {
     "ETH": "ethereum",
@@ -1195,6 +1313,348 @@ class BalanceChecker:
         except Exception as e:
             logger.error(f"Error getting balance for {network}: {e}")
             return {"error": str(e)}
+
+
+class TransactionChecker:
+    """Fetch transaction details (sender, receiver, amount, time) by hash."""
+
+    TRANSFER_TOPIC = (
+        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    )
+
+    @staticmethod
+    async def get_transaction(network: str, tx_hash: str) -> dict:
+        network_info = NETWORKS.get(network)
+        if not network_info:
+            return {"error": f"Unsupported network: {network}"}
+        try:
+            net_type = network_info["type"]
+            if net_type == "evm":
+                return await TransactionChecker.get_evm_tx(network, tx_hash)
+            elif net_type == "solana":
+                return await TransactionChecker.get_solana_tx(tx_hash)
+            elif net_type == "tron":
+                return await TransactionChecker.get_tron_tx(tx_hash)
+            elif net_type == "ltc":
+                return await TransactionChecker.get_ltc_tx(tx_hash)
+            return {"error": f"Unsupported network type for {network}"}
+        except Exception as e:
+            logger.error(f"Error getting {network} tx {tx_hash}: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
+    async def _evm_block_timestamp(network: str, block_number):
+        """Fetch a block timestamp via raw JSON-RPC (avoids POA extraData errors)."""
+        network_info = NETWORKS.get(network, {})
+        rpcs = [network_info.get("rpc")] + network_info.get("rpc_fallbacks", [])
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getBlockByNumber",
+            "params": [hex(int(block_number)), False],
+        }
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for rpc in rpcs:
+                if not rpc:
+                    continue
+                try:
+                    async with session.post(rpc, json=payload) as resp:
+                        data = await resp.json()
+                        result = data.get("result") or {}
+                        ts = result.get("timestamp")
+                        if ts:
+                            return int(ts, 16)
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    async def get_evm_tx(network: str, tx_hash: str) -> dict:
+        w3 = get_web3_with_retry(network)
+        if not w3:
+            return {"error": "RPC unavailable"}
+
+        tx_hash = tx_hash if tx_hash.startswith("0x") else "0x" + tx_hash
+        try:
+            tx = w3.eth.get_transaction(tx_hash)
+        except Exception:
+            return {"error": "not_found"}
+        if not tx:
+            return {"error": "not_found"}
+
+        try:
+            receipt = w3.eth.get_transaction_receipt(tx_hash)
+        except Exception:
+            receipt = None
+
+        timestamp = None
+        block_number = tx.get("blockNumber")
+        if block_number is not None:
+            timestamp = await TransactionChecker._evm_block_timestamp(
+                network, block_number
+            )
+
+        sender = tx.get("from")
+        receiver = tx.get("to")
+        symbol = NETWORKS[network]["symbol"]
+        value = tx.get("value", 0) or 0
+        amount = str(Web3.from_wei(value, "ether"))
+        asset = symbol
+
+        if receipt is not None:
+            for log in receipt.get("logs", []):
+                topics = log.get("topics", [])
+                if len(topics) < 3:
+                    continue
+                topic0 = topics[0]
+                topic0_hex = topic0.hex() if hasattr(topic0, "hex") else str(topic0)
+                if not topic0_hex.startswith("0x"):
+                    topic0_hex = "0x" + topic0_hex
+                if topic0_hex.lower() != TransactionChecker.TRANSFER_TOPIC:
+                    continue
+
+                token_meta = lookup_token_by_address(network, log["address"])
+
+                def topic_to_addr(topic):
+                    h = topic.hex() if hasattr(topic, "hex") else str(topic)
+                    h = h[2:] if h.startswith("0x") else h
+                    return Web3.to_checksum_address("0x" + h[-40:])
+
+                data = log.get("data")
+                if hasattr(data, "hex"):
+                    raw = int(data.hex(), 16)
+                elif isinstance(data, str):
+                    raw = int(data, 16) if data not in ("", "0x") else 0
+                else:
+                    raw = int.from_bytes(data, "big") if data else 0
+
+                decimals = token_meta["decimals"] if token_meta else 18
+                sender = topic_to_addr(topics[1])
+                receiver = topic_to_addr(topics[2])
+                amount = str(Decimal(raw) / Decimal(10 ** decimals))
+                asset = token_meta["symbol"] if token_meta else "Token"
+                break
+
+        status = None
+        if receipt is not None:
+            status = "Success" if receipt.get("status", 1) == 1 else "Failed"
+
+        return {
+            "network": network,
+            "hash": tx_hash,
+            "from": sender,
+            "to": receiver,
+            "amount": amount,
+            "asset": asset,
+            "timestamp": timestamp,
+            "status": status,
+            "explorer_url": tx_explorer_url(network, tx_hash),
+        }
+
+    @staticmethod
+    async def get_tron_tx(tx_hash: str) -> dict:
+        from tronpy.keys import to_base58check_address
+
+        headers = {"Content-Type": "application/json"}
+        if TRONGRID_API_KEY:
+            headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
+        base = NETWORKS["TRON"]["rpc"]
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{base}/wallet/gettransactionbyid",
+                json={"value": tx_hash},
+                headers=headers,
+            ) as resp:
+                tx = await resp.json()
+            async with session.post(
+                f"{base}/wallet/gettransactioninfobyid",
+                json={"value": tx_hash},
+                headers=headers,
+            ) as resp:
+                info = await resp.json()
+
+        if not tx or "raw_data" not in tx:
+            return {"error": "not_found"}
+
+        timestamp = None
+        if info and info.get("blockTimeStamp"):
+            timestamp = int(info["blockTimeStamp"]) // 1000
+        elif tx.get("raw_data", {}).get("timestamp"):
+            timestamp = int(tx["raw_data"]["timestamp"]) // 1000
+
+        contract_ret = None
+        ret = tx.get("ret")
+        if isinstance(ret, list) and ret:
+            contract_ret = ret[0].get("contractRet")
+
+        contract = tx["raw_data"]["contract"][0]
+        ctype = contract.get("type")
+        val = contract["parameter"]["value"]
+
+        sender = receiver = amount = None
+        asset = "TRX"
+
+        def to_b58(hex_addr):
+            try:
+                if not hex_addr.startswith("41"):
+                    hex_addr = "41" + hex_addr[-40:]
+                return to_base58check_address(hex_addr)
+            except Exception:
+                return hex_addr
+
+        if ctype == "TransferContract":
+            sender = to_b58(val["owner_address"])
+            receiver = to_b58(val["to_address"])
+            amount = str(Decimal(val.get("amount", 0)) / Decimal(10 ** 6))
+            asset = "TRX"
+        elif ctype == "TriggerSmartContract":
+            sender = to_b58(val["owner_address"])
+            token_contract = to_b58(val.get("contract_address", ""))
+            data = val.get("data", "")
+            token_meta = lookup_token_by_address("TRON", token_contract)
+            decimals = token_meta["decimals"] if token_meta else 6
+            asset = token_meta["symbol"] if token_meta else "TRC20"
+            if len(data) >= 136:
+                to_hex = data[32:72]
+                amt_hex = data[72:136]
+                receiver = to_b58("41" + to_hex[-40:])
+                amount = str(Decimal(int(amt_hex, 16)) / Decimal(10 ** decimals))
+
+        return {
+            "network": "TRON",
+            "hash": tx_hash,
+            "from": sender,
+            "to": receiver,
+            "amount": amount,
+            "asset": asset,
+            "timestamp": timestamp,
+            "status": (
+                "Success" if contract_ret == "SUCCESS"
+                else contract_ret
+                or ("Success" if (info and info.get("receipt")) else None)
+            ),
+            "explorer_url": tx_explorer_url("TRON", tx_hash),
+        }
+
+    @staticmethod
+    async def get_solana_tx(tx_hash: str) -> dict:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                tx_hash,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0,
+                    "commitment": "confirmed",
+                },
+            ],
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(NETWORKS["SOLANA"]["rpc"], json=payload) as resp:
+                data = await resp.json()
+
+        result = data.get("result")
+        if not result:
+            return {"error": "not_found"}
+
+        timestamp = result.get("blockTime")
+        message = result.get("transaction", {}).get("message", {})
+        instructions = list(message.get("instructions", []))
+        for inner in result.get("meta", {}).get("innerInstructions", []):
+            instructions.extend(inner.get("instructions", []))
+
+        sender = receiver = amount = None
+        asset = "SOL"
+
+        for instr in instructions:
+            parsed = instr.get("parsed")
+            if not isinstance(parsed, dict):
+                continue
+            itype = parsed.get("type")
+            program = instr.get("program")
+            info = parsed.get("info", {})
+
+            if program == "system" and itype == "transfer":
+                sender = info.get("source")
+                receiver = info.get("destination")
+                lamports = info.get("lamports", 0)
+                amount = str(Decimal(lamports) / Decimal(10 ** 9))
+                asset = "SOL"
+                break
+            if program == "spl-token" and itype in ("transfer", "transferChecked"):
+                sender = info.get("source") or info.get("authority")
+                receiver = info.get("destination")
+                token_amount = info.get("tokenAmount")
+                if token_amount:
+                    amount = token_amount.get("uiAmountString") or str(
+                        token_amount.get("uiAmount", "")
+                    )
+                elif "amount" in info:
+                    amount = str(Decimal(info["amount"]) / Decimal(10 ** 6))
+                asset = "SPL Token"
+                break
+
+        return {
+            "network": "SOLANA",
+            "hash": tx_hash,
+            "from": sender,
+            "to": receiver,
+            "amount": amount,
+            "asset": asset,
+            "timestamp": timestamp,
+            "status": "Failed" if result.get("meta", {}).get("err") else "Success",
+            "explorer_url": tx_explorer_url("SOLANA", tx_hash),
+        }
+
+    @staticmethod
+    async def get_ltc_tx(tx_hash: str) -> dict:
+        url = f"https://api.blockchair.com/litecoin/dashboards/transaction/{tx_hash}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {"error": "not_found"}
+                data = await resp.json()
+
+        tx_data = data.get("data", {}).get(tx_hash)
+        if not tx_data:
+            return {"error": "not_found"}
+
+        transaction = tx_data.get("transaction", {})
+        inputs = tx_data.get("inputs", [])
+        outputs = tx_data.get("outputs", [])
+
+        sender = inputs[0].get("recipient") if inputs else None
+        receiver = outputs[0].get("recipient") if outputs else None
+        amount = None
+        if outputs:
+            amount = str(Decimal(outputs[0].get("value", 0)) / Decimal(10 ** 8))
+
+        timestamp = None
+        time_str = transaction.get("time")
+        if time_str:
+            try:
+                dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+                timestamp = int(dt.timestamp())
+            except Exception:
+                timestamp = None
+
+        return {
+            "network": "LTC",
+            "hash": tx_hash,
+            "from": sender,
+            "to": receiver,
+            "amount": amount,
+            "asset": "LTC",
+            "timestamp": timestamp,
+            "status": "Success" if transaction.get("block_id", -1) > 0 else "Pending",
+            "explorer_url": tx_explorer_url("LTC", tx_hash),
+        }
 
 
 class WithdrawalHandler:
@@ -2645,47 +3105,83 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check USDT and USDC balances for any external address with auto network detection."""
-    user_id = update.effective_user.id
-    if not is_authorized(user_id):
-        await update.message.reply_text(
-            "*You are not authorised to use the bot!*",
-            parse_mode="Markdown"
+async def _check_transaction(update: Update, networks, tx_hash: str):
+    """Fetch and display transaction details for a tx hash/link."""
+    candidates = [networks] if isinstance(networks, str) else list(networks)
+
+    loading_msg = await update.message.reply_text(
+        "\u23f3 *Fetching Transaction Details...*\n\n"
+        f"Hash: `{tx_hash[:10]}...{tx_hash[-8:]}`",
+        parse_mode="Markdown"
+    )
+
+    result = None
+    used_network = None
+    for net in candidates:
+        try:
+            info = await TransactionChecker.get_transaction(net, tx_hash)
+        except Exception as e:
+            logger.error(f"Error fetching tx on {net}: {e}")
+            continue
+        if info and not info.get("error"):
+            result = info
+            used_network = net
+            break
+
+    if not result:
+        fallback_net = candidates[0]
+        keyboard = [[InlineKeyboardButton(
+            "\U0001F310 View on Explorer",
+            url=tx_explorer_url(fallback_net, tx_hash)
+        )]]
+        await loading_msg.edit_text(
+            "\u274c *Transaction Not Found*\n\n"
+            f"Couldn't fetch details on: {', '.join(candidates)}.\n"
+            "It may be pending, very recent, or on a different network.\n\n"
+            f"Hash: `{tx_hash[:10]}...{tx_hash[-8:]}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
-    
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "\u26a0\ufe0f *Usage:* `/check <address>`\n\n"
-            "Example:\n"
-            "`/check 0x1234...` - Check EVM address (ETH/BSC/Polygon)\n"
-            "`/check T1234...` - Check Tron address",
-            parse_mode="Markdown"
-        )
-        return
-    
-    address = args[0].strip()
-    detected = detect_network_from_address(address)
-    
-    if not detected:
-        await update.message.reply_text(
-            "\u274c *Invalid Address*\n\n"
-            "Could not detect network from address format.\n"
-            "Supported formats:\n"
-            "\u2022 EVM (0x...)\n"
-            "\u2022 Tron (T...)\n"
-            "\u2022 Solana (base58)",
-            parse_mode="Markdown"
-        )
-        return
-    
+
+    net_info = NETWORKS[used_network]
+    sender = result.get("from") or "Unknown"
+    receiver = result.get("to") or "Unknown"
+    amount = result.get("amount")
+    asset = result.get("asset") or ""
+    status = result.get("status") or "Unknown"
+    when = format_ist(result.get("timestamp"))
+    h = result.get("hash", tx_hash)
+    amount_str = f"{amount} {asset}".strip() if amount is not None else "Unknown"
+
+    lines = [
+        "\U0001F9FE *Transaction Details*\n\n",
+        f"{net_info.get('icon', '')} *Network:* {net_info['name']}\n",
+        f"\U0001F4CA *Status:* {status}\n",
+        f"\U0001F4B0 *Amount:* `{amount_str}`\n",
+        f"\U0001F4E4 *From:* `{sender}`\n",
+        f"\U0001F4E5 *To:* `{receiver}`\n",
+        f"\U0001F551 *Date/Time:* {when}\n",
+        f"\U0001F517 *Tx Hash:* `{h[:12]}...{h[-10:]}`\n",
+    ]
+    keyboard = [[InlineKeyboardButton(
+        "\U0001F310 View on Explorer",
+        url=result.get("explorer_url") or tx_explorer_url(used_network, tx_hash)
+    )]]
+    await loading_msg.edit_text(
+        "".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _check_address(update: Update, address: str, detected):
+    """Fetch and display USDT/USDC balances for an address, with explorer buttons."""
     if isinstance(detected, list):
         valid = is_valid_address(address, detected[0])
     else:
         valid = is_valid_address(address, detected)
-    
+
     if not valid:
         await update.message.reply_text(
             "\u274c *Invalid Address Format*\n\n"
@@ -2694,20 +3190,20 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-    
+
     loading_msg = await update.message.reply_text(
         "\u23f3 *Checking USDT & USDC Balances...*\n\n"
         f"Address: `{address[:8]}...{address[-6:]}`",
         parse_mode="Markdown"
     )
-    
+
     stablecoins = ["USDT", "USDC"]
-    
     result_lines = [
         "\U0001F4B0 *USDT & USDC Balance Check*\n",
         f"\U0001F4CD Address: `{address[:8]}...{address[-6:]}`\n"
     ]
-    
+    explorer_buttons = []
+
     try:
         if isinstance(detected, list):
             result_lines.append("\n*EVM Networks:*\n")
@@ -2724,11 +3220,15 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.error(f"Error checking {token} on {network}: {e}")
                         result_lines.append(f"\u2022 {token}: Error\n")
+                explorer_buttons.append(InlineKeyboardButton(
+                    f"\U0001F310 {network_name}",
+                    url=address_explorer_url(network, address)
+                ))
         else:
             network = detected
             network_name = NETWORKS.get(network, {}).get("name", network)
             result_lines.append(f"\n*Network:* {network_name}\n\n")
-            
+
             for token in stablecoins:
                 try:
                     balance_info = await BalanceChecker.get_token_balance(token, network, address)
@@ -2740,17 +3240,79 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Error checking {token} on {network}: {e}")
                     result_lines.append(f"\u274c Error checking {token} balance: {str(e)}\n")
-        
+            explorer_buttons.append(InlineKeyboardButton(
+                "\U0001F310 View on Explorer",
+                url=address_explorer_url(network, address)
+            ))
+
+        keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
         await loading_msg.edit_text(
             "".join(result_lines),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
         )
     except Exception as e:
-        logger.error(f"Error in check_command: {e}")
+        logger.error(f"Error in check_command (address): {e}")
         await loading_msg.edit_text(
             f"\u274c *Error*\n\nFailed to check balance: {str(e)}",
             parse_mode="Markdown"
         )
+
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check a wallet address (balances) or a transaction hash/link (details)."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "\u26a0\ufe0f *Usage:* `/check <address | tx hash | tx link>`\n\n"
+            "Examples:\n"
+            "`/check 0x1234...` \u2013 Address balance (ETH/BSC/Polygon)\n"
+            "`/check T1234...` \u2013 Tron address balance\n"
+            "`/check 0xabc...<64 hex>` \u2013 Transaction details\n"
+            "`/check https://bscscan.com/tx/0x...` \u2013 Transaction details",
+            parse_mode="Markdown"
+        )
+        return
+
+    query = args[0].strip()
+
+    link = parse_explorer_link(query)
+    if link:
+        kind, link_network, value = link
+        if kind == "tx":
+            await _check_transaction(update, link_network, value)
+            return
+        detected = detect_network_from_address(value) or link_network
+        await _check_address(update, value, detected)
+        return
+
+    tx_detected = detect_tx_hash(query)
+    if tx_detected:
+        networks, tx_hash = tx_detected
+        await _check_transaction(update, networks, tx_hash)
+        return
+
+    detected = detect_network_from_address(query)
+    if not detected:
+        await update.message.reply_text(
+            "\u274c *Invalid Input*\n\n"
+            "Could not detect an address or transaction from your input.\n"
+            "Supported:\n"
+            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin\n"
+            "\u2022 Transaction hash or explorer link",
+            parse_mode="Markdown"
+        )
+        return
+
+    await _check_address(update, query, detected)
 
 
 async def notification_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
