@@ -9,6 +9,7 @@ import base64
 import asyncio
 import aiohttp
 import re
+import inspect
 from typing import Optional
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
@@ -139,6 +140,7 @@ TOKEN_EMOJI = {
     "SOL": "6255864821493796954",
     "TRX": "6314155632303804943",
     "LTC": "6253341983473931070",
+    "BTC": "5388637433246003258",  # IconsEmoji_JABA Bitcoin icon
 }
 
 # Which token icon represents each network.
@@ -149,6 +151,7 @@ NETWORK_TOKEN_ICON = {
     "SOLANA": "SOL",
     "TRON": "TRX",
     "LTC": "LTC",
+    "BTC": "BTC",
 }
 
 
@@ -186,6 +189,111 @@ def esc(value) -> str:
 def h_html(name: str, title: str) -> str:
     """HTML section heading: premium icon + fancy-font title."""
     return f"{ui(name)}  {fancy(title)}"
+
+
+# Reverse lookup: standard emoji char -> premium custom emoji id.
+_EMOJI_TO_ID = {fb: eid for eid, fb in UI_EMOJI.values() if eid}
+
+_MD_CODE_RE = re.compile(r"`([^`]*)`")
+_MD_BOLD_RE = re.compile(r"\*(.+?)\*", re.S)
+_MD_ITALIC_RE = re.compile(r"_(.+?)_", re.S)
+
+
+def _emojify(text: str) -> str:
+    """Swap standard emoji for their premium custom-emoji HTML tags."""
+    for ch, eid in _EMOJI_TO_ID.items():
+        if ch in text:
+            text = text.replace(ch, ce(eid, ch))
+    return text
+
+
+def tg_html(text: str) -> str:
+    """Convert the bot's Markdown subset (*bold*, _italic_, `code`) to HTML and
+    upgrade standard emoji to premium custom emoji. Safe for already-plain text."""
+    codes = []
+
+    def _stash(m):
+        codes.append(m.group(1))
+        return f"\x00C{len(codes) - 1}\x00"
+
+    t = _MD_CODE_RE.sub(_stash, text)
+    t = html.escape(t, quote=False)
+    t = _MD_BOLD_RE.sub(r"<b>\1</b>", t)
+    t = _MD_ITALIC_RE.sub(r"<i>\1</i>", t)
+    t = _emojify(t)
+
+    def _unstash(m):
+        return f"<code>{html.escape(codes[int(m.group(1))], quote=False)}</code>"
+
+    return re.sub(r"\x00C(\d+)\x00", _unstash, t)
+
+
+# Whether the installed python-telegram-bot supports custom emoji on buttons
+# (Bot API 9.4, Feb 2026). Falls back to a standard-emoji prefix otherwise.
+_IKB_SUPPORTS_ICON = "icon_custom_emoji_id" in inspect.signature(
+    InlineKeyboardButton.__init__
+).parameters
+
+
+def net_emoji_id(network: str):
+    """Premium custom-emoji id representing a network (for buttons)."""
+    sym = NETWORK_TOKEN_ICON.get(network)
+    return TOKEN_EMOJI.get(sym) if sym else None
+
+
+def ikb(text, callback_data=None, url=None, ui_name=None, token=None,
+        emoji_id=None, emoji_fallback="", **kwargs):
+    """Build an InlineKeyboardButton with a premium custom emoji icon when the
+    Bot API/library supports it, otherwise prefix a standard emoji to the label."""
+    if ui_name:
+        entry = UI_EMOJI.get(ui_name)
+        if entry:
+            emoji_id = emoji_id or entry[0]
+            emoji_fallback = emoji_fallback or entry[1]
+    if token:
+        emoji_id = emoji_id or TOKEN_EMOJI.get(token.upper())
+        emoji_fallback = emoji_fallback or "\U0001FA99"
+    if callback_data is not None:
+        kwargs["callback_data"] = callback_data
+    if url is not None:
+        kwargs["url"] = url
+    if emoji_id and _IKB_SUPPORTS_ICON:
+        return InlineKeyboardButton(text, icon_custom_emoji_id=emoji_id, **kwargs)
+    label = f"{emoji_fallback} {text}".strip() if emoji_fallback else text
+    return InlineKeyboardButton(label, **kwargs)
+
+
+def _install_markdown_to_html_bridge():
+    """Globally route legacy `parse_mode="Markdown"` messages through tg_html() so
+    every screen renders as modern HTML with premium custom emoji, without having to
+    touch each of the ~120 call sites. PTB shortcut methods (reply_text, edit_caption,
+    reply_photo, edit_message_text, ...) all delegate to these Bot methods, so wrapping
+    them here covers all of them. Calls that already pass parse_mode="HTML" are left
+    untouched."""
+    from telegram import Bot
+
+    def _wrap(method_name, text_kw):
+        orig = getattr(Bot, method_name)
+
+        async def wrapper(self, *args, **kwargs):
+            if kwargs.get("parse_mode") == "Markdown":
+                value = kwargs.get(text_kw)
+                if isinstance(value, str):
+                    kwargs[text_kw] = tg_html(value)
+                    kwargs["parse_mode"] = "HTML"
+            return await orig(self, *args, **kwargs)
+
+        wrapper.__name__ = getattr(orig, "__name__", method_name)
+        wrapper.__doc__ = getattr(orig, "__doc__", None)
+        setattr(Bot, method_name, wrapper)
+
+    _wrap("send_message", "text")
+    _wrap("send_photo", "caption")
+    _wrap("edit_message_text", "text")
+    _wrap("edit_message_caption", "caption")
+
+
+_install_markdown_to_html_bridge()
 
 
 def get_banner_path(name: str) -> str:
@@ -375,6 +483,15 @@ NETWORKS = {
         "explorer": "https://blockchair.com/litecoin",
         "type": "ltc",
         "icon": "\U0001F315"
+    },
+    "BTC": {
+        "name": "Bitcoin",
+        "rpc": "",
+        "rpc_fallbacks": [],
+        "symbol": "BTC",
+        "explorer": "https://blockchair.com/bitcoin",
+        "type": "btc",
+        "icon": "\U0001F7E0"
     }
 }
 
@@ -573,6 +690,7 @@ NETWORK_ALIASES = {
     "solana": "SOLANA", "sol": "SOLANA", "solan": "SOLANA",
     "tron": "TRON", "trx": "TRON", "trc20": "TRON", "trc-20": "TRON", "tronix": "TRON", "trn": "TRON",
     "ltc": "LTC", "litecoin": "LTC", "lite": "LTC", "lite coin": "LTC",
+    "btc": "BTC", "bitcoin": "BTC", "bit coin": "BTC", "bit": "BTC",
 }
 
 def detect_token_from_text(text: str):
@@ -624,9 +742,15 @@ def detect_network_from_address(address: str):
     if address.startswith('L') or address.startswith('M') or address.startswith('ltc1'):
         if len(address) >= 26 and len(address) <= 62:
             return 'LTC'
-    
+
+    if address.startswith('bc1q') or address.startswith('bc1p'):
+        if 42 <= len(address) <= 62:
+            return 'BTC'
+    if address.startswith('1') or address.startswith('3'):
+        if 25 <= len(address) <= 34 and re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address):
+            return 'BTC'
+
     if len(address) >= 32 and len(address) <= 44:
-        import re
         if re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address):
             if not address.startswith('0x') and not address.startswith('T'):
                 return 'SOLANA'
@@ -649,7 +773,11 @@ def is_valid_address(address: str, network: str) -> bool:
         return len(address) >= 32 and len(address) <= 44 and re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address)
     elif network == 'LTC':
         return (address.startswith('L') or address.startswith('M') or address.startswith('ltc1')) and len(address) >= 26
-    
+    elif network == 'BTC':
+        if address.startswith('bc1q') or address.startswith('bc1p'):
+            return 42 <= len(address) <= 62
+        return (address.startswith('1') or address.startswith('3')) and 25 <= len(address) <= 34
+
     return False
 
 
@@ -659,8 +787,10 @@ EXPLORER_DOMAIN_NETWORK = {
     "polygonscan.com": "POLYGON",
     "solscan.io": "SOLANA",
     "tronscan.org": "TRON",
-    "blockchair.com": "LTC",
-    "blockcypher.com": "LTC",
+    "blockchair.com": None,  # resolved by path: /bitcoin or /litecoin
+    "blockcypher.com": "BTC",
+    "blockchain.com": "BTC",
+    "mempool.space": "BTC",
 }
 
 TX_PATH_KEYWORDS = {"tx", "transaction", "transactions"}
@@ -693,8 +823,18 @@ def parse_explorer_link(text: str):
         if host == domain or host.endswith("." + domain):
             network = net
             break
-    if not network:
+    else:
         return None
+
+    # blockchair.com serves multiple chains — resolve from path
+    if network is None and host in ("blockchair.com",):
+        path_lower = (parsed.path or "").lower()
+        if "/bitcoin" in path_lower:
+            network = "BTC"
+        elif "/litecoin" in path_lower:
+            network = "LTC"
+        else:
+            return None
 
     combined = (parsed.path or "") + "/" + (parsed.fragment or "")
     segments = [s for s in re.split(r"[/#?&=]", combined) if s]
@@ -718,7 +858,7 @@ def detect_tx_hash(text: str):
     if re.fullmatch(r"0x[0-9a-fA-F]{64}", t):
         return (["ETH", "BSC", "POLYGON"], t)
     if re.fullmatch(r"[0-9a-fA-F]{64}", t):
-        return (["TRON", "LTC"], t)
+        return (["TRON", "LTC", "BTC"], t)
     if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", t):
         return ("SOLANA", t)
     return None
@@ -752,7 +892,7 @@ def tx_explorer_url(network: str, tx_hash: str) -> str:
     explorer = NETWORKS.get(network, {}).get("explorer", "")
     if network == "TRON":
         return f"{explorer}/#/transaction/{tx_hash}"
-    if network == "LTC":
+    if network in ("LTC", "BTC"):
         return f"{explorer}/transaction/{tx_hash}"
     return f"{explorer}/tx/{tx_hash}"
 
@@ -1323,6 +1463,26 @@ class BalanceChecker:
             return {"balance": "0", "symbol": "LTC", "error": str(e)}
 
     @staticmethod
+    async def get_btc_balance(address: str) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"https://mempool.space/api/address/{address}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        chain = data.get("chain_stats", {})
+                        balance_sat = chain.get("funded_txo_sum", 0) - chain.get("spent_txo_sum", 0)
+                        return {
+                            "balance": str(Decimal(balance_sat) / Decimal(10 ** 8)),
+                            "symbol": "BTC",
+                            "raw_balance": balance_sat
+                        }
+                    return {"balance": "0", "symbol": "BTC", "error": "API error"}
+        except Exception as e:
+            logger.error(f"Error getting BTC balance: {e}")
+            return {"balance": "0", "symbol": "BTC", "error": str(e)}
+
+    @staticmethod
     async def get_solana_token_balance(address: str, token_mint: str) -> dict:
         import aiohttp
         try:
@@ -1443,6 +1603,8 @@ class BalanceChecker:
                 return await BalanceChecker.get_tron_balance(address)
             elif network_info["type"] == "ltc":
                 return await BalanceChecker.get_ltc_balance(address)
+            elif network_info["type"] == "btc":
+                return await BalanceChecker.get_btc_balance(address)
         except Exception as e:
             logger.error(f"Error getting balance for {network}: {e}")
             return {"error": str(e)}
@@ -1470,6 +1632,8 @@ class TransactionChecker:
                 return await TransactionChecker.get_tron_tx(tx_hash)
             elif net_type == "ltc":
                 return await TransactionChecker.get_ltc_tx(tx_hash)
+            elif net_type == "btc":
+                return await TransactionChecker.get_btc_tx(tx_hash)
             return {"error": f"Unsupported network type for {network}"}
         except Exception as e:
             logger.error(f"Error getting {network} tx {tx_hash}: {e}")
@@ -1752,8 +1916,9 @@ class TransactionChecker:
                     return {"error": "not_found"}
                 data = await resp.json()
 
-        tx_data = data.get("data", {}).get(tx_hash)
-        if not tx_data:
+        data_field = data.get("data") if isinstance(data, dict) else None
+        tx_data = data_field.get(tx_hash) if isinstance(data_field, dict) else None
+        if not isinstance(tx_data, dict):
             return {"error": "not_found"}
 
         transaction = tx_data.get("transaction", {})
@@ -1787,6 +1952,49 @@ class TransactionChecker:
             "timestamp": timestamp,
             "status": "Success" if transaction.get("block_id", -1) > 0 else "Pending",
             "explorer_url": tx_explorer_url("LTC", tx_hash),
+        }
+
+    @staticmethod
+    async def get_btc_tx(tx_hash: str) -> dict:
+        url = f"https://mempool.space/api/tx/{tx_hash}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {"error": "not_found"}
+                tx_data = await resp.json()
+
+        if not tx_data or not isinstance(tx_data, dict):
+            return {"error": "not_found"}
+
+        vin = tx_data.get("vin", [])
+        vout = tx_data.get("vout", [])
+
+        sender = None
+        if vin:
+            prevout = vin[0].get("prevout") or {}
+            sender = prevout.get("scriptpubkey_address")
+
+        receiver = None
+        amount = None
+        # pick the largest non-change output as the primary recipient
+        if vout:
+            primary = max(vout, key=lambda o: o.get("value", 0))
+            receiver = primary.get("scriptpubkey_address")
+            amount = str(Decimal(primary.get("value", 0)) / Decimal(10 ** 8))
+
+        status = tx_data.get("status", {})
+        timestamp = status.get("block_time")
+
+        return {
+            "network": "BTC",
+            "hash": tx_hash,
+            "from": sender,
+            "to": receiver,
+            "amount": amount,
+            "asset": "BTC",
+            "timestamp": timestamp,
+            "status": "Success" if status.get("confirmed") else "Pending",
+            "explorer_url": tx_explorer_url("BTC", tx_hash),
         }
 
 
@@ -2395,8 +2603,7 @@ def get_friendly_error(error) -> str:
         )
     if "nonce too low" in error_str or "replacement transaction" in error_str:
         return (
-            "A previous transaction is still pending on the network.\n\n"
-            "Please wait a moment and try again."
+            "Previous transaction still pending — try again shortly."
         )
     if "execution reverted" in error_str or "revert" in error_str:
         return (
@@ -2430,19 +2637,19 @@ def get_friendly_error(error) -> str:
 def get_main_menu_keyboard():
     keyboard = [
         [
-            InlineKeyboardButton("Wallets", callback_data="menu_wallets"),
-            InlineKeyboardButton("Deposit", callback_data="menu_deposit")
+            ikb("Wallets", callback_data="menu_wallets", ui_name="wallet"),
+            ikb("Deposit", callback_data="menu_deposit", ui_name="deposit")
         ],
         [
-            InlineKeyboardButton("Withdraw", callback_data="menu_withdraw"),
-            InlineKeyboardButton("Balances", callback_data="menu_balance")
+            ikb("Withdraw", callback_data="menu_withdraw", ui_name="withdraw"),
+            ikb("Balances", callback_data="menu_balance", ui_name="balance")
         ],
         [
-            InlineKeyboardButton("Convert", callback_data="menu_convert"),
-            InlineKeyboardButton("New Wallet", callback_data="menu_generate")
+            ikb("Convert", callback_data="menu_convert", ui_name="convert"),
+            ikb("New Wallet", callback_data="menu_generate", ui_name="card")
         ],
         [
-            InlineKeyboardButton("Help", callback_data="menu_help")
+            ikb("Help", callback_data="menu_help", ui_name="help")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -2452,13 +2659,14 @@ def get_token_keyboard():
     keyboard = []
     for token_key, token_info in TOKENS.items():
         keyboard.append([
-            InlineKeyboardButton(
-                f"{token_info['icon']} {token_info['name']} ({token_info['symbol']})",
-                callback_data=f"token_{token_key}"
+            ikb(
+                f"{token_info['name']} ({token_info['symbol']})",
+                callback_data=f"token_{token_key}",
+                token=token_info['symbol'], emoji_fallback=token_info['icon']
             )
         ])
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        ikb("Main Menu", callback_data="main_menu", ui_name="home")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -2473,16 +2681,17 @@ def get_token_network_keyboard(token: str):
         network_info = NETWORKS.get(network)
         if network_info:
             keyboard.append([
-                InlineKeyboardButton(
-                    f"{network_info['icon']} {network_info['name']}",
-                    callback_data=f"tokenbal_{token}_{network}"
+                ikb(
+                    network_info['name'],
+                    callback_data=f"tokenbal_{token}_{network}",
+                    emoji_id=net_emoji_id(network), emoji_fallback=network_info['icon']
                 )
             ])
     keyboard.append([
-        InlineKeyboardButton("\U0001F519 Back", callback_data="menu_tokens")
+        ikb("Back", callback_data="menu_tokens", emoji_fallback="\U0001F519")
     ])
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        ikb("Main Menu", callback_data="main_menu", ui_name="home")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -2499,10 +2708,11 @@ def get_network_keyboard(action: str, include_tokens: bool = True):
             elif network_key == "SOLANA":
                 network_short = "SOL"
 
-            btn_text = f"{token_info['icon']} {token_key}[{network_short}]"
+            btn_text = f"{token_key}[{network_short}]"
             callback = f"{action}_combo_{token_key}_{network_key}"
 
-            btn = InlineKeyboardButton(btn_text, callback_data=callback)
+            btn = ikb(btn_text, callback_data=callback,
+                      token=token_info['symbol'], emoji_fallback=token_info['icon'])
             row.append(btn)
             if len(row) == 2:
                 keyboard.append(row)
@@ -2512,7 +2722,7 @@ def get_network_keyboard(action: str, include_tokens: bool = True):
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        ikb("Main Menu", callback_data="main_menu", ui_name="home")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -2523,10 +2733,11 @@ def get_generate_network_keyboard():
     row = []
 
     for network_key, network_info in NETWORKS.items():
-        btn_text = f"{network_info['icon']} {network_info['name']}"
+        btn_text = network_info['name']
         callback = f"gen_{network_key}"
 
-        btn = InlineKeyboardButton(btn_text, callback_data=callback)
+        btn = ikb(btn_text, callback_data=callback,
+                  emoji_id=net_emoji_id(network_key), emoji_fallback=network_info['icon'])
         row.append(btn)
         if len(row) == 2:
             keyboard.append(row)
@@ -2536,41 +2747,29 @@ def get_generate_network_keyboard():
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+        ikb("Main Menu", callback_data="main_menu", ui_name="home")
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_back_button(callback_data: str = "main_menu"):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("\U0001F519 Back", callback_data=callback_data)]
+        [ikb("Back", callback_data=callback_data, emoji_fallback="\U0001F519")]
     ])
 
 
 def get_wallet_card_keyboard(network: str):
     keyboard = [
         [
-            InlineKeyboardButton(
-                "\U0001F504 Refresh",
-                callback_data=f"refresh_{network}"
-            ),
-            InlineKeyboardButton(
-                "\U0001F4E5 Deposit",
-                callback_data=f"deposit_{network}"
-            )
+            ikb("Refresh", callback_data=f"refresh_{network}", ui_name="refresh"),
+            ikb("Deposit", callback_data=f"deposit_{network}", ui_name="deposit")
         ],
         [
-            InlineKeyboardButton(
-                "\U0001F4E4 Withdraw",
-                callback_data=f"withdraw_{network}"
-            ),
-            InlineKeyboardButton(
-                "\U0001F310 Explorer",
-                callback_data=f"explorer_{network}"
-            )
+            ikb("Withdraw", callback_data=f"withdraw_{network}", ui_name="withdraw"),
+            ikb("Explorer", callback_data=f"explorer_{network}", ui_name="explorer")
         ],
         [
-            InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")
+            ikb("Main Menu", callback_data="main_menu", ui_name="home")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -2602,8 +2801,7 @@ def build_main_menu_text(user_id: int) -> str:
     menu_text = (
         f"{h_html('portfolio', 'Your Portfolio')}\n\n"
         f"{ui('wallet')}  <b>Wallets</b>   <code>{wallet_count}</code>\n"
-        f"{ui('cash')}  <b>Balance</b>   <code>${total_usdt_value:.2f}</code>\n\n"
-        "<i>Select an option below to get started</i>"
+        f"{ui('cash')}  <b>Balance</b>   <code>${total_usdt_value:.2f}</code>"
     )
     return menu_text
 
@@ -2817,9 +3015,8 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4B0 *Check Balance*\n\n"
-        "Which network would you like to check?\n\n"
-        f"_Available networks: {networks_str}_\n\n"
-        "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
+        "Which network?  _(or 'all')_\n\n"
+        f"_{networks_str}_"
     )
 
     keyboard = [
@@ -2891,8 +3088,8 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4E5 *Deposit*\n\n"
-        "Which token would you like to deposit?\n\n"
-        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "Which token?\n\n"
+        "_e.g. USDT, ETH, SOL_\n\n"
         "_Tap the button below to see all supported tokens_"
     )
 
@@ -2933,7 +3130,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\U0001F4E4 *Withdraw*\n\n"
                 "\u274c Invalid address format.\n\n"
                 "Please provide a valid wallet address.\n\n"
-                "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin_"
+                "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin_"
             )
             keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
             await context.bot.send_photo(
@@ -3040,8 +3237,8 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
-        "Which token would you like to withdraw?\n\n"
-        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "Which token?\n\n"
+        "_e.g. USDT, ETH, SOL_\n\n"
         "_Tip: Use `/withdraw <address>` for quick withdraw_"
     )
 
@@ -3077,9 +3274,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4B3 *Generate Wallet*\n\n"
-        "Which network would you like to generate a wallet for?\n\n"
-        f"_Available networks: {networks_str}_\n\n"
-        "Just type the network name (e.g., 'Ethereum', 'BSC', 'Solana')"
+        "Which network?\n\n"
+        f"_{networks_str}_"
     )
 
     keyboard = [
@@ -3126,9 +3322,8 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F504 *Convert Assets*\n\n"
-        "Which asset would you like to convert FROM?\n\n"
-        f"_Your balances: {balances_str}_\n\n"
-        "Just type the asset name (e.g., 'ETH', 'USDT', 'BNB')"
+        "Convert from?\n\n"
+        f"_{balances_str}_"
     )
 
     keyboard = [
@@ -3220,9 +3415,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del pending_withdrawals[user_id]
     
     await update.message.reply_text(
-        "\u274c *Cancelled*\n\n"
-        "Current operation has been cancelled.\n"
-        "Use /start to return to the main menu.",
+        "\u274c *Cancelled*",
         parse_mode="Markdown"
     )
     return ConversationHandler.END
@@ -3350,18 +3543,30 @@ async def _check_address(update: Update, address: str, detected):
         else:
             network = detected
             network_name = NETWORKS.get(network, {}).get("name", network)
+            net_type = NETWORKS.get(network, {}).get("type", "")
+            result_lines[0] = f"{ui('money')}  {fancy(network_name + ' Balance')}\n"
             result_lines.append(f"\n{net_icon(network)}  <b>Network:</b> {esc(network_name)}\n\n")
 
-            for token in stablecoins:
+            if net_type in ("btc", "ltc"):
                 try:
-                    balance_info = await BalanceChecker.get_token_balance(token, network, address)
-                    if balance_info.get("error"):
-                        continue
+                    balance_info = await BalanceChecker.get_balance(network, address)
                     balance = balance_info.get("balance", "0")
-                    result_lines.append(f"{tok(token)}  <b>{esc(token)} Balance:</b> <code>{esc(balance)}</code>\n")
+                    symbol = balance_info.get("symbol", network)
+                    result_lines.append(f"{tok(symbol)}  <b>{esc(symbol)} Balance:</b> <code>{esc(balance)}</code>\n")
                 except Exception as e:
-                    logger.error(f"Error checking {token} on {network}: {e}")
-                    result_lines.append(f"{ui('error')}  Error checking {esc(token)} balance\n")
+                    logger.error(f"Error checking {network} balance: {e}")
+                    result_lines.append(f"{ui('error')}  Error checking balance\n")
+            else:
+                for token in stablecoins:
+                    try:
+                        balance_info = await BalanceChecker.get_token_balance(token, network, address)
+                        if balance_info.get("error"):
+                            continue
+                        balance = balance_info.get("balance", "0")
+                        result_lines.append(f"{tok(token)}  <b>{esc(token)} Balance:</b> <code>{esc(balance)}</code>\n")
+                    except Exception as e:
+                        logger.error(f"Error checking {token} on {network}: {e}")
+                        result_lines.append(f"{ui('error')}  Error checking {esc(token)} balance\n")
             explorer_buttons.append(InlineKeyboardButton(
                 "\U0001F310 View on Explorer",
                 url=address_explorer_url(network, address)
@@ -3428,7 +3633,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "\u274c *Invalid Input*\n\n"
             "Could not detect an address or transaction from your input.\n"
             "Supported:\n"
-            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin\n"
+            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin\n"
             "\u2022 Transaction hash or explorer link",
             parse_mode="Markdown"
         )
@@ -3513,7 +3718,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send loading message and store reference to delete later
     loading_msg = await update.message.chat.send_message(
-        "*Syncing balances...*\nThis may take a moment.",
+        "*Syncing balances…*",
         parse_mode="Markdown"
     )
 
@@ -3635,7 +3840,7 @@ async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send loading message and store reference to delete later
     loading_msg = await update.message.chat.send_message(
-        "*Scanning for errors...*\nThis may take a moment.",
+        "*Scanning for errors…*",
         parse_mode="Markdown"
     )
 
@@ -3999,9 +4204,8 @@ async def show_generate_menu(
 
     text = (
         "\U0001F4B3 *Generate Wallet*\n\n"
-        "Which network would you like to generate a wallet for?\n\n"
-        f"_Available networks: {networks_str}_\n\n"
-        "Just type the network name (e.g., 'Ethereum', 'BSC', 'Solana')"
+        "Which network?\n\n"
+        f"_{networks_str}_"
     )
 
     keyboard = [
@@ -4263,8 +4467,8 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4E5 *Deposit*\n\n"
-        "Which token would you like to deposit?\n\n"
-        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "Which token?\n\n"
+        "_e.g. USDT, ETH, SOL_\n\n"
         "_Tap the button below to see all supported tokens_"
     )
 
@@ -4338,9 +4542,8 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
         photo=open(get_banner_path("deposit"), "rb"),
         caption=(
             f"\U0001F4E5 *Deposit {token}*\n\n"
-            f"Which network would you like to use?\n\n"
-            f"_Available networks: {networks_str}_\n\n"
-            "Just type the network name (e.g., 'Polygon', 'BSC', 'Ethereum')"
+            f"Which network?\n\n"
+            f"_{networks_str}_"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
@@ -5108,9 +5311,8 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F4B0 *Check Balance*\n\n"
-        "Which network would you like to check?\n\n"
-        f"_Available networks: {networks_str}_\n\n"
-        "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
+        "Which network?  _(or 'all')_\n\n"
+        f"_{networks_str}_"
     )
 
     keyboard = [
@@ -5451,8 +5653,8 @@ async def show_withdraw_menu(
 
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
-        "Which token would you like to withdraw?\n\n"
-        "Type the token name (e.g., `USDT`, `ETH`, `SOL`)\n\n"
+        "Which token?\n\n"
+        "_e.g. USDT, ETH, SOL_\n\n"
         "_Tap the button below to see all supported tokens_"
     )
 
@@ -5549,9 +5751,8 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
         photo=open(get_banner_path("withdraw"), "rb"),
         caption=(
             f"\U0001F4E4 *Withdraw {token}*\n\n"
-            f"Which network would you like to use?\n\n"
-            f"_Available networks: {networks_str}_\n\n"
-            "Just type the network name (e.g., 'Polygon', 'BSC', 'Ethereum')"
+            f"Which network?\n\n"
+            f"_{networks_str}_"
         ),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
@@ -6146,9 +6347,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await query.edit_message_text(
-        "\u23f3 *Processing Withdrawal...*\n\n"
-        "Please wait while we process your transaction.",
-        parse_mode="Markdown"
+        f"{h_html('time', 'Processing')}",
+        parse_mode="HTML"
     )
 
     try:
@@ -6179,23 +6379,19 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Show transaction submitted message with pending status
             pending_keyboard = [
-                [InlineKeyboardButton(
-                    "\U0001F310 View Transaction",
-                    url=explorer_url
-                )]
+                [ikb("View on Explorer", ui_name="explorer", url=explorer_url)]
             ]
             
             max_seconds = 60
             
             await query.edit_message_text(
-                f"\U0001F4E4 *Transaction Submitted*\n\n"
-                f"{info['icon']} *Network:* {info['name']}\n"
-                f"{icon} *Asset:* {symbol}\n"
-                f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-                f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
-                f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                f"\u23f3 *Blockchain Confirmation:* `0/{max_seconds}`",
-                parse_mode="Markdown",
+                f"{h_html('withdraw', 'Sent')}\n\n"
+                f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                f"<i>{esc(info['name'])}</i>\n"
+                f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
+                f"{ui('time')}  <b>Confirming\u2026</b>  <code>0/{max_seconds}s</code>\n\n"
+                f"<code>{esc(tx_hash)}</code>",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(pending_keyboard)
             )
             
@@ -6216,10 +6412,10 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             if not confirmed:
                                 # Transaction failed on chain
                                 await query.edit_message_text(
-                                    f"\u274c *Transaction Failed*\n\n"
-                                    f"The transaction was rejected by the blockchain.\n\n"
-                                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`",
-                                    parse_mode="Markdown",
+                                    f"{h_html('error', 'Failed')}\n\n"
+                                    f"<i>Rejected by the blockchain.</i>\n\n"
+                                    f"<code>{esc(tx_hash)}</code>",
+                                    parse_mode="HTML",
                                     reply_markup=InlineKeyboardMarkup(pending_keyboard)
                                 )
                                 return ConversationHandler.END
@@ -6251,14 +6447,14 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     elapsed_seconds = attempt * 2
                     if not confirmed and attempt % 3 == 0:
                         await query.edit_message_text(
-                            f"\U0001F4E4 *Transaction Submitted*\n\n"
-                            f"{info['icon']} *Network:* {info['name']}\n"
-                            f"{icon} *Asset:* {symbol}\n"
-                            f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-                            f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
-                            f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                            f"\u23f3 *Blockchain Confirmation:* `{elapsed_seconds}/{max_seconds}`",
-                            parse_mode="Markdown",
+                            f"{h_html('withdraw', 'Sent')}\n\n"
+                            f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                            f"<i>{esc(info['name'])}</i>\n"
+                            f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
+                            f"{ui('time')}  <b>Confirming\u2026</b>  "
+                            f"<code>{elapsed_seconds}/{max_seconds}s</code>\n\n"
+                            f"<code>{esc(tx_hash)}</code>",
+                            parse_mode="HTML",
                             reply_markup=InlineKeyboardMarkup(pending_keyboard)
                         )
                 except Exception as e:
@@ -6280,43 +6476,32 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, tx_hash)
 
             keyboard = [
-                [InlineKeyboardButton(
-                    "\U0001F310 View Transaction",
-                    url=explorer_url
-                )],
-                [InlineKeyboardButton(
-                    "\U0001F4CA Check Balance",
-                    callback_data=f"balance_{network}"
-                )],
-                [InlineKeyboardButton(
-                    "\U0001F3E0 Main Menu",
-                    callback_data="main_menu"
-                )]
+                [ikb("View on Explorer", ui_name="explorer", url=explorer_url)],
+                [ikb("Balance", ui_name="chart", callback_data=f"balance_{network}")],
+                [ikb("Main Menu", ui_name="home", callback_data="main_menu")]
             ]
 
             if confirmed:
                 await query.edit_message_text(
-                    f"\u2705 *Withdrawal Successful!*\n\n"
-                    f"{info['icon']} *Network:* {info['name']}\n"
-                    f"{icon} *Asset:* {symbol}\n"
-                    f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-                    f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
-                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                    f"\u2705 *Status:* Confirmed on blockchain",
-                    parse_mode="Markdown",
+                    f"{h_html('success', 'Sent')}\n\n"
+                    f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                    f"<i>{esc(info['name'])}</i>\n"
+                    f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
+                    f"{ui('check')}  <b>Confirmed</b>\n\n"
+                    f"<code>{esc(tx_hash)}</code>",
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
                 # Timeout - show success but note confirmation pending
                 await query.edit_message_text(
-                    f"\u2705 *Withdrawal Submitted*\n\n"
-                    f"{info['icon']} *Network:* {info['name']}\n"
-                    f"{icon} *Asset:* {symbol}\n"
-                    f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-                    f"\U0001F4CD *To:* `{format_address(address)}`\n\n"
-                    f"\U0001F4DD *TX Hash:*\n`{tx_hash}`\n\n"
-                    f"\u23f3 *Status:* Confirmation pending (check explorer)",
-                    parse_mode="Markdown",
+                    f"{h_html('withdraw', 'Sent')}\n\n"
+                    f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                    f"<i>{esc(info['name'])}</i>\n"
+                    f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
+                    f"{ui('time')}  <b>Confirmation pending</b>\n\n"
+                    f"<code>{esc(tx_hash)}</code>",
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
         else:
@@ -6329,16 +6514,16 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Withdrawal failed: {raw_error}")
             friendly_msg = get_friendly_error(raw_error)
             await query.edit_message_text(
-                f"\u274c *Withdrawal Failed*\n\n{friendly_msg}",
-                parse_mode="Markdown",
+                f"{h_html('error', 'Failed')}\n\n{esc(friendly_msg)}",
+                parse_mode="HTML",
                 reply_markup=get_back_button("menu_withdraw")
             )
     except Exception as e:
         logger.error(f"Withdrawal error: {e}")
         friendly_msg = get_friendly_error(e)
         await query.edit_message_text(
-            f"\u274c *Withdrawal Error*\n\n{friendly_msg}",
-            parse_mode="Markdown",
+            f"{h_html('error', 'Error')}\n\n{esc(friendly_msg)}",
+            parse_mode="HTML",
             reply_markup=get_back_button("menu_withdraw")
         )
 
@@ -6486,9 +6671,8 @@ async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "\U0001F504 *Convert Assets*\n\n"
-        "Which asset would you like to convert FROM?\n\n"
-        f"_Your balances: {balances_str}_\n\n"
-        "Just type the asset name (e.g., 'ETH', 'USDT', 'BNB')"
+        "Convert from?\n\n"
+        f"_{balances_str}_"
     )
 
     keyboard = [
@@ -6826,197 +7010,6 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-async def show_convert_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_callback_auth(update):
-        return
-    query = update.callback_query
-    await query.answer()
-
-    from_asset = query.data.split("_")[2]
-    context.user_data["convert_from"] = from_asset
-
-    user_id = query.from_user.id
-    balance = db.get_internal_balance(user_id, from_asset)
-
-    to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
-
-    keyboard = []
-    for asset in to_assets:
-        token_info = TOKENS.get(asset, {})
-        icon = token_info.get("icon", "")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{icon} {asset}",
-                callback_data=f"convert_to_{asset}"
-            )
-        ])
-
-    keyboard.append([InlineKeyboardButton("Back", callback_data="menu_convert")])
-    keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
-
-    text = (
-        f"*Convert {from_asset}*\n\n"
-        f"Available: {balance:.6f} {from_asset}\n\n"
-        f"Select asset to convert to:"
-    )
-    await edit_message_with_banner(
-        query, "convert", text, InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def show_convert_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_callback_auth(update):
-        return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-
-    to_asset = query.data.split("_")[2]
-    context.user_data["convert_to"] = to_asset
-
-    from_asset = context.user_data.get("convert_from")
-    user_id = query.from_user.id
-    balance = db.get_internal_balance(user_id, from_asset)
-
-    context.user_data["convert_balance"] = str(balance)
-
-    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
-
-    keyboard = [[InlineKeyboardButton("Cancel", callback_data="cancel_convert")]]
-
-    text = (
-        f"*Convert {from_asset} to {to_asset}*\n\n"
-        f"Available: {balance:.6f} {from_asset}\n"
-        f"Rate: 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
-        f"Enter amount to convert:"
-    )
-    await edit_message_with_banner(
-        query, "convert", text, InlineKeyboardMarkup(keyboard)
-    )
-
-    return CONVERT_AMOUNT
-
-
-async def receive_convert_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_authorized(user_id):
-        return ConversationHandler.END
-
-    amount_str = update.message.text.strip()
-
-    try:
-        amount = Decimal(amount_str)
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
-    except Exception:
-        await update.message.reply_text(
-            "*Invalid Amount*\nEnter a valid number.",
-            parse_mode="Markdown"
-        )
-        return CONVERT_AMOUNT
-
-    balance_str = context.user_data.get("convert_balance", "0")
-    try:
-        balance = Decimal(balance_str)
-    except Exception:
-        balance = Decimal("0")
-
-    if amount > balance:
-        await update.message.reply_text(
-            f"*Insufficient Balance*\nYou have {balance_str}.",
-            parse_mode="Markdown"
-        )
-        return CONVERT_AMOUNT
-
-    context.user_data["convert_amount"] = str(amount)
-
-    from_asset = context.user_data.get("convert_from")
-    to_asset = context.user_data.get("convert_to")
-
-    to_amount, rate = await PriceFetcher.calculate_conversion(from_asset, to_asset, amount)
-    context.user_data["convert_to_amount"] = str(to_amount)
-    context.user_data["convert_rate"] = rate
-
-    from_info = TOKENS.get(from_asset, {})
-    to_info = TOKENS.get(to_asset, {})
-    from_icon = from_info.get("icon", "")
-    to_icon = to_info.get("icon", "")
-
-    keyboard = [
-        [
-            InlineKeyboardButton("Confirm", callback_data="confirm_convert"),
-            InlineKeyboardButton("Cancel", callback_data="cancel_convert")
-        ]
-    ]
-
-    await update.message.reply_text(
-        f"*Confirm Conversion*\n\n"
-        f"From: {amount} {from_icon} {from_asset}\n"
-        f"To: {to_amount} {to_icon} {to_asset}\n"
-        f"Rate: 1 {from_asset} = {rate} {to_asset}\n\n"
-        f"This is an internal ledger conversion.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-    return ConversationHandler.END
-
-
-async def execute_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_callback_auth(update):
-        return
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    from_asset = context.user_data.get("convert_from")
-    to_asset = context.user_data.get("convert_to")
-    amount_str = context.user_data.get("convert_amount")
-    to_amount_str = context.user_data.get("convert_to_amount")
-    rate = context.user_data.get("convert_rate")
-
-    from_amount = Decimal(amount_str)
-    to_amount = Decimal(to_amount_str)
-
-    success = db.convert_balance(user_id, from_asset, to_asset, from_amount, to_amount, rate)
-
-    keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
-
-    if success:
-        new_from_bal = db.get_internal_balance(user_id, from_asset)
-        new_to_bal = db.get_internal_balance(user_id, to_asset)
-
-        from_info = TOKENS.get(from_asset, {})
-        to_info = TOKENS.get(to_asset, {})
-        from_icon = from_info.get("icon", "")
-        to_icon = to_info.get("icon", "")
-
-        await query.edit_message_text(
-            f"*Conversion Complete*\n\n"
-            f"Converted: {amount_str} {from_icon} {from_asset}\n"
-            f"Received: {to_amount_str} {to_icon} {to_asset}\n"
-            f"Rate: 1 {from_asset} = {rate} {to_asset}\n\n"
-            f"New Balances:\n"
-            f"{from_icon} {from_asset}: {new_from_bal:.6f}\n"
-            f"{to_icon} {to_asset}: {new_to_bal:.6f}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await query.edit_message_text(
-            "*Conversion Failed*\n\n"
-            "Insufficient balance for conversion.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    context.user_data.pop("convert_from", None)
-    context.user_data.pop("convert_to", None)
-    context.user_data.pop("convert_amount", None)
-    context.user_data.pop("convert_to_amount", None)
-    context.user_data.pop("convert_rate", None)
-    context.user_data.pop("convert_balance", None)
-
-
 async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return ConversationHandler.END
@@ -7267,15 +7260,15 @@ async def check_wallet_transactions(application):
         notification_cooldowns[cooldown_key] = current_time
 
         msg = (
-            f"*_Deposit Confirmed_*\n\n"
-            f"*Token:* {symbol} [{network_short}]\n"
-            f"*Amount:* {diff}\n"
-            f"*Current Balance:* {new_balance} {symbol}"
+            f"{h_html('deposit', 'Deposit Received')}\n\n"
+            f"{tok(symbol)}  <b>+{esc(diff)} {esc(symbol)}</b>  "
+            f"<i>{esc(network_info.get('name', network_short))}</i>\n"
+            f"{ui('money')}  <b>Balance</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
         )
 
         keyboard = [[
-            InlineKeyboardButton(
-                "Explorer",
+            ikb(
+                "View on Explorer", ui_name="explorer",
                 url=f"{network_info.get('explorer', '')}/address/{address}"
             )
         ]]
@@ -7284,14 +7277,14 @@ async def check_wallet_transactions(application):
             await application.bot.send_message(
                 chat_id=ALLOWED_USER_ID,
                 text=msg,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             if ALLOWED_CHAT_ID:
                 await application.bot.send_message(
                     chat_id=ALLOWED_CHAT_ID,
                     text=msg,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
         except Exception as e:
