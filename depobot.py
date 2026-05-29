@@ -6509,6 +6509,9 @@ async def handle_text_commands(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+    if update.message is None:
+        return
+
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
@@ -7164,14 +7167,20 @@ def main():
     )
 
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands)
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.UpdateType.EDITED_MESSAGE,
+            handle_text_commands
+        )
     )
 
     # Add global error handler to prevent bot from dying
     application.add_error_handler(error_handler)
 
     logger.info("Starting Depo Bot with enhanced UI...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    application.run_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
