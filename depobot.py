@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import html
 import sqlite3
 import logging
 import hashlib
@@ -55,6 +56,133 @@ logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 
+# ---------------------------------------------------------------------------
+# UI styling helpers
+# ---------------------------------------------------------------------------
+# Map plain ASCII to Unicode "Mathematical Sans-Serif" glyphs so headings get a
+# modern, premium look without relying on dash/line separators.
+_BOLD_UPPER = 0x1D5D4   # 𝗔
+_BOLD_LOWER = 0x1D5EE   # 𝗮
+_BOLD_DIGIT = 0x1D7EC   # 𝟬
+
+
+def fancy(text: str) -> str:
+    """Render text in a modern sans-serif bold Unicode font for headings."""
+    out = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr(_BOLD_UPPER + (ord(ch) - 65)))
+        elif "a" <= ch <= "z":
+            out.append(chr(_BOLD_LOWER + (ord(ch) - 97)))
+        elif "0" <= ch <= "9":
+            out.append(chr(_BOLD_DIGIT + (ord(ch) - 48)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def heading(emoji: str, title: str) -> str:
+    """Build a styled section heading: emoji + fancy font title."""
+    title = fancy(title)
+    return f"{emoji}  {title}" if emoji else title
+
+
+# Soft dot divider used sparingly instead of heavy dash/line separators.
+SOFT_DIVIDER = "·  ·  ·"
+
+
+# ---------------------------------------------------------------------------
+# Premium custom emoji (Telegram Premium) — rendered via HTML <tg-emoji> tags.
+# UI icons come from the "Telegram Android Icons" pack, keyed by the standard
+# emoji they fall back to. Token icons come from the "KkPay" pack.
+# ---------------------------------------------------------------------------
+UI_EMOJI = {
+    "\U0001F3E0": "5967822972931542886",   # 🏠 home
+    "\U0001F50E": "5874960879434338403",   # 🔎 search / check
+    "\U0001F4E5": "5877307202888273539",   # 📥 deposit
+    "\U0001F4E4": "5877540355187937244",   # 📤 withdraw / send
+    "\U0001F4B0": "5811989245761426317",   # 💰 money
+    "\U0001F45B": "5769403330761593044",   # 👛 wallet
+    "\U0001F4BC": "5967389567781703494",   # 💼 portfolio
+    "\u2699": "5877260593903177342",        # ⚙ settings
+    "\U0001F504": "5839200986022812209",   # 🔄 convert
+    "\U0001F501": "6005843436479975944",   # 🔁 refresh
+    "\U0001F4D6": "5897850551156084824",   # 📖 help
+    "\u2705": "5776375003280838798",        # ✅ success
+    "\u2714\ufe0f": "5825794181183836432",  # ✔️ check
+    "\u274c": "5778527486270770928",        # ❌ error
+    "\U0001F552": "5778605968208170641",   # 🕒 time
+    "\U0001F517": "5877465816030515018",   # 🔗 link
+    "\U0001F310": "5879585266426973039",   # 🌐 explorer
+    "\U0001F4CD": "5944940516754853337",   # 📍 location / address
+    "\u26a0\ufe0f": "5881702736843511327",  # ⚠️ warning
+    "\U0001F195": "5886306834410640699",   # 🆕 new
+    "\U0001F4B5": "5967390100357648692",   # 💵 cash
+    "\U0001F4B3": "5967548335542767952",   # 💳 card / generate
+    "\U0001FA99": "5992430854909989581",   # 🪙 coin
+    "\U0001F4CA": "5877485980901971030",   # 📊 chart / status
+    "\U0001F50B": "5778546461436284629",   # 🔋 balance
+    "\U0001F464": "5771887475421090729",   # 👤 user / from
+    "\U0001F4DD": "5886330010054168711",   # 📝 note
+    "\U0001F48E": "5963312935148195483",   # 💎 gem
+    "\U0001F514": "5909201569898827582",   # 🔔 bell
+}
+
+TOKEN_EMOJI = {
+    "USDT": "6213220344614882714",
+    "USDC": "6255735869395702119",
+    "ETH": "6314132993531187956",
+    "BNB": "6253755610299372930",
+    "MATIC": "6253279916901535974",
+    "SOL": "6255864821493796954",
+    "TRX": "6314155632303804943",
+    "LTC": "6253341983473931070",
+}
+
+# Which token icon represents each network.
+NETWORK_TOKEN_ICON = {
+    "ETH": "ETH",
+    "BSC": "BNB",
+    "POLYGON": "MATIC",
+    "SOLANA": "SOL",
+    "TRON": "TRX",
+    "LTC": "LTC",
+}
+
+
+def ce(emoji_id: str, fallback: str) -> str:
+    """Build a custom-emoji HTML tag with a standard-emoji fallback."""
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
+def ui(emoji_char: str) -> str:
+    """Return the premium UI icon for a standard emoji (HTML), else the emoji."""
+    eid = UI_EMOJI.get(emoji_char)
+    return ce(eid, emoji_char) if eid else emoji_char
+
+
+def tok(symbol: str, fallback: str = "\U0001FA99") -> str:
+    """Return the premium token icon for a symbol (HTML), else a coin emoji."""
+    eid = TOKEN_EMOJI.get((symbol or "").upper())
+    return ce(eid, fallback) if eid else fallback
+
+
+def net_icon(network: str) -> str:
+    """Premium token icon representing a network."""
+    sym = NETWORK_TOKEN_ICON.get(network)
+    return tok(sym) if sym else ui("\U0001F310")
+
+
+def esc(value) -> str:
+    """HTML-escape a dynamic value for safe interpolation."""
+    return html.escape(str(value), quote=False)
+
+
+def h_html(emoji_char: str, title: str) -> str:
+    """HTML section heading: premium icon + fancy-font title."""
+    return f"{ui(emoji_char)}  {fancy(title)}"
+
+
 def get_banner_path(name: str) -> str:
     """Get the path to a banner image."""
     return os.path.join(ASSETS_DIR, f"{name}.png")
@@ -102,7 +230,7 @@ async def edit_message_caption(query, caption: str, reply_markup):
         pass
 
 
-async def send_new_message_with_banner(query, banner_name: str, caption: str, reply_markup):
+async def send_new_message_with_banner(query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown"):
     """Delete current message and send new one with banner image. For changing sections or returning to main menu."""
     chat_id = query.message.chat_id
     try:
@@ -117,37 +245,37 @@ async def send_new_message_with_banner(query, banner_name: str, caption: str, re
                 chat_id=chat_id,
                 photo=photo,
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
     else:
         await query.get_bot().send_message(
             chat_id=chat_id,
             text=caption,
-            parse_mode="Markdown",
+            parse_mode=parse_mode,
             reply_markup=reply_markup
         )
 
 
 async def edit_message_with_banner(
-    query, banner_name: str, caption: str, reply_markup
+    query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown"
 ):
     """Edit the message caption and keyboard. Falls back to delete/send if needed."""
     try:
         if query.message.photo:
             await query.message.edit_caption(
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
         else:
             await query.message.edit_text(
                 text=caption,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
     except Exception:
-        await send_new_message_with_banner(query, banner_name, caption, reply_markup)
+        await send_new_message_with_banner(query, banner_name, caption, reply_markup, parse_mode)
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -2467,10 +2595,10 @@ def build_main_menu_text(user_id: int) -> str:
                 pass
 
     menu_text = (
-        f"\U0001F4BC *Your Portfolio*\n\n"
-        f"Wallets: `{wallet_count}`\n"
-        f"Balance: `${total_usdt_value:.2f} USD`\n\n"
-        "_Select an option below to get started_"
+        f"{h_html('\U0001F4BC', 'Your Portfolio')}\n\n"
+        f"{ui('\U0001F45B')}  <b>Wallets</b>   <code>{wallet_count}</code>\n"
+        f"{ui('\U0001F4B5')}  <b>Balance</b>   <code>${total_usdt_value:.2f}</code>\n\n"
+        "<i>Select an option below to get started</i>"
     )
     return menu_text
 
@@ -2495,13 +2623,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(
                 photo=photo,
                 caption=menu_text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=get_main_menu_keyboard()
             )
     else:
         await update.message.reply_text(
             menu_text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
 
@@ -2518,24 +2646,23 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         usage_text = (
-            "\U0001F4E4 *Send Command Usage*\n"
-            "\u2501" * 24 + "\n\n"
-            "\U0001F4DD *Format:* `/send <token> [network]`\n\n"
-            "\U0001F4A1 *Examples:*\n"
-            "    `/send USDT BSC`\n"
-            "    `/send USDC ETH`\n"
-            "    `/send ETH`\n"
-            "    `/send BNB`\n"
-            "    `/send SOL`\n"
-            "    `/send TRX`\n"
-            "    `/send LTC`\n\n"
-            "_Network is auto-detected for single-network tokens_\n\n"
-            "\U0001F4B5 *Available Tokens:*\n"
+            f"{h_html('\U0001F4E5', 'Send Command')}\n\n"
+            f"{ui('\U0001F4DD')}  <b>Format:</b> <code>/send &lt;token&gt; [network]</code>\n\n"
+            f"{ui('\U0001F4A1')}  <b>Examples:</b>\n"
+            "    <code>/send USDT BSC</code>\n"
+            "    <code>/send USDC ETH</code>\n"
+            "    <code>/send ETH</code>\n"
+            "    <code>/send BNB</code>\n"
+            "    <code>/send SOL</code>\n"
+            "    <code>/send TRX</code>\n"
+            "    <code>/send LTC</code>\n\n"
+            "<i>Network is auto-detected for single-network tokens</i>\n\n"
+            f"{ui('\U0001FA99')}  <b>Available Tokens:</b>\n"
             "    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC\n\n"
-            "\U0001F310 *Available Networks:*\n"
+            f"{ui('\U0001F310')}  <b>Available Networks:</b>\n"
             "    ETH, BSC, POLYGON, SOLANA, TRON, LTC"
         )
-        await update.message.reply_text(usage_text, parse_mode="Markdown")
+        await update.message.reply_text(usage_text, parse_mode="HTML")
         return
 
     token = detect_token_from_text(args[0])
@@ -2605,8 +2732,6 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     address = wallet["address"]
     network_info = NETWORKS[network]
-    token_icon = token_info.get("icon", "\U0001F4B0")
-    network_icon = network_info.get("icon", "\U0001F310")
 
     is_native = token_info.get("native", False)
     if is_native:
@@ -2615,16 +2740,14 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance_info = await BalanceChecker.get_token_balance(token, network, address)
     balance_str = balance_info.get("balance", "0")
 
-    divider = "\u2501" * 24
     response_text = (
-        f"\U0001F4E4 *Deposit Address*\n"
-        f"{divider}\n\n"
-        f"{token_icon} *Token:* {token}\n"
-        f"{network_icon} *Network:* {network_info['name']}\n"
-        f"\U0001F4B0 *Balance:* {balance_str} {token}\n\n"
-        f"\U0001F4CB *Address:*\n"
-        f"`{address}`\n\n"
-        f"\u26A0\uFE0F *Important:* Only send {token} on {network_info['name']} network!"
+        f"{h_html('\U0001F4E5', 'Deposit Address')}\n\n"
+        f"{tok(token)}  <b>Token:</b> {esc(token)}\n"
+        f"{net_icon(network)}  <b>Network:</b> {esc(network_info['name'])}\n"
+        f"{ui('\U0001F50B')}  <b>Balance:</b> {esc(balance_str)} {esc(token)}\n\n"
+        f"{ui('\U0001F4CD')}  <b>Address:</b>\n"
+        f"<code>{esc(address)}</code>\n\n"
+        f"{ui('\u26a0\ufe0f')}  <b>Important:</b> Only send {esc(token)} on {esc(network_info['name'])} network!"
     )
 
     keyboard = [
@@ -2645,31 +2768,31 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(
                 photo=photo,
                 caption=response_text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
     else:
         await update.message.reply_text(
             response_text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
-async def send_photo_with_banner(message, banner_name, text, reply_markup=None):
+async def send_photo_with_banner(message, banner_name, text, reply_markup=None, parse_mode: str = "Markdown"):
     banner_path = get_banner_path(banner_name)
     if os.path.exists(banner_path):
         with open(banner_path, "rb") as photo:
             await message.reply_photo(
                 photo=photo,
                 caption=text,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
     else:
         await message.reply_text(
             text,
-            parse_mode="Markdown",
+            parse_mode=parse_mode,
             reply_markup=reply_markup
         )
 
@@ -3046,38 +3169,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_text = (
-        "\U0001F4D6 *VM DEPO BOT 2.0 - Help Center*\n\n"
-        "\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\n\n"
-        "\U0001F3E0 *Navigation*\n"
-        "`/start` or `/menu`\n"
-        "_Open the main menu dashboard_\n\n"
-        "\U0001F4B0 *Balance & Wallets*\n"
-        "`/balance`\n"
-        "_Check your balances across all networks_\n\n"
-        "`/wallets`\n"
-        "_View and manage your wallet addresses_\n\n"
-        "`/tokens`\n"
-        "_View detailed token balances by network_\n\n"
-        "\U0001F4E5 *Deposits*\n"
-        "`/deposit`\n"
-        "_Get deposit address for any token/network_\n\n"
-        "`/send TOKEN NETWORK`\n"
-        "_Quick deposit address (e.g., `/send USDT BSC`)_\n\n"
-        "\U0001F4E4 *Withdrawals*\n"
-        "`/withdraw`\n"
-        "_Withdraw funds to external wallet_\n\n"
-        "\U0001F504 *Convert*\n"
-        "`/convert`\n"
-        "_Convert between supported assets_\n\n"
-        "\U0001F511 *Wallet Generation*\n"
-        "`/generate`\n"
-        "_Generate new wallet for any network_\n\n"
-        "\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\n"
-        "_Securely Made By Venom_"
+        f"{h_html('\U0001F4D6', 'VM Depo Bot 2.0')}\n"
+        "<i>Help Center</i>\n\n"
+        f"{h_html('\U0001F3E0', 'Navigation')}\n"
+        "<code>/start</code> or <code>/menu</code>\n"
+        "<i>Open the main menu dashboard</i>\n\n"
+        f"{h_html('\U0001F4B0', 'Balance & Wallets')}\n"
+        "<code>/balance</code>  <i>Check balances across networks</i>\n"
+        "<code>/wallets</code>  <i>Manage your wallet addresses</i>\n"
+        "<code>/tokens</code>  <i>Token balances by network</i>\n\n"
+        f"{h_html('\U0001F4E5', 'Deposits')}\n"
+        "<code>/deposit</code>  <i>Get a deposit address</i>\n"
+        "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
+        f"{h_html('\U0001F50E', 'Check')}\n"
+        "<code>/check &lt;address&gt;</code>  <i>USDT &amp; USDC balance</i>\n"
+        "<code>/check &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
+        f"{h_html('\U0001F4E4', 'Withdrawals')}\n"
+        "<code>/withdraw</code>  <i>Send funds to an external wallet</i>\n\n"
+        f"{h_html('\U0001F504', 'Convert')}\n"
+        "<code>/convert</code>  <i>Swap between supported assets</i>\n\n"
+        f"{h_html('\U0001F4B3', 'Wallet Generation')}\n"
+        "<code>/generate</code>  <i>Create a new wallet for any network</i>\n\n"
+        f"{SOFT_DIVIDER}\n"
+        "<i>Securely Made By Venom</i>"
     )
 
     await send_photo_with_banner(
-        update.message, "help", help_text, get_back_button("main_menu")
+        update.message, "help", help_text, get_back_button("main_menu"), parse_mode="HTML"
     )
 
 
@@ -3110,9 +3228,9 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     candidates = [networks] if isinstance(networks, str) else list(networks)
 
     loading_msg = await update.message.reply_text(
-        "\u23f3 *Fetching Transaction Details...*\n\n"
-        f"Hash: `{tx_hash[:10]}...{tx_hash[-8:]}`",
-        parse_mode="Markdown"
+        f"{ui('\U0001F50E')}  {fancy('Fetching Transaction')}\n\n"
+        f"<code>{esc(tx_hash[:10])}...{esc(tx_hash[-8:])}</code>",
+        parse_mode="HTML"
     )
 
     result = None
@@ -3135,11 +3253,11 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
             url=tx_explorer_url(fallback_net, tx_hash)
         )]]
         await loading_msg.edit_text(
-            "\u274c *Transaction Not Found*\n\n"
-            f"Couldn't fetch details on: {', '.join(candidates)}.\n"
+            f"{h_html('\u274c', 'Transaction Not Found')}\n\n"
+            f"Couldn't fetch details on: {esc(', '.join(candidates))}.\n"
             "It may be pending, very recent, or on a different network.\n\n"
-            f"Hash: `{tx_hash[:10]}...{tx_hash[-8:]}`",
-            parse_mode="Markdown",
+            f"<code>{esc(tx_hash[:10])}...{esc(tx_hash[-8:])}</code>",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
@@ -3155,14 +3273,14 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     amount_str = f"{amount} {asset}".strip() if amount is not None else "Unknown"
 
     lines = [
-        "\U0001F9FE *Transaction Details*\n\n",
-        f"{net_info.get('icon', '')} *Network:* {net_info['name']}\n",
-        f"\U0001F4CA *Status:* {status}\n",
-        f"\U0001F4B0 *Amount:* `{amount_str}`\n",
-        f"\U0001F4E4 *From:* `{sender}`\n",
-        f"\U0001F4E5 *To:* `{receiver}`\n",
-        f"\U0001F551 *Date/Time:* {when}\n",
-        f"\U0001F517 *Tx Hash:* `{h[:12]}...{h[-10:]}`\n",
+        f"{ui('\U0001F4DD')}  {fancy('Transaction Details')}\n\n",
+        f"{net_icon(used_network)}  <b>Network:</b> {esc(net_info['name'])}\n",
+        f"{ui('\U0001F4CA')}  <b>Status:</b> {esc(status)}\n",
+        f"{tok(asset)}  <b>Amount:</b> <code>{esc(amount_str)}</code>\n",
+        f"{ui('\U0001F464')}  <b>From:</b> <code>{esc(sender)}</code>\n",
+        f"{ui('\U0001F4E5')}  <b>To:</b> <code>{esc(receiver)}</code>\n",
+        f"{ui('\U0001F552')}  <b>Date/Time:</b> {esc(when)}\n",
+        f"{ui('\U0001F517')}  <b>Tx Hash:</b> <code>{esc(h[:12])}...{esc(h[-10:])}</code>\n",
     ]
     keyboard = [[InlineKeyboardButton(
         "\U0001F310 View on Explorer",
@@ -3170,7 +3288,7 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     )]]
     await loading_msg.edit_text(
         "".join(lines),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -3192,34 +3310,34 @@ async def _check_address(update: Update, address: str, detected):
         return
 
     loading_msg = await update.message.reply_text(
-        "\u23f3 *Checking USDT & USDC Balances...*\n\n"
-        f"Address: `{address[:8]}...{address[-6:]}`",
-        parse_mode="Markdown"
+        f"{ui('\U0001F50E')}  {fancy('Checking Balances')}\n\n"
+        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>",
+        parse_mode="HTML"
     )
 
     stablecoins = ["USDT", "USDC"]
     result_lines = [
-        "\U0001F4B0 *USDT & USDC Balance Check*\n",
-        f"\U0001F4CD Address: `{address[:8]}...{address[-6:]}`\n"
+        f"{ui('\U0001F4B0')}  {fancy('USDT & USDC Balance')}\n",
+        f"{ui('\U0001F4CD')}  <code>{esc(address[:8])}...{esc(address[-6:])}</code>\n"
     ]
     explorer_buttons = []
 
     try:
         if isinstance(detected, list):
-            result_lines.append("\n*EVM Networks:*\n")
+            result_lines.append(f"\n{ui('\U0001F310')}  <b>EVM Networks</b>\n")
             for network in detected:
                 network_name = NETWORKS[network]["name"]
-                result_lines.append(f"\n_{network_name}:_\n")
+                result_lines.append(f"\n{net_icon(network)}  <b>{esc(network_name)}</b>\n")
                 for token in stablecoins:
                     try:
                         balance_info = await BalanceChecker.get_token_balance(token, network, address)
                         if balance_info.get("error"):
                             continue
                         balance = balance_info.get("balance", "0")
-                        result_lines.append(f"\u2022 `{balance}` {token}\n")
+                        result_lines.append(f"{tok(token)}  <code>{esc(balance)}</code> {esc(token)}\n")
                     except Exception as e:
                         logger.error(f"Error checking {token} on {network}: {e}")
-                        result_lines.append(f"\u2022 {token}: Error\n")
+                        result_lines.append(f"{tok(token)}  {esc(token)}: Error\n")
                 explorer_buttons.append(InlineKeyboardButton(
                     f"\U0001F310 {network_name}",
                     url=address_explorer_url(network, address)
@@ -3227,7 +3345,7 @@ async def _check_address(update: Update, address: str, detected):
         else:
             network = detected
             network_name = NETWORKS.get(network, {}).get("name", network)
-            result_lines.append(f"\n*Network:* {network_name}\n\n")
+            result_lines.append(f"\n{net_icon(network)}  <b>Network:</b> {esc(network_name)}\n\n")
 
             for token in stablecoins:
                 try:
@@ -3235,11 +3353,10 @@ async def _check_address(update: Update, address: str, detected):
                     if balance_info.get("error"):
                         continue
                     balance = balance_info.get("balance", "0")
-                    icon = TOKENS.get(token, {}).get("icon", "\U0001F4B5")
-                    result_lines.append(f"{icon} *{token} Balance:* `{balance}`\n")
+                    result_lines.append(f"{tok(token)}  <b>{esc(token)} Balance:</b> <code>{esc(balance)}</code>\n")
                 except Exception as e:
                     logger.error(f"Error checking {token} on {network}: {e}")
-                    result_lines.append(f"\u274c Error checking {token} balance: {str(e)}\n")
+                    result_lines.append(f"{ui('\u274c')}  Error checking {esc(token)} balance\n")
             explorer_buttons.append(InlineKeyboardButton(
                 "\U0001F310 View on Explorer",
                 url=address_explorer_url(network, address)
@@ -3248,14 +3365,14 @@ async def _check_address(update: Update, address: str, detected):
         keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
         await loading_msg.edit_text(
             "".join(result_lines),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
         )
     except Exception as e:
         logger.error(f"Error in check_command (address): {e}")
         await loading_msg.edit_text(
-            f"\u274c *Error*\n\nFailed to check balance: {str(e)}",
-            parse_mode="Markdown"
+            f"{h_html('\u274c', 'Error')}\n\nFailed to check balance: {esc(str(e))}",
+            parse_mode="HTML"
         )
 
 
@@ -3686,8 +3803,6 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     address = wallet["address"]
-    token_icon = token_info.get("icon", "\U0001F4B0")
-    network_icon = network_info.get("icon", "\U0001F310")
 
     is_native = token_info.get("native", False)
     if is_native:
@@ -3696,16 +3811,14 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
         balance_info = await BalanceChecker.get_token_balance(token, network, address)
     balance_str = balance_info.get("balance", "0")
 
-    divider = "\u2501" * 24
     response_text = (
-        f"\U0001F4E4 *Deposit Address*\n"
-        f"{divider}\n\n"
-        f"{token_icon} *Token:* {token}\n"
-        f"{network_icon} *Network:* {network_info['name']}\n"
-        f"\U0001F4B0 *Balance:* {balance_str} {token}\n\n"
-        f"\U0001F4CB *Address:*\n"
-        f"`{address}`\n\n"
-        f"\u26A0\uFE0F *Important:* Only send {token} on {network_info['name']} network!"
+        f"{h_html('\U0001F4E5', 'Deposit Address')}\n\n"
+        f"{tok(token)}  <b>Token:</b> {esc(token)}\n"
+        f"{net_icon(network)}  <b>Network:</b> {esc(network_info['name'])}\n"
+        f"{ui('\U0001F50B')}  <b>Balance:</b> {esc(balance_str)} {esc(token)}\n\n"
+        f"{ui('\U0001F4CD')}  <b>Address:</b>\n"
+        f"<code>{esc(address)}</code>\n\n"
+        f"{ui('\u26a0\ufe0f')}  <b>Important:</b> Only send {esc(token)} on {esc(network_info['name'])} network!"
     )
 
     keyboard = [
@@ -3721,7 +3834,7 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
 
     await edit_message_with_banner(
-        query, "deposit", response_text, InlineKeyboardMarkup(keyboard)
+        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), parse_mode="HTML"
     )
 
 
@@ -3740,7 +3853,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = build_main_menu_text(user_id)
 
     await send_new_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard()
+        query, "welcome", menu_text, get_main_menu_keyboard(), parse_mode="HTML"
     )
     
     return ConversationHandler.END
@@ -6296,33 +6409,28 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     help_text = (
-        "\U0001F4D6 *VM DEPO BOT 2.0 - Help Center*\n\n"
-        "\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\n\n"
-        "\U0001F3E0 *Navigation*\n"
+        f"{heading('\U0001F4D6', 'VM Depo Bot 2.0')}\n"
+        "_Help Center_\n\n"
+        f"{heading('\U0001F3E0', 'Navigation')}\n"
         "`/start` or `/menu`\n"
         "_Open the main menu dashboard_\n\n"
-        "\U0001F4B0 *Balance & Wallets*\n"
-        "`/balance`\n"
-        "_Check your balances across all networks_\n\n"
-        "`/wallets`\n"
-        "_View and manage your wallet addresses_\n\n"
-        "`/tokens`\n"
-        "_View detailed token balances by network_\n\n"
-        "\U0001F4E5 *Deposits*\n"
-        "`/deposit`\n"
-        "_Get deposit address for any token/network_\n\n"
-        "`/send TOKEN NETWORK`\n"
-        "_Quick deposit address (e.g., `/send USDT BSC`)_\n\n"
-        "\U0001F4E4 *Withdrawals*\n"
-        "`/withdraw`\n"
-        "_Withdraw funds to external wallet_\n\n"
-        "\U0001F504 *Convert*\n"
-        "`/convert`\n"
-        "_Convert between supported assets_\n\n"
-        "\U0001F511 *Wallet Generation*\n"
-        "`/generate`\n"
-        "_Generate new wallet for any network_\n\n"
-        "\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\U00002501\n"
+        f"{heading('\U0001F4B0', 'Balance & Wallets')}\n"
+        "`/balance`  _Check balances across networks_\n"
+        "`/wallets`  _Manage your wallet addresses_\n"
+        "`/tokens`  _Token balances by network_\n\n"
+        f"{heading('\U0001F4E5', 'Deposits')}\n"
+        "`/deposit`  _Get a deposit address_\n"
+        "`/send TOKEN NETWORK`  _Quick deposit (e.g. `/send USDT BSC`)_\n\n"
+        f"{heading('\U0001F50E', 'Check')}\n"
+        "`/check <address>`  _USDT & USDC balance_\n"
+        "`/check <tx hash|link>`  _Transaction details_\n\n"
+        f"{heading('\U0001F4E4', 'Withdrawals')}\n"
+        "`/withdraw`  _Send funds to an external wallet_\n\n"
+        f"{heading('\U0001F504', 'Convert')}\n"
+        "`/convert`  _Swap between supported assets_\n\n"
+        f"{heading('\U0001F511', 'Wallet Generation')}\n"
+        "`/generate`  _Create a new wallet for any network_\n\n"
+        f"{SOFT_DIVIDER}\n"
         "_Securely Made By Venom_"
     )
 
