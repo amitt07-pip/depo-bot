@@ -6387,7 +6387,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"{h_html('withdraw', 'Sent')}\n\n"
                 f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
-                f"<i>{esc(info['name'])}</i>\n"
+                f"[{esc(info['name'])}]\n"
                 f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                 f"{ui('time')}  <b>Confirming\u2026</b>  <code>0/{max_seconds}s</code>\n\n"
                 f"<code>{esc(tx_hash)}</code>",
@@ -6449,7 +6449,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await query.edit_message_text(
                             f"{h_html('withdraw', 'Sent')}\n\n"
                             f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
-                            f"<i>{esc(info['name'])}</i>\n"
+                            f"[{esc(info['name'])}]\n"
                             f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                             f"{ui('time')}  <b>Confirming\u2026</b>  "
                             f"<code>{elapsed_seconds}/{max_seconds}s</code>\n\n"
@@ -6474,6 +6474,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ledger_asset = get_ledger_asset(network)
             withdraw_amount = Decimal(amount)
             db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, tx_hash)
+            remaining_balance = db.get_internal_balance(user_id, ledger_asset)
 
             keyboard = [
                 [ikb("View on Explorer", ui_name="explorer", url=explorer_url)],
@@ -6485,9 +6486,10 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     f"{h_html('success', 'Sent')}\n\n"
                     f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
-                    f"<i>{esc(info['name'])}</i>\n"
+                    f"[{esc(info['name'])}]\n"
                     f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
-                    f"{ui('check')}  <b>Confirmed</b>\n\n"
+                    f"{ui('check')}  <b>Confirmed</b>\n"
+                    f"{ui('money')}  <b>Balance:</b>  <code>{esc(remaining_balance)} {esc(ledger_asset)}</code>\n\n"
                     f"<code>{esc(tx_hash)}</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -6497,9 +6499,10 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     f"{h_html('withdraw', 'Sent')}\n\n"
                     f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
-                    f"<i>{esc(info['name'])}</i>\n"
+                    f"[{esc(info['name'])}]\n"
                     f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
-                    f"{ui('time')}  <b>Confirmation pending</b>\n\n"
+                    f"{ui('time')}  <b>Confirmation pending</b>\n"
+                    f"{ui('money')}  <b>Balance:</b>  <code>{esc(remaining_balance)} {esc(ledger_asset)}</code>\n\n"
                     f"<code>{esc(tx_hash)}</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -7262,8 +7265,8 @@ async def check_wallet_transactions(application):
         msg = (
             f"{h_html('deposit', 'Deposit Received')}\n\n"
             f"{tok(symbol)}  <b>+{esc(diff)} {esc(symbol)}</b>  "
-            f"<i>{esc(network_info.get('name', network_short))}</i>\n"
-            f"{ui('money')}  <b>Balance</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
+            f"[{esc(network_info.get('name', network_short))}]\n"
+            f"{ui('money')}  <b>Balance:</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
         )
 
         keyboard = [[
