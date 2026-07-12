@@ -1076,6 +1076,14 @@ class WalletDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS authorized_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                username TEXT UNIQUE,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -1263,6 +1271,40 @@ class WalletDatabase:
         rows = cursor.fetchall()
         conn.close()
         return [{"network": row[0], "address": row[1]} for row in rows]
+
+    def add_authorized_user(self, user_id: int = None, username: str = None):
+        if not user_id and not username:
+            return
+        norm_username = username.lower().lstrip("@") if username else None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO authorized_users (user_id, username) VALUES (?, ?)",
+            (user_id, norm_username)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_authorized_users(self) -> list:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, username FROM authorized_users")
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"user_id": row[0], "username": row[1]} for row in rows]
+
+    def remove_authorized_user(self, user_id: int = None, username: str = None):
+        if not user_id and not username:
+            return
+        norm_username = username.lower().lstrip("@") if username else None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM authorized_users WHERE user_id = ? OR username = ?",
+            (user_id, norm_username)
+        )
+        conn.commit()
+        conn.close()
 
 
 class CryptoUtils:
@@ -2553,10 +2595,33 @@ class WithdrawalHandler:
 
 db = WalletDatabase()
 
+AUTHORIZED_USER_IDS = set()
+AUTHORIZED_USERNAMES = set()
 
-def is_authorized(user_id: int) -> bool:
+
+def load_authorized_users():
+    """Load authorized users from the database into memory."""
+    AUTHORIZED_USER_IDS.clear()
+    AUTHORIZED_USERNAMES.clear()
+    for entry in db.get_authorized_users():
+        if entry.get("user_id"):
+            AUTHORIZED_USER_IDS.add(entry["user_id"])
+        if entry.get("username"):
+            AUTHORIZED_USERNAMES.add(entry["username"].lower().lstrip("@"))
+
+
+def is_authorized(user_id: int, username: str = None) -> bool:
     """Check if user is authorized to use the bot."""
-    return user_id in USER_ACCESS
+    if user_id in USER_ACCESS:
+        return True
+    if user_id in AUTHORIZED_USER_IDS:
+        return True
+    if username:
+        return username.lower().lstrip("@") in AUTHORIZED_USERNAMES
+    return False
+
+
+load_authorized_users()
 
 
 async def check_callback_auth(update: Update) -> bool:
@@ -2569,6 +2634,152 @@ async def check_callback_auth(update: Update) -> bool:
         )
         return False
     return True
+
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is the admin user."""
+    return user_id == ALLOWED_USER_ID
+
+
+async def admin_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a user to the bot's authorized users list (admin only)."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "You are not authorized to use this command.",
+            parse_mode="Markdown"
+        )
+        return
+
+    target_user_id = None
+    target_username = None
+
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_username = target_user.username
+    else:
+        args = context.args if context.args else update.message.text.split()[1:]
+        if not args:
+            await update.message.reply_text(
+                "Usage: `+add @username`, `+add <user_id>`, or reply `+add` to a user's message.",
+                parse_mode="Markdown"
+            )
+            return
+        arg = args[0].strip()
+        if arg.startswith("@"):
+            target_username = arg[1:]
+        elif arg.isdigit():
+            target_user_id = int(arg)
+            try:
+                chat = await context.bot.get_chat(target_user_id)
+                target_username = chat.username
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(
+                "Usage: `+add @username`, `+add <user_id>`, or reply `+add` to a user's message.",
+                parse_mode="Markdown"
+            )
+            return
+
+    if not target_user_id and not target_username:
+        await update.message.reply_text(
+            "Could not determine the user to add. Please use @username, user ID, or reply to a message.",
+            parse_mode="Markdown"
+        )
+        return
+
+    db.add_authorized_user(user_id=target_user_id, username=target_username)
+    load_authorized_users()
+
+    display = f"`@{target_username}`" if target_username else f"ID `{target_user_id}`"
+    await update.message.reply_text(
+        f"User {display} has been authorized to use the bot.",
+        parse_mode="Markdown"
+    )
+
+
+async def admin_list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List authorized users (admin only)."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "You are not authorized to use this command.",
+            parse_mode="Markdown"
+        )
+        return
+
+    users = db.get_authorized_users()
+    lines = []
+    for entry in users:
+        uid = entry.get("user_id")
+        uname = entry.get("username")
+        if uid:
+            lines.append(f"ID `{uid}`" + (f" (`@{uname}`)" if uname else ""))
+        elif uname:
+            lines.append(f"`@{uname}`")
+    if not lines:
+        await update.message.reply_text("No authorized users yet.")
+        return
+    await update.message.reply_text(
+        "Authorized users:\n\n" + "\n".join(lines),
+        parse_mode="Markdown"
+    )
+
+
+async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove a user from the authorized users list (admin only)."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "You are not authorized to use this command.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        db.remove_authorized_user(user_id=target_user.id, username=target_user.username)
+        load_authorized_users()
+        display = f"`@{target_user.username}`" if target_user.username else f"ID `{target_user.id}`"
+        await update.message.reply_text(
+            f"User {display} has been removed.",
+            parse_mode="Markdown"
+        )
+        return
+
+    args = context.args if context.args else update.message.text.split()[1:]
+    if not args:
+        await update.message.reply_text(
+            "Usage: `+remove @username`, `+remove <user_id>`, or reply `+remove` to a user's message.",
+            parse_mode="Markdown"
+        )
+        return
+
+    arg = args[0].strip()
+    if arg.startswith("@"):
+        db.remove_authorized_user(username=arg[1:])
+    elif arg.isdigit():
+        db.remove_authorized_user(user_id=int(arg))
+    else:
+        await update.message.reply_text(
+            "Usage: `+remove @username`, `+remove <user_id>`, or reply `+remove` to a user's message.",
+            parse_mode="Markdown"
+        )
+        return
+
+    load_authorized_users()
+    await update.message.reply_text(
+        "User has been removed from authorized users.",
+        parse_mode="Markdown"
+    )
 
 
 def get_friendly_error(error) -> str:
@@ -2809,14 +3020,19 @@ def build_main_menu_text(user_id: int) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "User"
+    username = update.effective_user.username
     logger.info(f"User {user_name} ({user_id}) started bot")
-    
-    if not is_authorized(user_id):
+
+    if not is_authorized(user_id, username):
         await update.message.reply_text(
             "*Access Denied*\nYou are not authorized to use this bot.",
             parse_mode="Markdown"
         )
         return
+
+    if user_id not in AUTHORIZED_USER_IDS and username and username.lower().lstrip("@") in AUTHORIZED_USERNAMES:
+        db.add_authorized_user(user_id=user_id, username=username)
+        load_authorized_users()
 
     menu_text = build_main_menu_text(user_id)
     
@@ -7405,7 +7621,7 @@ async def background_sync_balances():
     while True:
         try:
             # Sync balances for all authorized users
-            for user_id in USER_ACCESS.keys():
+            for user_id in list(set(USER_ACCESS.keys()) | AUTHORIZED_USER_IDS):
                 wallets = db.get_all_wallets(user_id)
                 if not wallets:
                     continue
@@ -7689,6 +7905,29 @@ def main():
     application.add_handler(CommandHandler("notifications", notification_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
+
+    application.add_handler(CommandHandler("add", admin_add_command))
+    application.add_handler(CommandHandler("list", admin_list_users_command))
+    application.add_handler(CommandHandler("remove", admin_remove_command))
+
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^\+add(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
+            admin_add_command
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^\+list(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
+            admin_list_users_command
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^\+remove(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
+            admin_remove_command
+        )
+    )
 
     application.add_handler(deposit_handler)
     application.add_handler(withdraw_handler)
