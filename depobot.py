@@ -392,11 +392,11 @@ async def edit_message_with_banner(
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_ID = 7338429782
+ALLOWED_USER_ID = 6643621069
 ALLOWED_CHAT_ID = -1002215462357
 
 USER_ACCESS = {
-    7338429782: [1, 2],
+    6643621069: [1, 2],
     7103743713: [2],
 }
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
