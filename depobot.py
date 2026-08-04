@@ -3063,6 +3063,42 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
+
+    # Owner-only messaging shortcut: /send <chat_id> <message>
+    if is_admin(user_id) and args:
+        chat_id_arg = args[0]
+        if chat_id_arg.startswith("@") or chat_id_arg.lstrip("-").isdigit():
+            text = update.message.text or ""
+            match = re.match(r"^/send(?:@\w+)?\s+", text)
+            rest = text[match.end():] if match else ""
+            parts = rest.split(None, 1)
+            if len(parts) < 2:
+                await update.message.reply_text(
+                    "Usage: `/send <chat_id> <message>`",
+                    parse_mode="Markdown"
+                )
+                return
+            chat_id_raw, message_text = parts[0], parts[1]
+            if chat_id_raw.lstrip("-").isdigit():
+                chat_id = int(chat_id_raw)
+            else:
+                chat_id = chat_id_raw
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message_text
+                )
+                await update.message.reply_text(
+                    f"Message sent to `{chat_id_raw}`.",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send message to {chat_id_raw}: {e}")
+                await update.message.reply_text(
+                    f"Failed to send message to {chat_id_raw}:\n{e}",
+                )
+            return
+
     if not args:
         usage_text = (
             f"{h_html('deposit', 'Send Command')}\n\n"
