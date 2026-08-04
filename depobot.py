@@ -21,7 +21,7 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -3083,10 +3083,41 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id = int(chat_id_raw)
             else:
                 chat_id = chat_id_raw
+
+            def _utf16_len(s: str) -> int:
+                return len(s.encode("utf-16-le")) // 2
+
             try:
+                entities = update.message.entities or ()
+                prefix = text[: len(text) - len(message_text)]
+                prefix_len = _utf16_len(prefix)
+                message_len = _utf16_len(message_text)
+                new_entities = []
+                for entity in entities:
+                    if entity.offset < prefix_len:
+                        continue
+                    end = min(
+                        entity.offset + entity.length,
+                        prefix_len + message_len,
+                    )
+                    if end <= entity.offset:
+                        continue
+                    new_entities.append(
+                        MessageEntity(
+                            type=entity.type,
+                            offset=entity.offset - prefix_len,
+                            length=end - entity.offset,
+                            url=entity.url,
+                            user=entity.user,
+                            language=entity.language,
+                            custom_emoji_id=entity.custom_emoji_id,
+                        )
+                    )
+
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=message_text
+                    text=message_text,
+                    entities=new_entities or None,
                 )
                 await update.message.reply_text(
                     f"Message sent to `{chat_id_raw}`.",
