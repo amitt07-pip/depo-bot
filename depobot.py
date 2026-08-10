@@ -667,6 +667,16 @@ WITHDRAW_QUICK_NETWORK = 15
 
 pending_withdrawals = {}
 
+
+def clear_withdrawal_state(user_id, context):
+    """Remove stale withdrawal data so the next withdrawal starts fresh."""
+    for key in list(context.user_data.keys()):
+        if key.startswith("withdraw_") and key != "withdraw_msg_id":
+            del context.user_data[key]
+    if user_id in pending_withdrawals:
+        del pending_withdrawals[user_id]
+
+
 TOKEN_ALIASES = {
     "usdt": "USDT", "tether": "USDT", "usd tether": "USDT", "ut": "USDT",
     "tether usd": "USDT", "usdt trc20": "USDT", "usdt bep20": "USDT", "usdterc20": "USDT",
@@ -3403,7 +3413,8 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.message.chat_id
-    
+    clear_withdrawal_state(user_id, context)
+
     if context.args and len(context.args) >= 1:
         address = context.args[0].strip()
         detected = detect_network_from_address(address)
@@ -3774,7 +3785,7 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     )
 
 
-async def _check_address(update: Update, address: str, detected):
+async def _check_address(update: Update, address: str, detected, message=None):
     """Fetch and display USDT/USDC balances for an address, with explorer buttons."""
     if isinstance(detected, list):
         valid = is_valid_address(address, detected[0])
@@ -3782,19 +3793,27 @@ async def _check_address(update: Update, address: str, detected):
         valid = is_valid_address(address, detected)
 
     if not valid:
-        await update.message.reply_text(
-            "\u274c *Invalid Address Format*\n\n"
-            "The address format is not valid for the detected network.\n"
-            "Please check the address and try again.",
-            parse_mode="Markdown"
-        )
+        if update.message:
+            await update.message.reply_text(
+                "\u274c *Invalid Address Format*\n\n"
+                "The address format is not valid for the detected network.\n"
+                "Please check the address and try again.",
+                parse_mode="Markdown"
+            )
         return
 
-    loading_msg = await update.message.reply_text(
+    loading_text = (
         f"{ui('search')}  {fancy('Checking Balances')}\n\n"
-        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>",
-        parse_mode="HTML"
+        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>"
     )
+    if message is None:
+        loading_msg = await update.message.reply_text(
+            loading_text,
+            parse_mode="HTML"
+        )
+    else:
+        loading_msg = message
+        await loading_msg.edit_text(loading_text, parse_mode="HTML")
 
     stablecoins = ["USDT", "USDC"]
     result_lines = [
@@ -3856,10 +3875,11 @@ async def _check_address(update: Update, address: str, detected):
             ))
 
         keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
+        keyboard.append([InlineKeyboardButton("Refresh", callback_data=f"check_refresh_{address}")])
         await loading_msg.edit_text(
             "".join(result_lines),
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
         logger.error(f"Error in check_command (address): {e}")
@@ -3867,6 +3887,27 @@ async def _check_address(update: Update, address: str, detected):
             f"{h_html('error', 'Error')}\n\nFailed to check balance: {esc(str(e))}",
             parse_mode="HTML"
         )
+
+
+async def refresh_check_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-fetch balances for an address from its existing /check message."""
+    query = update.callback_query
+    await query.answer("Refreshing...")
+
+    prefix = "check_refresh_"
+    if not query.data or not query.data.startswith(prefix):
+        return
+
+    address = query.data[len(prefix):]
+    detected = detect_network_from_address(address)
+    if not detected:
+        await query.edit_message_text(
+            "\u274c Could not detect network for refresh.",
+            parse_mode="Markdown"
+        )
+        return
+
+    await _check_address(update, address, detected, message=query.message)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5417,6 +5458,7 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     token_info = TOKENS.get(token)
     network_info = NETWORKS.get(network)
     user_id = query.from_user.id
+    clear_withdrawal_state(user_id, context)
     wallet = db.get_wallet(user_id, network)
 
     network_short = network
@@ -5486,6 +5528,8 @@ async def show_token_withdraw_networks(
         return
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
+    clear_withdrawal_state(user_id, context)
 
     token = query.data.split("_")[2]
     token_info = TOKENS.get(token)
@@ -5529,6 +5573,7 @@ async def show_token_withdraw_info(
     token_info = TOKENS.get(token)
     network_info = NETWORKS.get(network)
     user_id = query.from_user.id
+    clear_withdrawal_state(user_id, context)
     wallet = db.get_wallet(user_id, network)
 
     if not wallet:
@@ -5928,6 +5973,8 @@ async def show_withdraw_menu(
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    clear_withdrawal_state(user_id, context)
 
     try:
         await query.message.delete()
@@ -6200,6 +6247,7 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     network = query.data.split("_")[1]
     user_id = query.from_user.id
+    clear_withdrawal_state(user_id, context)
     wallet = db.get_wallet(user_id, network)
     info = NETWORKS[network]
 
@@ -6813,8 +6861,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_back_button("menu_withdraw")
         )
 
-    if user_id in pending_withdrawals:
-        del pending_withdrawals[user_id]
+    clear_withdrawal_state(user_id, context)
     return ConversationHandler.END
 
 
@@ -8120,6 +8167,9 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_explorer, pattern=r"^explorer_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(refresh_check_address, pattern=r"^check_refresh_.*")
     )
     application.add_handler(
         CallbackQueryHandler(show_help, pattern="^menu_help$")
