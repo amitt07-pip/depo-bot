@@ -2049,6 +2049,251 @@ class TransactionChecker:
             "explorer_url": tx_explorer_url("BTC", tx_hash),
         }
 
+    @staticmethod
+    async def find_deposit_tx(network: str, address: str, token: str = None) -> dict:
+        """Try to find the most recent incoming transaction for an address.
+
+        Returns a dict with ``tx_hash`` and ``explorer_url`` keys, or an empty
+        dict when no transaction can be located.
+        """
+        network_info = NETWORKS.get(network)
+        if not network_info or not address:
+            return {}
+
+        token_address = None
+        if token and token in TOKENS and network in TOKENS[token].get("networks", {}):
+            token_data = TOKENS[token]["networks"][network]
+            if not token_data.get("native"):
+                token_address = token_data.get("address")
+
+        try:
+            net_type = network_info["type"]
+            if net_type == "evm":
+                return await TransactionChecker._find_evm_deposit_tx(network, address, token_address)
+            if net_type == "solana":
+                return await TransactionChecker._find_solana_deposit_tx(address, token_address)
+            if net_type == "tron":
+                return await TransactionChecker._find_tron_deposit_tx(address, token_address)
+            if net_type == "btc":
+                return await TransactionChecker._find_btc_deposit_tx(address)
+            if net_type == "ltc":
+                return await TransactionChecker._find_ltc_deposit_tx(address)
+        except Exception as e:
+            logger.error(f"Error finding deposit tx for {network} {address}: {e}")
+
+        return {}
+
+    @staticmethod
+    async def _find_evm_deposit_tx(network: str, address: str, token_address: str = None) -> dict:
+        w3 = get_web3_with_retry(network)
+        if not w3:
+            return {}
+
+        checksum_addr = Web3.to_checksum_address(address)
+
+        if token_address:
+            try:
+                latest = w3.eth.block_number
+                from_block = max(0, latest - 200)
+                addr_topic = "0x" + address[2:].lower().rjust(64, "0")
+                logs = w3.eth.get_logs({
+                    "fromBlock": from_block,
+                    "toBlock": "latest",
+                    "address": Web3.to_checksum_address(token_address),
+                    "topics": [TransactionChecker.TRANSFER_TOPIC, None, [addr_topic]],
+                })
+                if logs:
+                    latest_log = max(
+                        logs,
+                        key=lambda log: (log.blockNumber, log.logIndex),
+                    )
+                    tx_hash = latest_log.transactionHash.hex()
+                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url(network, tx_hash)}
+            except Exception as e:
+                logger.error(f"Error finding EVM token deposit tx: {e}")
+
+        try:
+            latest = w3.eth.block_number
+            for block_num in range(latest, max(-1, latest - 50), -1):
+                block = w3.eth.get_block(block_num, full_transactions=True)
+                if not block or not block.transactions:
+                    continue
+                for tx in block.transactions:
+                    if not tx.get("to"):
+                        continue
+                    if Web3.to_checksum_address(tx["to"]) == checksum_addr and tx.get("value", 0) > 0:
+                        tx_hash = tx["hash"].hex()
+                        return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url(network, tx_hash)}
+        except Exception as e:
+            logger.error(f"Error finding EVM native deposit tx: {e}")
+
+        return {}
+
+    @staticmethod
+    async def _find_solana_deposit_tx(address: str, token_mint: str = None) -> dict:
+        rpcs = [NETWORKS["SOLANA"]["rpc"]] + NETWORKS["SOLANA"].get("rpc_fallbacks", [])
+
+        async def _rpc(method: str, params: list):
+            payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for rpc in rpcs:
+                    if not rpc:
+                        continue
+                    try:
+                        async with session.post(rpc, json=payload) as resp:
+                            data = await resp.json()
+                            if "result" in data:
+                                return data["result"]
+                    except Exception:
+                        continue
+            return None
+
+        account_pubkey = None
+        if token_mint:
+            token_accounts = await _rpc(
+                "getTokenAccountsByOwner",
+                [address, {"mint": token_mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+            )
+            if token_accounts and token_accounts.get("value"):
+                account_pubkey = token_accounts["value"][0].get("pubkey")
+
+        search_address = account_pubkey or address
+        signatures = await _rpc(
+            "getSignaturesForAddress",
+            [search_address, {"limit": 10, "commitment": "confirmed"}],
+        )
+        if not signatures:
+            return {}
+
+        for sig_info in signatures:
+            signature = sig_info.get("signature")
+            if not signature:
+                continue
+            tx_result = await _rpc(
+                "getTransaction",
+                [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+            )
+            if not tx_result:
+                continue
+
+            meta = tx_result.get("meta", {})
+            message = tx_result.get("transaction", {}).get("message", {})
+            account_keys = message.get("accountKeys", [])
+
+            try:
+                idx = account_keys.index(search_address)
+            except ValueError:
+                continue
+
+            if token_mint:
+                pre = {
+                    b.get("accountIndex"): b
+                    for b in meta.get("preTokenBalances", [])
+                    if b.get("mint") == token_mint
+                }
+                post = {
+                    b.get("accountIndex"): b
+                    for b in meta.get("postTokenBalances", [])
+                    if b.get("mint") == token_mint
+                }
+                pre_amount = Decimal(str(pre.get(idx, {}).get("uiTokenAmount", {}).get("uiAmount", 0) or 0))
+                post_amount = Decimal(str(post.get(idx, {}).get("uiTokenAmount", {}).get("uiAmount", 0) or 0))
+                if post_amount > pre_amount:
+                    return {"tx_hash": signature, "explorer_url": tx_explorer_url("SOLANA", signature)}
+            else:
+                pre_balances = meta.get("preBalances", [])
+                post_balances = meta.get("postBalances", [])
+                if idx < len(pre_balances) and idx < len(post_balances):
+                    pre_sol = Decimal(pre_balances[idx]) / Decimal(10 ** 9)
+                    post_sol = Decimal(post_balances[idx]) / Decimal(10 ** 9)
+                    if post_sol > pre_sol:
+                        return {"tx_hash": signature, "explorer_url": tx_explorer_url("SOLANA", signature)}
+
+        return {}
+
+    @staticmethod
+    async def _find_tron_deposit_tx(address: str, token_address: str = None) -> dict:
+        base = NETWORKS["TRON"]["rpc"]
+        headers = {}
+        if TRONGRID_API_KEY:
+            headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
+
+        async def _get(endpoint: str):
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    async with session.get(f"{base}{endpoint}", headers=headers) as resp:
+                        if resp.status == 200:
+                            return await resp.json()
+                except Exception as e:
+                    logger.error(f"Tron tx search error: {e}")
+            return {}
+
+        if token_address:
+            data = await _get(f"/v1/accounts/{address}/transactions/trc20?limit=20&order=blockNum,desc")
+            for tr in data.get("data", []):
+                if tr.get("to") == address and tr.get("token_address") == token_address:
+                    tx_id = tr.get("transaction_id")
+                    if tx_id:
+                        return {"tx_hash": tx_id, "explorer_url": tx_explorer_url("TRON", tx_id)}
+        else:
+            data = await _get(f"/v1/accounts/{address}/transactions?limit=20&order=blockNum,desc")
+            for tx in data.get("data", []):
+                raw = tx.get("raw_data", {})
+                contract = raw.get("contract", [{}])[0]
+                value = contract.get("parameter", {}).get("value", {})
+                to_hex = value.get("to_address")
+                amount = value.get("amount", 0)
+                if to_hex and amount:
+                    try:
+                        from tronpy.keys import to_base58check_address
+                        to_addr = to_base58check_address(to_hex)
+                        if to_addr == address:
+                            tx_id = tx.get("txID")
+                            if tx_id:
+                                return {"tx_hash": tx_id, "explorer_url": tx_explorer_url("TRON", tx_id)}
+                    except Exception:
+                        continue
+
+        return {}
+
+    @staticmethod
+    async def _find_btc_deposit_tx(address: str) -> dict:
+        url = f"https://mempool.space/api/address/{address}/txs"
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        txs = await resp.json()
+                        for tx in txs:
+                            for out in tx.get("vout", []):
+                                if out.get("scriptpubkey_address") == address and out.get("value", 0) > 0:
+                                    tx_hash = tx.get("txid")
+                                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("BTC", tx_hash)}
+        except Exception as e:
+            logger.error(f"BTC tx search error: {e}")
+        return {}
+
+    @staticmethod
+    async def _find_ltc_deposit_tx(address: str) -> dict:
+        url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/full?limit=5"
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for tx in data.get("txs", []):
+                            for out in tx.get("outputs", []):
+                                if address in out.get("addresses", []) and out.get("value", 0) > 0:
+                                    tx_hash = tx.get("hash")
+                                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
+        except Exception as e:
+            logger.error(f"LTC tx search error: {e}")
+        return {}
+
 
 class WithdrawalHandler:
     @staticmethod
@@ -7599,10 +7844,18 @@ async def check_wallet_transactions(application):
             f"{ui('money')}  <b>Balance:</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
         )
 
+        explorer_url = f"{network_info.get('explorer', '')}/address/{address}"
+        try:
+            tx_info = await TransactionChecker.find_deposit_tx(network, address, token_name)
+            if tx_info.get("tx_hash"):
+                explorer_url = tx_info["explorer_url"]
+        except Exception as e:
+            logger.error(f"Error resolving deposit explorer link: {e}")
+
         keyboard = [[
             ikb(
                 "View on Explorer", ui_name="explorer",
-                url=f"{network_info.get('explorer', '')}/address/{address}"
+                url=explorer_url
             )
         ]]
 
