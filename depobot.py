@@ -3238,6 +3238,32 @@ async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin-only commands and usage."""
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text(
+            "You are not authorized to use this command.",
+            parse_mode="Markdown"
+        )
+        return
+
+    help_text = (
+        "🛠 *Admin Commands*\n\n"
+        "*User Management*\n"
+        "• `/add` / `+add` `@username` / `<user_id>` — authorize a user (or reply to their message)\n"
+        "• `/remove` / `+remove` / `-rm` / `-remove` `@username` / `<user_id>` — remove a user (or reply)\n"
+        "• `/list` / `+list` — list authorized users\n\n"
+        "*Messaging*\n"
+        "• `/send <chat_id> <message>` — send a message through the bot (supports premium emoji)\n\n"
+        "*Help*\n"
+        "• `/admin_help` — show this message"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
 def get_friendly_error(error) -> str:
     error_str = str(error) if error else ""
     error_str_lower = error_str.lower()
@@ -8601,6 +8627,7 @@ def main():
     application.add_handler(CommandHandler("add", admin_add_command))
     application.add_handler(CommandHandler("list", admin_list_users_command))
     application.add_handler(CommandHandler("remove", admin_remove_command))
+    application.add_handler(CommandHandler("admin_help", admin_help_command))
 
     application.add_handler(
         MessageHandler(
