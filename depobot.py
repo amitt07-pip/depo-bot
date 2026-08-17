@@ -3214,7 +3214,7 @@ async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYP
     args = context.args if context.args else update.message.text.split()[1:]
     if not args:
         await update.message.reply_text(
-            "Usage: `+remove @username`, `+remove <user_id>`, or reply `+remove` to a user's message.",
+            "Usage: `+remove` / `-rm` / `-remove` @username, `<user_id>`, or reply `+remove`/`-rm` to a user's message.",
             parse_mode="Markdown"
         )
         return
@@ -3226,7 +3226,7 @@ async def admin_remove_command(update: Update, context: ContextTypes.DEFAULT_TYP
         db.remove_authorized_user(user_id=int(arg))
     else:
         await update.message.reply_text(
-            "Usage: `+remove @username`, `+remove <user_id>`, or reply `+remove` to a user's message.",
+            "Usage: `+remove` / `-rm` / `-remove` @username, `<user_id>`, or reply `+remove`/`-rm` to a user's message.",
             parse_mode="Markdown"
         )
         return
@@ -8617,6 +8617,18 @@ def main():
     application.add_handler(
         MessageHandler(
             filters.Regex(r"^\+remove(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
+            admin_remove_command
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^-rm(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
+            admin_remove_command
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"^-remove(?:\s|$)") & ~filters.UpdateType.EDITED_MESSAGE,
             admin_remove_command
         )
     )
