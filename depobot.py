@@ -404,8 +404,7 @@ TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
-notification_cooldowns = {}  # Track last notification time per token to prevent spam
-notifications_enabled = True  # Global flag to enable/disable deposit notifications
+notification_cooldowns = {}  # Track last notification time per user/token to prevent spam
 
 NETWORKS = {
     "ETH": {
@@ -1030,6 +1029,7 @@ class WalletDatabase:
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
                 current_interface INTEGER NOT NULL DEFAULT 1,
+                notifications_enabled INTEGER NOT NULL DEFAULT 1,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -1037,6 +1037,10 @@ class WalletDatabase:
         columns = [col[1] for col in cursor.fetchall()]
         if "interface_id" not in columns:
             cursor.execute("ALTER TABLE wallets ADD COLUMN interface_id INTEGER NOT NULL DEFAULT 1")
+        cursor.execute("PRAGMA table_info(user_settings)")
+        user_columns = [col[1] for col in cursor.fetchall()]
+        if "notifications_enabled" not in user_columns:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN notifications_enabled INTEGER NOT NULL DEFAULT 1")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1139,6 +1143,43 @@ class WalletDatabase:
         rows = cursor.fetchall()
         conn.close()
         return [{"network": row[0], "address": row[1]} for row in rows]
+
+    def get_all_wallets_with_users(self) -> list:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id, network, address FROM wallets"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"user_id": row[0], "network": row[1], "address": row[2]} for row in rows]
+
+    def get_user_notification_setting(self, user_id: int) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, notifications_enabled) VALUES (?, 1)",
+            (user_id,)
+        )
+        cursor.execute(
+            "SELECT notifications_enabled FROM user_settings WHERE user_id = ?",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        return bool(row[0]) if row else True
+
+    def set_user_notification_setting(self, user_id: int, enabled: bool):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO user_settings (user_id, current_interface, notifications_enabled) "
+            "VALUES (?, COALESCE((SELECT current_interface FROM user_settings WHERE user_id = ?), 1), ?)",
+            (user_id, user_id, 1 if enabled else 0)
+        )
+        conn.commit()
+        conn.close()
 
     def log_transaction(
         self,
@@ -3648,6 +3689,32 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEPOSIT_TOKEN
 
 
+def _pick_withdraw_token_for_network(user_id: int, network: str):
+    """Pick the best token/asset to withdraw on a specific network.
+
+    Returns (token_key, balance, token_address, symbol, is_native).
+    For native assets token_key is None.
+    """
+    network_info = NETWORKS.get(network, {})
+    native_asset = get_ledger_asset(network)
+    native_balance = db.get_internal_balance(user_id, native_asset)
+
+    # Prefer stablecoins if the network supports them and the user has a balance
+    for token in ["USDT", "USDC"]:
+        token_info = TOKENS.get(token, {})
+        if network in token_info.get("networks", {}):
+            token_balance = db.get_internal_balance(user_id, token)
+            if token_balance > 0:
+                network_data = token_info["networks"][network]
+                contract = network_data.get("address") if not network_data.get("native") else None
+                return token, token_balance, contract, token_info.get("symbol", token), False
+
+    if native_balance > 0:
+        return None, native_balance, None, network_info.get("symbol", native_asset), True
+
+    return None, Decimal("0"), None, network_info.get("symbol", native_asset), True
+
+
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -3704,45 +3771,19 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WITHDRAW_QUICK_NETWORK
         else:
             context.user_data["withdraw_network"] = detected
-            balances = db.get_all_internal_balances(user_id)
-            usdt_balance = balances.get("USDT", Decimal("0"))
-            usdc_balance = balances.get("USDC", Decimal("0"))
-            
             network_info = NETWORKS.get(detected, {})
             network_name = network_info.get("name", detected)
-            native_token = network_info.get("native_token", detected)
-            native_balance = balances.get(native_token, Decimal("0"))
-            
-            if usdt_balance > 0:
-                context.user_data["withdraw_token"] = "USDT"
-                token_info = TOKENS.get("USDT", {})
-                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("address")
+
+            token_key, token_balance, token_address, symbol, is_native = _pick_withdraw_token_for_network(user_id, detected)
+            context.user_data["withdraw_token"] = token_key
+            context.user_data["withdraw_contract"] = token_address
+
+            if token_balance > 0:
                 text = (
-                    "\U0001F4E4 *Quick Withdraw USDT*\n\n"
+                    f"\U0001F4E4 *Quick Withdraw {symbol}*\n\n"
                     f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
                     f"\U0001F310 Network: *{network_name}*\n"
-                    f"\U0001F4B0 Balance: `{usdt_balance:.4f} USDT`\n\n"
-                    "Enter the amount to withdraw:"
-                )
-            elif usdc_balance > 0:
-                context.user_data["withdraw_token"] = "USDC"
-                token_info = TOKENS.get("USDC", {})
-                context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(detected, {}).get("address")
-                text = (
-                    "\U0001F4E4 *Quick Withdraw USDC*\n\n"
-                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-                    f"\U0001F310 Network: *{network_name}*\n"
-                    f"\U0001F4B0 Balance: `{usdc_balance:.4f} USDC`\n\n"
-                    "Enter the amount to withdraw:"
-                )
-            elif native_balance > 0:
-                context.user_data["withdraw_token"] = native_token
-                context.user_data["withdraw_contract"] = None
-                text = (
-                    f"\U0001F4E4 *Quick Withdraw {native_token}*\n\n"
-                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-                    f"\U0001F310 Network: *{network_name}*\n"
-                    f"\U0001F4B0 Balance: `{native_balance:.6f} {native_token}`\n\n"
+                    f"\U0001F4B0 Balance: `{token_balance:.6f} {symbol}`\n\n"
                     "Enter the amount to withdraw:"
                 )
             else:
@@ -4030,8 +4071,127 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     )
 
 
-async def _check_address(update: Update, address: str, detected, message=None):
-    """Fetch and display USDT/USDC balances for an address, with explorer buttons."""
+async def _gather_address_balances(address: str, detected):
+    """Fetch all token/native balances for an address and compute USD value."""
+    stablecoins = ["USDT", "USDC"]
+    balances = []
+    total_usd = Decimal("0")
+    errors = []
+
+    networks = detected if isinstance(detected, list) else [detected]
+
+    for network in networks:
+        network_info = NETWORKS.get(network, {})
+        network_name = network_info.get("name", network)
+        net_type = network_info.get("type", "")
+        explorer_url = address_explorer_url(network, address)
+
+        if net_type in ("btc", "ltc"):
+            try:
+                balance_info = await BalanceChecker.get_balance(network, address)
+                if balance_info.get("error"):
+                    errors.append(f"{network_name}: {balance_info.get('error')}")
+                    continue
+                balance = Decimal(str(balance_info.get("balance", "0")))
+                symbol = balance_info.get("symbol", network)
+                price = await PriceFetcher.get_price(symbol)
+                usd_value = balance * price
+                total_usd += usd_value
+                balances.append({
+                    "network": network,
+                    "network_name": network_name,
+                    "token": symbol,
+                    "balance": balance,
+                    "usd_value": usd_value,
+                    "explorer_url": explorer_url,
+                })
+            except Exception as e:
+                logger.error(f"Error checking {network} balance: {e}")
+                errors.append(f"{network_name}: error")
+        else:
+            # Native balance
+            try:
+                native_symbol = network_info.get("symbol", network)
+                native_info = await BalanceChecker.get_balance(network, address)
+                if not native_info.get("error"):
+                    native_balance = Decimal(str(native_info.get("balance", "0")))
+                    native_price = await PriceFetcher.get_price(native_symbol)
+                    native_usd = native_balance * native_price
+                    total_usd += native_usd
+                    balances.append({
+                        "network": network,
+                        "network_name": network_name,
+                        "token": native_symbol,
+                        "balance": native_balance,
+                        "usd_value": native_usd,
+                        "explorer_url": explorer_url,
+                    })
+            except Exception as e:
+                logger.error(f"Error checking {network} native balance: {e}")
+
+            # Token balances
+            for token in stablecoins:
+                try:
+                    balance_info = await BalanceChecker.get_token_balance(token, network, address)
+                    if balance_info.get("error"):
+                        continue
+                    balance = Decimal(str(balance_info.get("balance", "0")))
+                    price = await PriceFetcher.get_price(token)
+                    usd_value = balance * price
+                    total_usd += usd_value
+                    balances.append({
+                        "network": network,
+                        "network_name": network_name,
+                        "token": token,
+                        "balance": balance,
+                        "usd_value": usd_value,
+                        "explorer_url": explorer_url,
+                    })
+                except Exception as e:
+                    logger.error(f"Error checking {token} on {network}: {e}")
+                    errors.append(f"{network_name} {token}: error")
+
+    return balances, total_usd, errors
+
+
+def _format_check_summary(address: str, total_usd: Decimal) -> str:
+    return (
+        f"{ui('search')}  {fancy('Address Check')}\n\n"
+        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>\n\n"
+        f"{ui('money')}  <b>Total Value:</b>  <code>${esc(f'{total_usd:,.2f}')} USD</code>"
+    )
+
+
+def _format_check_breakdown(address: str, balances: list) -> str:
+    lines = [
+        f"{ui('search')}  {fancy('Balance Breakdown')}\n\n",
+        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>\n\n",
+    ]
+    current_network = None
+    has_balance = False
+    for entry in balances:
+        if entry["balance"] <= 0:
+            continue
+        has_balance = True
+        network = entry["network"]
+        network_name = entry["network_name"]
+        if network != current_network:
+            lines.append(f"{net_icon(network)}  <b>{esc(network_name)}</b>\n")
+            current_network = network
+        token = entry["token"]
+        balance = entry["balance"]
+        usd_value = entry["usd_value"]
+        lines.append(
+            f"  {tok(token)}  <code>{esc(f'{balance:,.4f}')} {esc(token)}</code>  "
+            f"<i>(${esc(f'{usd_value:,.2f}')})</i>\n"
+        )
+    if not has_balance:
+        lines.append("\nNo balances found for this address.")
+    return "".join(lines)
+
+
+async def _check_address(update: Update, address: str, detected, message=None, breakdown: bool = False):
+    """Fetch and display an address's total USD value, with breakdown/refresh buttons."""
     if isinstance(detected, list):
         valid = is_valid_address(address, detected[0])
     else:
@@ -4060,69 +4220,35 @@ async def _check_address(update: Update, address: str, detected, message=None):
         loading_msg = message
         await loading_msg.edit_text(loading_text, parse_mode="HTML")
 
-    stablecoins = ["USDT", "USDC"]
-    result_lines = [
-        f"{ui('money')}  {fancy('USDT & USDC Balance')}\n",
-        f"{ui('address')}  <code>{esc(address[:8])}...{esc(address[-6:])}</code>\n"
-    ]
-    explorer_buttons = []
-
     try:
-        if isinstance(detected, list):
-            result_lines.append(f"\n{ui('explorer')}  <b>EVM Networks</b>\n")
-            for network in detected:
-                network_name = NETWORKS[network]["name"]
-                result_lines.append(f"\n{net_icon(network)}  <b>{esc(network_name)}</b>\n")
-                for token in stablecoins:
-                    try:
-                        balance_info = await BalanceChecker.get_token_balance(token, network, address)
-                        if balance_info.get("error"):
-                            continue
-                        balance = balance_info.get("balance", "0")
-                        result_lines.append(f"{tok(token)}  <code>{esc(balance)}</code> {esc(token)}\n")
-                    except Exception as e:
-                        logger.error(f"Error checking {token} on {network}: {e}")
-                        result_lines.append(f"{tok(token)}  {esc(token)}: Error\n")
-                explorer_buttons.append(InlineKeyboardButton(
-                    f"\U0001F310 {network_name}",
-                    url=address_explorer_url(network, address)
-                ))
+        balances, total_usd, errors = await _gather_address_balances(address, detected)
+
+        if breakdown:
+            text = _format_check_breakdown(address, balances)
+            explorer_buttons = []
+            seen_networks = set()
+            for entry in balances:
+                network = entry["network"]
+                if network not in seen_networks:
+                    seen_networks.add(network)
+                    explorer_buttons.append(InlineKeyboardButton(
+                        f"\U0001F310 {esc(entry['network_name'])}",
+                        url=entry["explorer_url"]
+                    ))
+            keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
+            keyboard.append([
+                InlineKeyboardButton("Back", callback_data=f"check_refresh_{address}"),
+                InlineKeyboardButton("Refresh", callback_data=f"check_breakdown_{address}"),
+            ])
         else:
-            network = detected
-            network_name = NETWORKS.get(network, {}).get("name", network)
-            net_type = NETWORKS.get(network, {}).get("type", "")
-            result_lines[0] = f"{ui('money')}  {fancy(network_name + ' Balance')}\n"
-            result_lines.append(f"\n{net_icon(network)}  <b>Network:</b> {esc(network_name)}\n\n")
+            text = _format_check_summary(address, total_usd)
+            keyboard = [
+                [InlineKeyboardButton("View balance breakdown", callback_data=f"check_breakdown_{address}")],
+                [InlineKeyboardButton("Refresh", callback_data=f"check_refresh_{address}")],
+            ]
 
-            if net_type in ("btc", "ltc"):
-                try:
-                    balance_info = await BalanceChecker.get_balance(network, address)
-                    balance = balance_info.get("balance", "0")
-                    symbol = balance_info.get("symbol", network)
-                    result_lines.append(f"{tok(symbol)}  <b>{esc(symbol)} Balance:</b> <code>{esc(balance)}</code>\n")
-                except Exception as e:
-                    logger.error(f"Error checking {network} balance: {e}")
-                    result_lines.append(f"{ui('error')}  Error checking balance\n")
-            else:
-                for token in stablecoins:
-                    try:
-                        balance_info = await BalanceChecker.get_token_balance(token, network, address)
-                        if balance_info.get("error"):
-                            continue
-                        balance = balance_info.get("balance", "0")
-                        result_lines.append(f"{tok(token)}  <b>{esc(token)} Balance:</b> <code>{esc(balance)}</code>\n")
-                    except Exception as e:
-                        logger.error(f"Error checking {token} on {network}: {e}")
-                        result_lines.append(f"{ui('error')}  Error checking {esc(token)} balance\n")
-            explorer_buttons.append(InlineKeyboardButton(
-                "\U0001F310 View on Explorer",
-                url=address_explorer_url(network, address)
-            ))
-
-        keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
-        keyboard.append([InlineKeyboardButton("Refresh", callback_data=f"check_refresh_{address}")])
         await loading_msg.edit_text(
-            "".join(result_lines),
+            text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -4153,6 +4279,27 @@ async def refresh_check_address(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     await _check_address(update, address, detected, message=query.message)
+
+
+async def check_breakdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the per-network balance breakdown for a /check address."""
+    query = update.callback_query
+    await query.answer()
+
+    prefix = "check_breakdown_"
+    if not query.data or not query.data.startswith(prefix):
+        return
+
+    address = query.data[len(prefix):]
+    detected = detect_network_from_address(address)
+    if not detected:
+        await query.edit_message_text(
+            "\u274c Could not detect network for breakdown.",
+            parse_mode="Markdown"
+        )
+        return
+
+    await _check_address(update, address, detected, message=query.message, breakdown=True)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4212,8 +4359,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def notification_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle deposit notifications on/off."""
-    global notifications_enabled
+    """Toggle deposit notifications on/off for the current user."""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         await update.message.reply_text(
@@ -4221,16 +4367,17 @@ async def notification_command(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
         return
-    
-    status = "\u2705 Enabled" if notifications_enabled else "\u274c Disabled"
-    
+
+    enabled = db.get_user_notification_setting(user_id)
+    status = "\u2705 Enabled" if enabled else "\u274c Disabled"
+
     keyboard = []
-    if notifications_enabled:
+    if enabled:
         keyboard.append([InlineKeyboardButton("\u23f8 Stop Notifications", callback_data="notif_stop")])
     else:
         keyboard.append([InlineKeyboardButton("\u25b6 Resume Notifications", callback_data="notif_resume")])
     keyboard.append([InlineKeyboardButton("\U0001F519 Back to Menu", callback_data="main_menu")])
-    
+
     await update.message.reply_text(
         "\U0001F514 *Notification Settings*\n\n"
         f"*Current Status:* {status}\n\n"
@@ -4242,25 +4389,24 @@ async def notification_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def toggle_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle notification toggle buttons."""
-    global notifications_enabled
     if not await check_callback_auth(update):
         return
     query = update.callback_query
     await query.answer()
-    
+
+    user_id = query.from_user.id
     action = query.data.split("_")[1]
-    
-    if action == "stop":
-        notifications_enabled = False
-        status = "\u274c Disabled"
-        keyboard = [[InlineKeyboardButton("\u25b6 Resume Notifications", callback_data="notif_resume")]]
-    else:
-        notifications_enabled = True
-        status = "\u2705 Enabled"
+    enabled = action == "resume"
+    db.set_user_notification_setting(user_id, enabled)
+
+    status = "\u2705 Enabled" if enabled else "\u274c Disabled"
+    if enabled:
         keyboard = [[InlineKeyboardButton("\u23f8 Stop Notifications", callback_data="notif_stop")]]
-    
+    else:
+        keyboard = [[InlineKeyboardButton("\u25b6 Resume Notifications", callback_data="notif_resume")]]
+
     keyboard.append([InlineKeyboardButton("\U0001F519 Back to Menu", callback_data="main_menu")])
-    
+
     await query.edit_message_text(
         "\U0001F514 *Notification Settings*\n\n"
         f"*Current Status:* {status}\n\n"
@@ -6591,45 +6737,19 @@ async def receive_withdraw_quick_network(
         return WITHDRAW_QUICK_NETWORK
     
     context.user_data["withdraw_network"] = network
-    balances = db.get_all_internal_balances(user_id)
-    usdt_balance = balances.get("USDT", Decimal("0"))
-    usdc_balance = balances.get("USDC", Decimal("0"))
-    
     network_info = NETWORKS.get(network, {})
     network_name = network_info.get("name", network)
-    native_token = network_info.get("native_token", network)
-    native_balance = balances.get(native_token, Decimal("0"))
-    
-    if usdt_balance > 0:
-        context.user_data["withdraw_token"] = "USDT"
-        token_info = TOKENS.get("USDT", {})
-        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("address")
+
+    token_key, token_balance, token_address, symbol, is_native = _pick_withdraw_token_for_network(user_id, network)
+    context.user_data["withdraw_token"] = token_key
+    context.user_data["withdraw_contract"] = token_address
+
+    if token_balance > 0:
         text = (
-            "\U0001F4E4 *Quick Withdraw USDT*\n\n"
+            f"\U0001F4E4 *Quick Withdraw {symbol}*\n\n"
             f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
             f"\U0001F310 Network: *{network_name}*\n"
-            f"\U0001F4B0 Balance: `{usdt_balance:.4f} USDT`\n\n"
-            "Enter the amount to withdraw:"
-        )
-    elif usdc_balance > 0:
-        context.user_data["withdraw_token"] = "USDC"
-        token_info = TOKENS.get("USDC", {})
-        context.user_data["withdraw_contract"] = token_info.get("networks", {}).get(network, {}).get("address")
-        text = (
-            "\U0001F4E4 *Quick Withdraw USDC*\n\n"
-            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-            f"\U0001F310 Network: *{network_name}*\n"
-            f"\U0001F4B0 Balance: `{usdc_balance:.4f} USDC`\n\n"
-            "Enter the amount to withdraw:"
-        )
-    elif native_balance > 0:
-        context.user_data["withdraw_token"] = native_token
-        context.user_data["withdraw_contract"] = None
-        text = (
-            f"\U0001F4E4 *Quick Withdraw {native_token}*\n\n"
-            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-            f"\U0001F310 Network: *{network_name}*\n"
-            f"\U0001F4B0 Balance: `{native_balance:.6f} {native_token}`\n\n"
+            f"\U0001F4B0 Balance: `{token_balance:.6f} {symbol}`\n\n"
             "Enter the amount to withdraw:"
         )
     else:
@@ -6649,7 +6769,7 @@ async def receive_withdraw_quick_network(
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ConversationHandler.END
-    
+
     keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
     msg = await context.bot.send_photo(
         chat_id=chat_id,
@@ -7786,7 +7906,7 @@ async def check_wallet_transactions(application):
     global wallet_balances_cache, wallet_cache_initialized, notification_cooldowns
     import time
 
-    wallets = db.get_all_wallets(ALLOWED_USER_ID)
+    wallets = db.get_all_wallets_with_users()
     if not wallets:
         return
 
@@ -7795,7 +7915,7 @@ async def check_wallet_transactions(application):
     is_first_run = not wallet_cache_initialized
 
     async def send_balance_notification(
-        network, address, symbol, old_balance, new_balance, token_name=None
+        user_id, network, address, symbol, old_balance, new_balance, token_name=None
     ):
         old_val = Decimal(old_balance) if old_balance else Decimal("0")
         new_val = Decimal(new_balance) if new_balance else Decimal("0")
@@ -7824,13 +7944,13 @@ async def check_wallet_transactions(application):
         # Only send notifications for deposits, not withdrawals
         if diff <= 0:
             return
-        
-        # Check if notifications are enabled
-        if not notifications_enabled:
+
+        # Check if this user has notifications enabled
+        if not db.get_user_notification_setting(user_id):
             return
-        
-        # Cooldown: Don't send notification for same token/network within 5 minutes
-        cooldown_key = f"{network}:{token_name or 'NATIVE'}"
+
+        # Cooldown: Don't send notification for same user/token/network within 5 minutes
+        cooldown_key = f"{user_id}:{network}:{address}:{token_name or 'NATIVE'}"
         current_time = time.time()
         last_notification = notification_cooldowns.get(cooldown_key, 0)
         if current_time - last_notification < 300:  # 5 minute cooldown
@@ -7861,7 +7981,7 @@ async def check_wallet_transactions(application):
 
         try:
             await application.bot.send_message(
-                chat_id=ALLOWED_USER_ID,
+                chat_id=user_id,
                 text=msg,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard)
@@ -7877,17 +7997,18 @@ async def check_wallet_transactions(application):
             logger.error(f"Error sending transaction notification: {e}")
 
     for wallet in wallets:
+        user_id = wallet["user_id"]
         network = wallet["network"]
         address = wallet["address"]
+        native_cache_key = f"{user_id}:{network}:{address}:NATIVE"
 
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
             current_balance = balance_info.get("balance", "0")
             symbol = balance_info.get("symbol", network)
-            cache_key = f"{network}:{address}:NATIVE"
 
-            if cache_key in wallet_balances_cache and not is_first_run:
-                old_balance = wallet_balances_cache[cache_key]
+            if native_cache_key in wallet_balances_cache and not is_first_run:
+                old_balance = wallet_balances_cache[native_cache_key]
                 old_val = Decimal(old_balance) if old_balance else Decimal("0")
                 new_val = Decimal(current_balance) if current_balance else Decimal("0")
                 diff = new_val - old_val
@@ -7895,15 +8016,15 @@ async def check_wallet_transactions(application):
                 if diff > Decimal("0.0001"):
                     ledger_asset = get_ledger_asset(network)
                     db.credit_balance(
-                        ALLOWED_USER_ID, ledger_asset, diff, "deposit", network
+                        user_id, ledger_asset, diff, "deposit", network
                     )
-                    logger.info(f"Credited {diff} {ledger_asset} to internal balance")
+                    logger.info(f"Credited {diff} {ledger_asset} to internal balance for user {user_id}")
 
                 await send_balance_notification(
-                    network, address, symbol, old_balance, current_balance
+                    user_id, network, address, symbol, old_balance, current_balance
                 )
 
-            wallet_balances_cache[cache_key] = current_balance
+            wallet_balances_cache[native_cache_key] = current_balance
 
         except Exception as e:
             logger.error(f"Error checking native balance for {network}: {e}")
@@ -7920,6 +8041,8 @@ async def check_wallet_transactions(application):
             if network_token.get("native"):
                 continue
 
+            token_cache_key = f"{user_id}:{network}:{address}:{token_key}"
+
             try:
                 token_balance_info = await BalanceChecker.get_token_balance(
                     token_key, network, address
@@ -7930,7 +8053,6 @@ async def check_wallet_transactions(application):
 
                 current_token_balance = token_balance_info.get("balance", "0")
                 token_symbol = token_balance_info.get("symbol", token_key)
-                token_cache_key = f"{network}:{address}:{token_key}"
 
                 if token_cache_key in wallet_balances_cache and not is_first_run:
                     old_token_balance = wallet_balances_cache[token_cache_key]
@@ -7944,12 +8066,12 @@ async def check_wallet_transactions(application):
                     if diff > Decimal("0.0001"):
                         ledger_asset = get_ledger_asset(network, token_key)
                         db.credit_balance(
-                            ALLOWED_USER_ID, ledger_asset, diff, "deposit", network
+                            user_id, ledger_asset, diff, "deposit", network
                         )
-                        logger.info(f"Credited {diff} {ledger_asset} to internal balance")
+                        logger.info(f"Credited {diff} {ledger_asset} to internal balance for user {user_id}")
 
                     await send_balance_notification(
-                        network, address, token_symbol,
+                        user_id, network, address, token_symbol,
                         old_token_balance, current_token_balance, token_key
                     )
 
@@ -7957,7 +8079,7 @@ async def check_wallet_transactions(application):
 
             except Exception as e:
                 logger.error(f"Error checking {token_key} balance on {network}: {e}")
-            
+
             # Add delay between token balance checks to avoid rate limiting
             await asyncio.sleep(3)
 
@@ -8420,6 +8542,9 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(show_explorer, pattern=r"^explorer_[A-Z]+$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(check_breakdown, pattern=r"^check_breakdown_.*")
     )
     application.add_handler(
         CallbackQueryHandler(refresh_check_address, pattern=r"^check_refresh_.*")
