@@ -8171,17 +8171,16 @@ async def check_wallet_transactions(application):
         ]]
 
         try:
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=msg,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
             if user_id == ALLOWED_USER_ID and ALLOWED_CHAT_ID:
-                # Owner notifications go to the configured group chat
+                # Also send owner notifications to the configured group chat
                 await application.bot.send_message(
                     chat_id=ALLOWED_CHAT_ID,
-                    text=msg,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                await application.bot.send_message(
-                    chat_id=user_id,
                     text=msg,
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
