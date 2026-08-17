@@ -1567,19 +1567,40 @@ class BalanceChecker:
     @staticmethod
     async def get_ltc_balance(address: str) -> dict:
         import aiohttp
+        endpoints = [
+            f"https://litecoinspace.org/api/address/{address}",
+            f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/balance",
+        ]
         try:
             async with aiohttp.ClientSession() as session:
-                url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/balance"
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        balance_satoshi = data.get("balance", 0)
-                        return {
-                            "balance": str(Decimal(balance_satoshi) / Decimal(10 ** 8)),
-                            "symbol": "LTC",
-                            "raw_balance": balance_satoshi
-                        }
-                    return {"balance": "0", "symbol": "LTC", "error": "API error"}
+                for url in endpoints:
+                    try:
+                        async with session.get(
+                            url,
+                            timeout=aiohttp.ClientTimeout(total=15)
+                        ) as resp:
+                            if resp.status != 200:
+                                continue
+                            data = await resp.json()
+                            if isinstance(data, dict) and "chain_stats" in data:
+                                chain = data.get("chain_stats", {})
+                                balance_sat = chain.get("funded_txo_sum", 0) - chain.get("spent_txo_sum", 0)
+                                return {
+                                    "balance": str(Decimal(balance_sat) / Decimal(10 ** 8)),
+                                    "symbol": "LTC",
+                                    "raw_balance": balance_sat
+                                }
+                            if isinstance(data, dict) and "balance" in data:
+                                balance_satoshi = data.get("balance", 0)
+                                return {
+                                    "balance": str(Decimal(balance_satoshi) / Decimal(10 ** 8)),
+                                    "symbol": "LTC",
+                                    "raw_balance": balance_satoshi
+                                }
+                    except Exception as e:
+                        logger.warning(f"LTC balance endpoint {url} failed: {e}")
+                        continue
+            return {"balance": "0", "symbol": "LTC", "error": "All LTC balance endpoints failed"}
         except Exception as e:
             logger.error(f"Error getting LTC balance: {e}")
             return {"balance": "0", "symbol": "LTC", "error": str(e)}
@@ -2031,38 +2052,39 @@ class TransactionChecker:
 
     @staticmethod
     async def get_ltc_tx(tx_hash: str) -> dict:
-        url = f"https://api.blockchair.com/litecoin/dashboards/transaction/{tx_hash}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return {"error": "not_found"}
-                data = await resp.json()
-
-        data_field = data.get("data") if isinstance(data, dict) else None
-        tx_data = data_field.get(tx_hash) if isinstance(data_field, dict) else None
-        if not isinstance(tx_data, dict):
+        import aiohttp
+        url = f"https://litecoinspace.org/api/tx/{tx_hash}"
+        timeout = aiohttp.ClientTimeout(total=15)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return {"error": "not_found"}
+                    tx_data = await resp.json()
+        except Exception as e:
+            logger.error(f"Error getting LTC tx: {e}")
             return {"error": "not_found"}
 
-        transaction = tx_data.get("transaction", {})
-        inputs = tx_data.get("inputs", [])
-        outputs = tx_data.get("outputs", [])
+        if not tx_data or not isinstance(tx_data, dict):
+            return {"error": "not_found"}
 
-        sender = inputs[0].get("recipient") if inputs else None
-        receiver = outputs[0].get("recipient") if outputs else None
+        vin = tx_data.get("vin", [])
+        vout = tx_data.get("vout", [])
+
+        sender = None
+        if vin:
+            prevout = vin[0].get("prevout") or {}
+            sender = prevout.get("scriptpubkey_address")
+
+        receiver = None
         amount = None
-        if outputs:
-            amount = str(Decimal(outputs[0].get("value", 0)) / Decimal(10 ** 8))
+        if vout:
+            primary = max(vout, key=lambda o: o.get("value", 0))
+            receiver = primary.get("scriptpubkey_address")
+            amount = str(Decimal(primary.get("value", 0)) / Decimal(10 ** 8))
 
-        timestamp = None
-        time_str = transaction.get("time")
-        if time_str:
-            try:
-                dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(
-                    tzinfo=timezone.utc
-                )
-                timestamp = int(dt.timestamp())
-            except Exception:
-                timestamp = None
+        status = tx_data.get("status", {})
+        timestamp = status.get("block_time")
 
         return {
             "network": "LTC",
@@ -2072,7 +2094,7 @@ class TransactionChecker:
             "amount": amount,
             "asset": "LTC",
             "timestamp": timestamp,
-            "status": "Success" if transaction.get("block_id", -1) > 0 else "Pending",
+            "status": "Success" if status.get("confirmed") else "Pending",
             "explorer_url": tx_explorer_url("LTC", tx_hash),
         }
 
@@ -2348,18 +2370,34 @@ class TransactionChecker:
 
     @staticmethod
     async def _find_ltc_deposit_tx(address: str) -> dict:
-        url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/full?limit=5"
-        timeout = aiohttp.ClientTimeout(total=10)
+        endpoints = [
+            f"https://litecoinspace.org/api/address/{address}/txs",
+            f"https://api.blockcypher.com/v1/ltc/main/addrs/{address}/full?limit=5",
+        ]
+        timeout = aiohttp.ClientTimeout(total=15)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for tx in data.get("txs", []):
-                            for out in tx.get("outputs", []):
-                                if address in out.get("addresses", []) and out.get("value", 0) > 0:
-                                    tx_hash = tx.get("hash")
-                                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
+                for url in endpoints:
+                    try:
+                        async with session.get(url) as resp:
+                            if resp.status != 200:
+                                continue
+                            data = await resp.json()
+                            if isinstance(data, list):
+                                for tx in data:
+                                    for out in tx.get("vout", []):
+                                        if out.get("scriptpubkey_address") == address and out.get("value", 0) > 0:
+                                            tx_hash = tx.get("txid")
+                                            return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
+                            elif isinstance(data, dict):
+                                for tx in data.get("txs", []):
+                                    for out in tx.get("outputs", []):
+                                        if address in out.get("addresses", []) and out.get("value", 0) > 0:
+                                            tx_hash = tx.get("hash")
+                                            return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
+                    except Exception as e:
+                        logger.warning(f"LTC deposit tx endpoint {url} failed: {e}")
+                        continue
         except Exception as e:
             logger.error(f"LTC tx search error: {e}")
         return {}
