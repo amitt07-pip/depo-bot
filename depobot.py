@@ -2942,13 +2942,20 @@ class WithdrawalHandler:
                 return {"success": False, "error": "No transaction data to sign"}
 
             try:
+                from ecdsa.util import sigdecode_der
                 sk = SigningKey.from_string(bytes.fromhex(private_key), curve=SECP256k1)
                 verifying_key = sk.get_verifying_key()
                 public_key = b'\x04' + verifying_key.to_string()
                 signatures = []
+                curve_order = SECP256k1.order
                 for sign_hash_hex in tosign:
                     sign_hash = bytes.fromhex(sign_hash_hex)
-                    sig = sk.sign_digest(sign_hash, sigencode=sigencode_der, hashfunc=hashlib.sha256)
+                    sig = sk.sign_digest(sign_hash, sigencode=sigencode_der)
+                    # Enforce low-S for Bitcoin/Litecoin transaction validity
+                    r, s = sigdecode_der(sig, curve_order)
+                    if s > curve_order // 2:
+                        s = curve_order - s
+                    sig = sigencode_der(r, s)
                     signatures.append(sig.hex())
             except Exception as e:
                 return {"success": False, "error": f"Transaction signing error: {e}"}
