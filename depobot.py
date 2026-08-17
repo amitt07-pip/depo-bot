@@ -405,6 +405,7 @@ TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
 notification_cooldowns = {}  # Track last notification time per user/token to prevent spam
+last_notified_balances = {}  # Track highest balance already notified per wallet/token
 
 NETWORKS = {
     "ETH": {
@@ -6278,22 +6279,31 @@ async def do_check_balance_all(update, context, chat_id: int, user_id: int):
     )
 
     text = "*Your Balances*\n\n"
-    
     text += "*On-Chain:*\n"
     for wallet in wallets:
         net = wallet["network"]
         info = NETWORKS[net]
+        text += f"\n{info['icon']} *{info['name']}*\n"
         balance_info = await BalanceChecker.get_balance(net, wallet["address"])
-        balance_str = balance_info.get("balance", "Error")
-        symbol = balance_info.get("symbol", info["symbol"])
-        text += f"{info['icon']} {info['name']}: `{balance_str} {symbol}`\n"
-    
-    internal_balances = db.get_all_internal_balances(user_id)
-    if internal_balances:
-        text += "\n*Internal Ledger:*\n"
-        for asset, balance in internal_balances.items():
-            if balance > Decimal("0"):
-                text += f"\U0001F4B0 {asset}: `{balance:.6f}`\n"
+        if balance_info.get("error"):
+            text += f"{info['icon']} Native: `Error`\n"
+        else:
+            balance_str = balance_info.get("balance", "Error")
+            symbol = balance_info.get("symbol", info["symbol"])
+            text += f"{info['icon']} Native: `{balance_str} {symbol}`\n"
+        for token_key, token_info in TOKENS.items():
+            if net in token_info.get("networks", {}):
+                if token_info["networks"][net].get("native"):
+                    continue
+                try:
+                    result = await BalanceChecker.get_token_balance(
+                        token_key, net, wallet["address"]
+                    )
+                    if result and "balance" in result and not result.get("error"):
+                        bal_str = result["balance"]
+                        text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
+                except Exception:
+                    pass
 
     keyboard = [
         [InlineKeyboardButton("Check Another", callback_data="menu_balance")],
@@ -6335,8 +6345,12 @@ async def do_check_balance_network(update, context, chat_id: int, user_id: int, 
     )
 
     balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-    native_balance = balance_info.get("balance", "Error")
-    native_symbol = balance_info.get("symbol", info["symbol"])
+    if balance_info.get("error"):
+        native_balance = "Error"
+        native_symbol = info["symbol"]
+    else:
+        native_balance = balance_info.get("balance", "Error")
+        native_symbol = balance_info.get("symbol", info["symbol"])
 
     text = f"*{info['name']} Balances*\n\n"
     text += f"*On-Chain:*\n"
@@ -6357,20 +6371,7 @@ async def do_check_balance_network(update, context, chat_id: int, user_id: int, 
             except Exception:
                 pass
 
-    ledger_asset = get_ledger_asset(network)
-    internal_native = db.get_internal_balance(user_id, ledger_asset)
-    
-    text += f"\n*Internal Ledger:*\n"
-    text += f"\U0001F4B0 {ledger_asset}: `{internal_native:.6f}`\n"
-    
-    for token_key in ["USDT", "USDC"]:
-        token_info = TOKENS.get(token_key, {})
-        if network in token_info.get("networks", {}):
-            net_info = token_info["networks"][network]
-            if not net_info.get("native"):
-                token_ledger_asset = get_ledger_asset(network, token_key)
-                internal_token = db.get_internal_balance(user_id, token_ledger_asset)
-                text += f"\U0001F4B0 {token_ledger_asset}: `{internal_token:.6f}`\n"
+
 
     text += f"\n*Address:*\n`{wallet['address']}`"
 
@@ -6413,24 +6414,31 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         text = "*Your Balances*\n\n"
-        
-        # Show on-chain native balances
         text += "*On-Chain:*\n"
         for wallet in wallets:
             net = wallet["network"]
             info = NETWORKS[net]
+            text += f"\n{info['icon']} *{info['name']}*\n"
             balance_info = await BalanceChecker.get_balance(net, wallet["address"])
-            balance_str = balance_info.get("balance", "Error")
-            symbol = balance_info.get("symbol", info["symbol"])
-            text += f"{info['icon']} {info['name']}: `{balance_str} {symbol}`\n"
-        
-        # Show internal ledger balances (including USDT/USDC)
-        internal_balances = db.get_all_internal_balances(user_id)
-        if internal_balances:
-            text += "\n*Internal Ledger:*\n"
-            for asset, balance in internal_balances.items():
-                if balance > Decimal("0"):
-                    text += f"\U0001F4B0 {asset}: `{balance:.6f}`\n"
+            if balance_info.get("error"):
+                text += f"{info['icon']} Native: `Error`\n"
+            else:
+                balance_str = balance_info.get("balance", "Error")
+                symbol = balance_info.get("symbol", info["symbol"])
+                text += f"{info['icon']} Native: `{balance_str} {symbol}`\n"
+            for token_key, token_info in TOKENS.items():
+                if net in token_info.get("networks", {}):
+                    if token_info["networks"][net].get("native"):
+                        continue
+                    try:
+                        result = await BalanceChecker.get_token_balance(
+                            token_key, net, wallet["address"]
+                        )
+                        if result and "balance" in result and not result.get("error"):
+                            bal_str = result["balance"]
+                            text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
+                    except Exception:
+                        pass
 
         keyboard = [
             [InlineKeyboardButton("Refresh", callback_data="balance_all")],
@@ -6462,8 +6470,12 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-        native_balance = balance_info.get("balance", "Error")
-        native_symbol = balance_info.get("symbol", info["symbol"])
+        if balance_info.get("error"):
+            native_balance = "Error"
+            native_symbol = info["symbol"]
+        else:
+            native_balance = balance_info.get("balance", "Error")
+            native_symbol = balance_info.get("symbol", info["symbol"])
 
         text = f"*{info['name']} Balances*\n\n"
         text += f"*On-Chain:*\n"
@@ -6484,22 +6496,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-        # Show internal ledger balances for this network
-        ledger_asset = get_ledger_asset(network)
-        internal_native = db.get_internal_balance(user_id, ledger_asset)
-        
-        text += f"\n*Internal Ledger:*\n"
-        text += f"\U0001F4B0 {ledger_asset}: `{internal_native:.6f}`\n"
-        
-        # Check for USDT/USDC internal balances on this network
-        for token_key in ["USDT", "USDC"]:
-            token_info = TOKENS.get(token_key, {})
-            if network in token_info.get("networks", {}):
-                net_info = token_info["networks"][network]
-                if not net_info.get("native"):
-                    token_ledger_asset = get_ledger_asset(network, token_key)
-                    internal_token = db.get_internal_balance(user_id, token_ledger_asset)
-                    text += f"\U0001F4B0 {token_ledger_asset}: `{internal_token:.6f}`\n"
+
 
         text += f"\n*Address:*\n`{wallet['address']}`"
 
@@ -8094,7 +8091,7 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
 
 
 async def check_wallet_transactions(application):
-    global wallet_balances_cache, wallet_cache_initialized, notification_cooldowns
+    global wallet_balances_cache, wallet_cache_initialized, notification_cooldowns, last_notified_balances
     import time
 
     wallets = db.get_all_wallets_with_users()
@@ -8108,8 +8105,8 @@ async def check_wallet_transactions(application):
     async def send_balance_notification(
         user_id, network, address, symbol, old_balance, new_balance, token_name=None
     ):
-        old_val = Decimal(old_balance) if old_balance else Decimal("0")
-        new_val = Decimal(new_balance) if new_balance else Decimal("0")
+        old_val = Decimal(old_balance) if old_balance is not None else Decimal("0")
+        new_val = Decimal(new_balance) if new_balance is not None else Decimal("0")
 
         if new_val == old_val:
             return
@@ -8125,28 +8122,36 @@ async def check_wallet_transactions(application):
         elif network == "POLYGON":
             network_short = "MATIC"
 
-        # Filter out small balance changes (noise from RPC inconsistencies)
-        # Use higher threshold for stablecoins due to Polygon RPC fluctuations
         is_native = token_name is None
         min_threshold = Decimal("0.0001") if is_native else Decimal("0.5")
         if abs(diff) < min_threshold:
             return
 
-        # Only send notifications for deposits, not withdrawals
+        cooldown_key = f"{user_id}:{network}:{address}:{token_name or 'NATIVE'}"
+
         if diff <= 0:
+            # Withdrawal or balance drop; update baseline so future deposits count
+            if cooldown_key in last_notified_balances:
+                if new_val < last_notified_balances[cooldown_key]:
+                    last_notified_balances[cooldown_key] = new_val
             return
 
         # Check if this user has notifications enabled
         if not db.get_user_notification_setting(user_id):
             return
 
+        # Only notify on a net new deposit above what we already reported
+        last_val = last_notified_balances.get(cooldown_key, old_val)
+        if new_val <= last_val + min_threshold:
+            return
+
         # Cooldown: Don't send notification for same user/token/network within 5 minutes
-        cooldown_key = f"{user_id}:{network}:{address}:{token_name or 'NATIVE'}"
         current_time = time.time()
         last_notification = notification_cooldowns.get(cooldown_key, 0)
         if current_time - last_notification < 300:  # 5 minute cooldown
             return
         notification_cooldowns[cooldown_key] = current_time
+        last_notified_balances[cooldown_key] = new_val
 
         msg = (
             f"{h_html('deposit', 'Deposit Received')}\n\n"
@@ -8196,11 +8201,17 @@ async def check_wallet_transactions(application):
 
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
+            if balance_info.get("error"):
+                logger.warning(
+                    f"Balance check error for {network} {address}: {balance_info.get('error')}"
+                )
+                continue
+
             current_balance = balance_info.get("balance", "0")
             symbol = balance_info.get("symbol", network)
 
-            if native_cache_key in wallet_balances_cache and not is_first_run:
-                old_balance = wallet_balances_cache[native_cache_key]
+            old_balance = wallet_balances_cache.get(native_cache_key)
+            if old_balance is not None and not is_first_run:
                 old_val = Decimal(old_balance) if old_balance else Decimal("0")
                 new_val = Decimal(current_balance) if current_balance else Decimal("0")
                 diff = new_val - old_val
