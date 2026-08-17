@@ -2955,7 +2955,7 @@ class WithdrawalHandler:
                     r, s = sigdecode_der(sig, curve_order)
                     if s > curve_order // 2:
                         s = curve_order - s
-                    sig = sigencode_der(r, s)
+                    sig = sigencode_der(r, s, curve_order)
                     signatures.append(sig.hex())
             except Exception as e:
                 return {"success": False, "error": f"Transaction signing error: {e}"}
