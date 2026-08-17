@@ -1386,6 +1386,39 @@ class CryptoUtils:
 
 class WalletGenerator:
     @staticmethod
+    def _uncompressed_public_key(private_key_hex: str) -> bytes:
+        from ecdsa import SigningKey, SECP256k1
+        sk = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
+        vk = sk.get_verifying_key()
+        return b'\x04' + vk.to_string()
+
+    @staticmethod
+    def _p2pkh_address(public_key: bytes, version_byte: bytes) -> str:
+        import hashlib
+        from Crypto.Hash import RIPEMD160
+        sha256_hash = hashlib.sha256(public_key).digest()
+        ripemd160 = RIPEMD160.new()
+        ripemd160.update(sha256_hash)
+        pubkey_hash = ripemd160.digest()
+        versioned_payload = version_byte + pubkey_hash
+        checksum = hashlib.sha256(
+            hashlib.sha256(versioned_payload).digest()
+        ).digest()[:4]
+        address_bytes = versioned_payload + checksum
+        alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+        num = int.from_bytes(address_bytes, 'big')
+        address = ''
+        while num:
+            num, rem = divmod(num, 58)
+            address = alphabet[rem] + address
+        for byte in address_bytes:
+            if byte == 0:
+                address = '1' + address
+            else:
+                break
+        return address
+
+    @staticmethod
     def generate_evm_wallet() -> tuple:
         Account.enable_unaudited_hdwallet_features()
         account = Account.create()
@@ -1406,36 +1439,29 @@ class WalletGenerator:
 
     @staticmethod
     def generate_ltc_wallet() -> tuple:
-        import hashlib
         import secrets
-        from Crypto.Hash import RIPEMD160
         private_key = secrets.token_bytes(32)
-        from ecdsa import SigningKey, SECP256k1
-        sk = SigningKey.from_string(private_key, curve=SECP256k1)
-        vk = sk.get_verifying_key()
-        public_key = b'\x04' + vk.to_string()
-        sha256_hash = hashlib.sha256(public_key).digest()
-        ripemd160 = RIPEMD160.new()
-        ripemd160.update(sha256_hash)
-        pubkey_hash = ripemd160.digest()
-        version = b'\x30'
-        versioned_payload = version + pubkey_hash
-        checksum = hashlib.sha256(
-            hashlib.sha256(versioned_payload).digest()
-        ).digest()[:4]
-        address_bytes = versioned_payload + checksum
-        alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-        num = int.from_bytes(address_bytes, 'big')
-        address = ''
-        while num:
-            num, rem = divmod(num, 58)
-            address = alphabet[rem] + address
-        for byte in address_bytes:
-            if byte == 0:
-                address = '1' + address
-            else:
-                break
+        public_key = WalletGenerator._uncompressed_public_key(private_key.hex())
+        address = WalletGenerator._p2pkh_address(public_key, b'\x30')
         return address, private_key.hex()
+
+    @staticmethod
+    def generate_btc_wallet() -> tuple:
+        import secrets
+        private_key = secrets.token_bytes(32)
+        public_key = WalletGenerator._uncompressed_public_key(private_key.hex())
+        address = WalletGenerator._p2pkh_address(public_key, b'\x00')
+        return address, private_key.hex()
+
+    @staticmethod
+    def ltc_address_from_private_key(private_key_hex: str) -> str:
+        public_key = WalletGenerator._uncompressed_public_key(private_key_hex)
+        return WalletGenerator._p2pkh_address(public_key, b'\x30')
+
+    @staticmethod
+    def btc_address_from_private_key(private_key_hex: str) -> str:
+        public_key = WalletGenerator._uncompressed_public_key(private_key_hex)
+        return WalletGenerator._p2pkh_address(public_key, b'\x00')
 
     @staticmethod
     def generate_wallet(network: str) -> tuple:
@@ -1451,6 +1477,8 @@ class WalletGenerator:
             return WalletGenerator.generate_tron_wallet()
         elif network_info["type"] == "ltc":
             return WalletGenerator.generate_ltc_wallet()
+        elif network_info["type"] == "btc":
+            return WalletGenerator.generate_btc_wallet()
         else:
             raise ValueError(f"Unknown network type: {network_info['type']}")
 
@@ -2859,6 +2887,100 @@ class WithdrawalHandler:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    async def _withdraw_blockcypher(
+        coin_symbol: str,
+        from_address_func,
+        private_key: str,
+        to_address: str,
+        amount: str,
+        explorer_url_tpl: str
+    ) -> dict:
+        """Create, sign and broadcast a UTXO transaction via BlockCypher."""
+        from ecdsa import SigningKey, SECP256k1
+        from ecdsa.util import sigencode_der
+
+        from_address = from_address_func(private_key)
+        try:
+            value = int(Decimal(amount) * Decimal("100000000"))
+            if value <= 0:
+                return {"success": False, "error": "Amount must be positive"}
+        except Exception as e:
+            return {"success": False, "error": f"Invalid amount: {e}"}
+
+        new_tx = {
+            "inputs": [{"addresses": [from_address]}],
+            "outputs": [{"addresses": [to_address], "value": value}],
+        }
+
+        async with aiohttp.ClientSession() as session:
+            new_url = f"https://api.blockcypher.com/v1/{coin_symbol}/main/txs/new"
+            try:
+                async with session.post(new_url, json=new_tx) as resp:
+                    tx_data = await resp.json()
+                    if resp.status != 200:
+                        error_text = tx_data.get("error") if isinstance(tx_data, dict) else await resp.text()
+                        return {"success": False, "error": f"BlockCypher new tx error: {error_text}"}
+            except Exception as e:
+                return {"success": False, "error": f"BlockCypher new tx request failed: {e}"}
+
+            tosign = tx_data.get("tosign", [])
+            if not tosign:
+                return {"success": False, "error": "No transaction data to sign"}
+
+            try:
+                sk = SigningKey.from_string(bytes.fromhex(private_key), curve=SECP256k1)
+                verifying_key = sk.get_verifying_key()
+                public_key = b'\x04' + verifying_key.to_string()
+                signatures = []
+                for sign_hash_hex in tosign:
+                    sign_hash = bytes.fromhex(sign_hash_hex)
+                    sig = sk.sign_digest(sign_hash, sigencode=sigencode_der, hashfunc=hashlib.sha256)
+                    signatures.append(sig.hex())
+            except Exception as e:
+                return {"success": False, "error": f"Transaction signing error: {e}"}
+
+            tx_data["signatures"] = signatures
+            tx_data["pubkeys"] = [public_key.hex()]
+
+            send_url = f"https://api.blockcypher.com/v1/{coin_symbol}/main/txs/send"
+            try:
+                async with session.post(send_url, json=tx_data) as resp:
+                    send_result = await resp.json()
+                    if resp.status != 200:
+                        error_text = send_result.get("error") if isinstance(send_result, dict) else await resp.text()
+                        return {"success": False, "error": f"BlockCypher send tx error: {error_text}"}
+            except Exception as e:
+                return {"success": False, "error": f"BlockCypher send tx request failed: {e}"}
+
+            tx_hash = send_result.get("tx", {}).get("hash")
+            if not tx_hash:
+                return {"success": False, "error": "No transaction hash returned"}
+
+            return {
+                "success": True,
+                "tx_hash": tx_hash,
+                "explorer_url": explorer_url_tpl.format(tx_hash=tx_hash),
+            }
+
+    @staticmethod
+    async def withdraw_ltc(private_key: str, to_address: str, amount: str) -> dict:
+        return await WithdrawalHandler._withdraw_blockcypher(
+            "ltc",
+            WalletGenerator.ltc_address_from_private_key,
+            private_key, to_address, amount,
+            "https://blockchair.com/litecoin/transaction/{tx_hash}"
+        )
+
+    @staticmethod
+    async def withdraw_btc(private_key: str, to_address: str, amount: str) -> dict:
+        return await WithdrawalHandler._withdraw_blockcypher(
+            "btc",
+            WalletGenerator.btc_address_from_private_key,
+            private_key, to_address, amount,
+            "https://mempool.space/tx/{tx_hash}"
+        )
+
+    @staticmethod
     async def withdraw(
         network: str,
         private_key: str,
@@ -2884,8 +3006,10 @@ class WithdrawalHandler:
                 private_key, to_address, amount
             )
         elif network_info["type"] == "ltc":
-            return {"success": False, "error": "LTC withdrawals are not yet supported. Please contact support."}
-        
+            return await WithdrawalHandler.withdraw_ltc(private_key, to_address, amount)
+        elif network_info["type"] == "btc":
+            return await WithdrawalHandler.withdraw_btc(private_key, to_address, amount)
+
         return {"success": False, "error": f"Unsupported network type: {network_info['type']}"}
 
 
@@ -4207,10 +4331,13 @@ async def _check_address(update: Update, address: str, detected, message=None, b
             )
         return
 
-    loading_text = (
-        f"{ui('search')}  {fancy('Checking Balances')}\n\n"
-        f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>"
-    )
+    if breakdown:
+        loading_text = "<b>Please wait...</b>"
+    else:
+        loading_text = (
+            f"{ui('search')}  {fancy('Checking Balances')}\n\n"
+            f"<code>{esc(address[:8])}...{esc(address[-6:])}</code>"
+        )
     if message is None:
         loading_msg = await update.message.reply_text(
             loading_text,
@@ -6945,6 +7072,16 @@ async def receive_withdraw_address(
             )
             context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_ADDRESS
+    elif info["type"] in ("ltc", "btc"):
+        if not is_valid_btc_like_address(address, info["type"]):
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\u274c *Invalid Address*\n\n"
+                f"Please enter a valid {info['name']} address",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_ADDRESS
 
     context.user_data["withdraw_address"] = address
 
@@ -7886,6 +8023,25 @@ async def handle_text_commands(
 
     if text in ["/menu", "/start", "menu", "home"]:
         await start(update, context)
+
+def is_valid_btc_like_address(address: str, network_type: str) -> bool:
+    """Basic validation for legacy/segwit Bitcoin-like addresses."""
+    if not address:
+        return False
+    lower = address.lower()
+    if network_type == "btc":
+        if lower.startswith("bc1") and len(address) >= 39:
+            return True
+        if address[0] in ("1", "3") and 25 <= len(address) <= 35:
+            return True
+        return False
+    if network_type == "ltc":
+        if lower.startswith("ltc1") and len(address) >= 39:
+            return True
+        if address[0] in ("L", "M") and 25 <= len(address) <= 35:
+            return True
+        return False
+    return False
 
 
 def get_ledger_asset(network: str, token_key: str = None) -> str:
