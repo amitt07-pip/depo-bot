@@ -2916,10 +2916,24 @@ class WithdrawalHandler:
             new_url = f"https://api.blockcypher.com/v1/{coin_symbol}/main/txs/new"
             try:
                 async with session.post(new_url, json=new_tx) as resp:
-                    tx_data = await resp.json()
-                    if resp.status != 200:
-                        error_text = tx_data.get("error") if isinstance(tx_data, dict) else await resp.text()
-                        return {"success": False, "error": f"BlockCypher new tx error: {error_text}"}
+                    text = await resp.text()
+                    try:
+                        tx_data = json.loads(text) if text else None
+                    except Exception:
+                        tx_data = None
+                    if not (200 <= resp.status < 300):
+                        details = ""
+                        if isinstance(tx_data, dict):
+                            if "error" in tx_data:
+                                details = tx_data["error"]
+                            elif "errors" in tx_data:
+                                details = "; ".join(str(e.get("error", e)) for e in tx_data["errors"])
+                        if not details:
+                            details = text or f"HTTP {resp.status}"
+                        logger.error(f"BlockCypher new tx failed for {coin_symbol}: {details}")
+                        return {"success": False, "error": f"BlockCypher new tx error: {details}"}
+                    if not isinstance(tx_data, dict):
+                        tx_data = json.loads(text) if text else {}
             except Exception as e:
                 return {"success": False, "error": f"BlockCypher new tx request failed: {e}"}
 
@@ -2945,10 +2959,24 @@ class WithdrawalHandler:
             send_url = f"https://api.blockcypher.com/v1/{coin_symbol}/main/txs/send"
             try:
                 async with session.post(send_url, json=tx_data) as resp:
-                    send_result = await resp.json()
-                    if resp.status != 200:
-                        error_text = send_result.get("error") if isinstance(send_result, dict) else await resp.text()
-                        return {"success": False, "error": f"BlockCypher send tx error: {error_text}"}
+                    text = await resp.text()
+                    try:
+                        send_result = json.loads(text) if text else {}
+                    except Exception:
+                        send_result = None
+                    if not (200 <= resp.status < 300):
+                        details = ""
+                        if isinstance(send_result, dict):
+                            if "error" in send_result:
+                                details = send_result["error"]
+                            elif "errors" in send_result:
+                                details = "; ".join(str(e.get("error", e)) for e in send_result["errors"])
+                        if not details:
+                            details = text or f"HTTP {resp.status}"
+                        logger.error(f"BlockCypher send tx failed for {coin_symbol}: {details}")
+                        return {"success": False, "error": f"BlockCypher send tx error: {details}"}
+                    if not isinstance(send_result, dict):
+                        send_result = json.loads(text) if text else {}
             except Exception as e:
                 return {"success": False, "error": f"BlockCypher send tx request failed: {e}"}
 
