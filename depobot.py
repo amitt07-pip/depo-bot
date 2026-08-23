@@ -32,6 +32,28 @@ from telegram.ext import (
     filters,
 )
 
+
+class InlineKeyboardMarkup(InlineKeyboardMarkup):
+    """Drop any inline row whose label is a main-menu button."""
+
+    _MAIN_MENU_LABELS = {"main menu", "home", "back to menu"}
+
+    def __init__(self, inline_keyboard, *args, **kwargs):
+        cleaned = []
+        emoji_re = re.compile(r"^[\U0001F300-\U0001FAFF\s]+")
+        for row in inline_keyboard:
+            new_row = []
+            for button in row:
+                text = (button.text or "").strip()
+                label = emoji_re.sub("", text).strip().lower()
+                if label in self._MAIN_MENU_LABELS and getattr(button, "callback_data", None) == "main_menu":
+                    continue
+                new_row.append(button)
+            if new_row:
+                cleaned.append(new_row)
+        super().__init__(inline_keyboard=cleaned, *args, **kwargs)
+
+
 from eth_account import Account
 from web3 import Web3
 from solders.keypair import Keypair
@@ -492,6 +514,15 @@ NETWORKS = {
         "explorer": "https://blockchair.com/bitcoin",
         "type": "btc",
         "icon": "\U0001F7E0"
+    },
+    "TON": {
+        "name": "TON",
+        "rpc": "https://toncenter.com/api/v2",
+        "rpc_fallbacks": [],
+        "symbol": "TON",
+        "explorer": "https://tonviewer.com",
+        "type": "ton",
+        "icon": "\U0001F48E"
     }
 }
 
@@ -701,6 +732,7 @@ NETWORK_ALIASES = {
     "tron": "TRON", "trx": "TRON", "trc20": "TRON", "trc-20": "TRON", "tronix": "TRON", "trn": "TRON",
     "ltc": "LTC", "litecoin": "LTC", "lite": "LTC", "lite coin": "LTC",
     "btc": "BTC", "bitcoin": "BTC", "bit coin": "BTC", "bit": "BTC",
+    "ton": "TON", "toncoin": "TON", "gram": "TON", "the open network": "TON",
 }
 
 def detect_token_from_text(text: str):
@@ -765,6 +797,11 @@ def detect_network_from_address(address: str):
             if not address.startswith('0x') and not address.startswith('T'):
                 return 'SOLANA'
     
+    if re.match(r'^(EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$', address):
+        return 'TON'
+    if re.match(r'^-?\d:[0-9a-fA-F]{64}$', address):
+        return 'TON'
+
     if address.startswith('0x') and len(address) == 42:
         return ['ETH', 'BSC', 'POLYGON']
     
@@ -787,6 +824,9 @@ def is_valid_address(address: str, network: str) -> bool:
         if address.startswith('bc1q') or address.startswith('bc1p'):
             return 42 <= len(address) <= 62
         return (address.startswith('1') or address.startswith('3')) and 25 <= len(address) <= 34
+    elif network == 'TON':
+        return (re.match(r'^(EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$', address) is not None or
+                re.match(r'^-?\d:[0-9a-fA-F]{64}$', address) is not None)
 
     return False
 
@@ -801,6 +841,8 @@ EXPLORER_DOMAIN_NETWORK = {
     "blockcypher.com": "BTC",
     "blockchain.com": "BTC",
     "mempool.space": "BTC",
+    "tonviewer.com": "TON",
+    "tonscan.org": "TON",
 }
 
 TX_PATH_KEYWORDS = {"tx", "transaction", "transactions"}
@@ -855,6 +897,13 @@ def parse_explorer_link(text: str):
             return ("tx", network, segments[i + 1])
         if low in ADDRESS_PATH_KEYWORDS and i + 1 < len(segments):
             return ("address", network, segments[i + 1])
+
+    # Some explorers (e.g. tonviewer.com) put the address directly in the path root
+    if network == "TON":
+        for seg in segments:
+            if re.match(r'^(EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$', seg) or re.match(r'^-?\d:[0-9a-fA-F]{64}$', seg):
+                return ("address", network, seg)
+
     return None
 
 
@@ -904,6 +953,8 @@ def tx_explorer_url(network: str, tx_hash: str) -> str:
         return f"{explorer}/#/transaction/{tx_hash}"
     if network in ("LTC", "BTC"):
         return f"{explorer}/transaction/{tx_hash}"
+    if network == "TON":
+        return f"{explorer}/transaction/{tx_hash}"
     return f"{explorer}/tx/{tx_hash}"
 
 
@@ -914,6 +965,8 @@ def address_explorer_url(network: str, address: str) -> str:
         return f"{explorer}/#/address/{address}"
     if network == "LTC":
         return f"{explorer}/address/{address}"
+    if network == "TON":
+        return f"{explorer}/{address}"
     return f"{explorer}/address/{address}"
 
 
@@ -924,6 +977,7 @@ COINGECKO_IDS = {
     "SOL": "solana",
     "TRX": "tron",
     "LTC": "litecoin",
+    "TON": "the-open-network",
     "USDT": "tether",
     "USDC": "usd-coin",
 }
@@ -942,6 +996,7 @@ class PriceFetcher:
         "SOL": Decimal("180"),
         "TRX": Decimal("0.12"),
         "LTC": Decimal("100"),
+        "TON": Decimal("5"),
         "USDT": Decimal("1.0"),
         "USDC": Decimal("1.0"),
     }
@@ -1626,6 +1681,39 @@ class BalanceChecker:
             return {"balance": "0", "symbol": "BTC", "error": str(e)}
 
     @staticmethod
+    async def get_ton_balance(address: str) -> dict:
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{NETWORKS['TON']['rpc']}/getAddressInformation?address={address}"
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("ok"):
+                            balance = int(data.get("result", {}).get("balance", "0"))
+                            return {
+                                "balance": str(Decimal(balance) / Decimal(10 ** 9)),
+                                "symbol": "TON",
+                                "raw_balance": balance
+                            }
+                        return {
+                            "balance": "0",
+                            "symbol": "TON",
+                            "error": data.get("error", "API error")
+                        }
+                    return {
+                        "balance": "0",
+                        "symbol": "TON",
+                        "error": f"HTTP {resp.status}"
+                    }
+        except Exception as e:
+            logger.error(f"Error getting TON balance: {e}")
+            return {"balance": "0", "symbol": "TON", "error": str(e)}
+
+    @staticmethod
     async def get_solana_token_balance(address: str, token_mint: str) -> dict:
         import aiohttp
         try:
@@ -1748,6 +1836,8 @@ class BalanceChecker:
                 return await BalanceChecker.get_ltc_balance(address)
             elif network_info["type"] == "btc":
                 return await BalanceChecker.get_btc_balance(address)
+            elif network_info["type"] == "ton":
+                return await BalanceChecker.get_ton_balance(address)
         except Exception as e:
             logger.error(f"Error getting balance for {network}: {e}")
             return {"error": str(e)}
@@ -4546,6 +4636,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Examples:\n"
             "`/check 0x1234...` \u2013 Address balance (ETH/BSC/Polygon)\n"
             "`/check T1234...` \u2013 Tron address balance\n"
+            "`/check EQ...` or `/check UQ...` \u2013 TON address balance\n"
             "`/check 0xabc...<64 hex>` \u2013 Transaction details\n"
             "`/check https://bscscan.com/tx/0x...` \u2013 Transaction details",
             parse_mode="Markdown"
@@ -4576,7 +4667,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "\u274c *Invalid Input*\n\n"
             "Could not detect an address or transaction from your input.\n"
             "Supported:\n"
-            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin\n"
+            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin, TON\n"
             "\u2022 Transaction hash or explorer link",
             parse_mode="Markdown"
         )
@@ -7303,47 +7394,57 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if result.get("success"):
-            tx_hash = result.get("tx_hash")
-            explorer_url = result.get("explorer_url")
-            
-            # Show transaction submitted message with pending status
+            tx_hash = result.get("tx_hash") or ""
+            explorer_url = result.get("explorer_url") or ""
+
+            # Always display the exact hash used in the explorer link
+            display_hash = tx_hash
+            if explorer_url:
+                parsed = urlparse(explorer_url)
+                combined = (parsed.path or "") + "/" + (parsed.fragment or "")
+                display_hash = combined.rstrip("/").split("/")[-1] or display_hash
+
             pending_keyboard = [
                 [ikb("View on Explorer", ui_name="explorer", url=explorer_url)]
             ]
-            
+
             max_seconds = 60
-            
+
             await query.edit_message_text(
                 f"{h_html('withdraw', 'Sent')}\n\n"
                 f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
                 f"[{esc(info['name'])}]\n"
                 f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                 f"{ui('time')}  <b>Confirming\u2026</b>  <code>0/{max_seconds}s</code>\n\n"
-                f"<code>{esc(tx_hash)}</code>",
+                f"<b>Tx Hash:</b>\n"
+                f"<code>{esc(display_hash)}</code>",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(pending_keyboard)
             )
-            
+
             confirmed = False
             max_attempts = 30
             attempt = 0
-            
+
             while not confirmed and attempt < max_attempts:
                 attempt += 1
                 await asyncio.sleep(2)
-                
+
                 try:
                     if info["type"] == "evm":
                         w3 = get_web3_with_retry(network)
-                        receipt = w3.eth.get_transaction_receipt(tx_hash)
+                        receipt = w3.eth.get_transaction_receipt(display_hash)
                         if receipt:
                             confirmed = receipt.status == 1
                             if not confirmed:
-                                # Transaction failed on chain
                                 await query.edit_message_text(
                                     f"{h_html('error', 'Failed')}\n\n"
+                                    f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                                    f"[{esc(info['name'])}]\n"
+                                    f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                                     f"<i>Rejected by the blockchain.</i>\n\n"
-                                    f"<code>{esc(tx_hash)}</code>",
+                                    f"<b>Tx Hash:</b>\n"
+                                    f"<code>{esc(display_hash)}</code>",
                                     parse_mode="HTML",
                                     reply_markup=InlineKeyboardMarkup(pending_keyboard)
                                 )
@@ -7355,7 +7456,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "jsonrpc": "2.0",
                                 "id": 1,
                                 "method": "getSignatureStatuses",
-                                "params": [[tx_hash], {"searchTransactionHistory": True}]
+                                "params": [[display_hash], {"searchTransactionHistory": True}]
                             }
                             async with session.post(NETWORKS["SOLANA"]["rpc"][0], json=payload) as resp:
                                 data = await resp.json()
@@ -7366,13 +7467,13 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     elif info["type"] == "tron":
                         from tronpy import Tron
                         client = Tron(network="mainnet")
-                        tx_info = client.get_transaction_info(tx_hash)
+                        tx_info = client.get_transaction_info(display_hash)
                         if tx_info and tx_info.get("receipt"):
                             confirmed = True
                     else:
                         # For other networks, assume confirmed after submission
                         confirmed = True
-                        
+
                     elapsed_seconds = attempt * 2
                     if not confirmed and attempt % 3 == 0:
                         await query.edit_message_text(
@@ -7382,33 +7483,32 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                             f"{ui('time')}  <b>Confirming\u2026</b>  "
                             f"<code>{elapsed_seconds}/{max_seconds}s</code>\n\n"
-                            f"<code>{esc(tx_hash)}</code>",
+                            f"<b>Tx Hash:</b>\n"
+                            f"<code>{esc(display_hash)}</code>",
                             parse_mode="HTML",
                             reply_markup=InlineKeyboardMarkup(pending_keyboard)
                         )
                 except Exception as e:
                     logger.warning(f"Error checking tx confirmation: {e}")
                     continue
-            
+
             # Log transaction and debit balance
             db.log_transaction(
                 user_id, network, "withdraw", amount,
-                tx_hash, address, None, "completed"
+                display_hash, address, None, "completed"
             )
-            
-            # Debit the internal balance after successful withdrawal
+
             if token:
                 ledger_asset = token
             else:
                 ledger_asset = get_ledger_asset(network)
             withdraw_amount = Decimal(amount)
-            db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, tx_hash)
+            db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, display_hash)
             remaining_balance = db.get_internal_balance(user_id, ledger_asset)
 
             keyboard = [
                 [ikb("View on Explorer", ui_name="explorer", url=explorer_url)],
                 [ikb("Balance", ui_name="chart", callback_data=f"balance_{network}")],
-                [ikb("Main Menu", ui_name="home", callback_data="main_menu")]
             ]
 
             if confirmed:
@@ -7419,12 +7519,12 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                     f"{ui('check')}  <b>Confirmed</b>\n"
                     f"{ui('money')}  <b>Balance:</b>  <code>{esc(remaining_balance)} {esc(ledger_asset)}</code>\n\n"
-                    f"<code>{esc(tx_hash)}</code>",
+                    f"<b>Tx Hash:</b>\n"
+                    f"<code>{esc(display_hash)}</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
-                # Timeout - show success but note confirmation pending
                 await query.edit_message_text(
                     f"{h_html('withdraw', 'Sent')}\n\n"
                     f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
@@ -7432,7 +7532,8 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{ui('address')}  <code>{esc(format_address(address))}</code>\n"
                     f"{ui('time')}  <b>Confirmation pending</b>\n"
                     f"{ui('money')}  <b>Balance:</b>  <code>{esc(remaining_balance)} {esc(ledger_asset)}</code>\n\n"
-                    f"<code>{esc(tx_hash)}</code>",
+                    f"<b>Tx Hash:</b>\n"
+                    f"<code>{esc(display_hash)}</code>",
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -7446,7 +7547,11 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Withdrawal failed: {raw_error}")
             friendly_msg = get_friendly_error(raw_error)
             await query.edit_message_text(
-                f"{h_html('error', 'Failed')}\n\n{esc(friendly_msg)}",
+                f"{h_html('error', 'Failed')}\n\n"
+                f"{tok(symbol)}  <b>{esc(amount)} {esc(symbol)}</b>  "
+                f"[{esc(info['name'])}]\n"
+                f"{ui('address')}  <code>{esc(format_address(address))}</code>\n\n"
+                f"<b>Error:</b>  <i>{esc(friendly_msg)}</i>",
                 parse_mode="HTML",
                 reply_markup=get_back_button("menu_withdraw")
             )
@@ -7454,7 +7559,9 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Withdrawal error: {e}")
         friendly_msg = get_friendly_error(e)
         await query.edit_message_text(
-            f"{h_html('error', 'Error')}\n\n{esc(friendly_msg)}",
+            f"{h_html('error', 'Error')}\n\n"
+            f"{ui('withdraw')}  <b>Withdrawal could not be completed</b>\n\n"
+            f"<i>{esc(friendly_msg)}</i>",
             parse_mode="HTML",
             reply_markup=get_back_button("menu_withdraw")
         )
