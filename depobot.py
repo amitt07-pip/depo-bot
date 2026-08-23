@@ -174,6 +174,7 @@ NETWORK_TOKEN_ICON = {
     "TRON": "TRX",
     "LTC": "LTC",
     "BTC": "BTC",
+    "TON": "TON",
 }
 
 
