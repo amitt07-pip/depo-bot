@@ -3929,9 +3929,10 @@ async def handle_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_map[prompt_key] = owner_id
     REPLY_PROMPTS[prompt_key] = owner_id
 
-    # Edit the sent message to ask the user to reply
+    # Keep the original message and append the reply prompt below it
+    original_text = query.message.text_html or html.escape(query.message.text or "")
     await query.edit_message_text(
-        "<b>Now reply to this message with your text</b>",
+        f"{original_text}\n\n<b>Now reply to this message with your text</b>",
         parse_mode="HTML",
         reply_markup=None
     )
