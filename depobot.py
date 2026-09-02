@@ -177,6 +177,28 @@ NETWORK_TOKEN_ICON = {
     "TON": "TON",
 }
 
+# Tracks owner /send reply-prompt messages so we can forward replies.
+REPLY_PROMPTS = {}
+
+
+class ReplyToOwnerFilter(filters.MessageFilter):
+    """Match private replies to an active owner /send prompt."""
+
+    def filter(self, message):
+        if not message or not message.reply_to_message:
+            return False
+        if message.chat.type != "private":
+            return False
+        reply_to = message.reply_to_message
+        key = (reply_to.chat_id, reply_to.message_id)
+        if key not in REPLY_PROMPTS:
+            return False
+        prompt_text = reply_to.text or ""
+        return "Now reply to this message with your text" in prompt_text
+
+
+REPLY_TO_OWNER_FILTER = ReplyToOwnerFilter()
+
 
 def ce(emoji_id: str, fallback: str) -> str:
     """Build a custom-emoji HTML tag with a standard-emoji fallback."""
@@ -3725,10 +3747,21 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     )
 
+                keyboard = None
+                if isinstance(chat_id, int) and chat_id > 0:
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "Reply",
+                            callback_data=f"reply_to_owner:{user_id}",
+                            icon_custom_emoji_id="5453969572354878595"
+                        )]
+                    ])
+
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=message_text,
                     entities=new_entities or None,
+                    reply_markup=keyboard,
                 )
                 await update.message.reply_text(
                     f"Message sent to `{chat_id_raw}`.",
@@ -3874,6 +3907,52 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+async def handle_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User tapped the Reply button on an owner-sent message."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    if not data.startswith("reply_to_owner:"):
+        return
+
+    try:
+        owner_id = int(data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+
+    # Remember which owner this reply should be forwarded to
+    prompt_key = (query.message.chat_id, query.message.message_id)
+    reply_map = context.bot_data.setdefault("reply_to_owner", {})
+    reply_map[prompt_key] = owner_id
+    REPLY_PROMPTS[prompt_key] = owner_id
+
+    # Edit the sent message to ask the user to reply
+    await query.edit_message_text(
+        "<b>Now reply to this message with your text</b>",
+        parse_mode="HTML",
+        reply_markup=None
+    )
+
+
+async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward a recipient's reply to the original sender (owner /send flow)."""
+    message = update.message
+    if not message or not message.reply_to_message:
+        return
+
+    reply_to = message.reply_to_message
+    key = (reply_to.chat_id, reply_to.message_id)
+    owner_id = REPLY_PROMPTS.get(key) or context.bot_data.get("reply_to_owner", {}).get(key)
+    if not owner_id:
+        return
+
+    try:
+        await message.forward(owner_id)
+    except Exception as e:
+        logger.error(f"Failed to forward reply to owner {owner_id}: {e}")
 
 
 async def send_photo_with_banner(message, banner_name, text, reply_markup=None, parse_mode: str = "Markdown"):
@@ -8806,6 +8885,14 @@ def main():
         )
     )
 
+    # Handle recipient replies to owner /send prompts before conversation handlers
+    application.add_handler(
+        MessageHandler(
+            REPLY_TO_OWNER_FILTER,
+            handle_owner_reply
+        )
+    )
+
     application.add_handler(deposit_handler)
     application.add_handler(withdraw_handler)
     application.add_handler(generate_handler)
@@ -8957,6 +9044,9 @@ def main():
     )
     application.add_handler(
         CallbackQueryHandler(toggle_notifications, pattern=r"^notif_(stop|resume)$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_reply_button, pattern=r"^reply_to_owner:\d+$")
     )
 
     application.add_handler(
