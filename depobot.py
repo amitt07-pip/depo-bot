@@ -4380,8 +4380,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/convert</code>  <i>Swap between supported assets</i>\n\n"
         f"{h_html('card', 'Wallet Generation')}\n"
         "<code>/generate</code>  <i>Create a new wallet for any network</i>\n\n"
-        f"{SOFT_DIVIDER}\n"
-        "<i>Securely Made By Venom</i>"
     )
 
     await send_photo_with_banner(
@@ -7754,8 +7752,6 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/convert</code>  <i>Swap between supported assets</i>\n\n"
         f"{h_html('card', 'Wallet Generation')}\n"
         "<code>/generate</code>  <i>Create a new wallet for any network</i>\n\n"
-        f"{SOFT_DIVIDER}\n"
-        "<i>Securely Made By Venom</i>"
     )
 
     await edit_message_with_banner(

@@ -155,7 +155,7 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors, extr
     draw.line([(width//2 - line_width//2, line_y), (width//2 + line_width//2, line_y)], 
               fill=accent_color, width=2)
     
-    tagline = "Securely Made By Venom"
+    tagline = ""
     draw.text((70, height - 65), tagline, font=tagline_font, fill=accent_color)
     
     handle = "@VMDepoBot"
@@ -283,7 +283,7 @@ def create_profile_picture():
     draw.line([(size//2 - line_width//2, line_y), (size//2 + line_width//2, line_y)], 
               fill=accent_color, width=2)
     
-    tagline = "Securely Made By Venom"
+    tagline = ""
     try:
         tagline_font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf", 18)
     except:

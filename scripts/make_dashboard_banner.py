@@ -20,7 +20,6 @@ GREY = (200, 200, 200, 255)
 DIM = (140, 140, 140, 255)
 
 HANDLE = "@VM_CryptoBOT"
-FOOTER = "Securely Made By Venom"
 
 SECTION_BANNERS = {
     "balance": ("BALANCE", "Your Assets"),
@@ -130,7 +129,6 @@ def draw_logo(img, cx, cy, r):
 def footer(img, card):
     d = ImageDraw.Draw(img, "RGBA")
     f_foot = font(FONT_BOLD, 22)
-    d.text((card[0] + 40, card[3] - 50), FOOTER, font=f_foot, fill=WHITE)
     hw = d.textlength(HANDLE, font=f_foot)
     d.text((card[2] - 40 - hw, card[3] - 50), HANDLE, font=f_foot, fill=GREY)
 
