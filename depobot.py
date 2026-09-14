@@ -28,6 +28,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -8674,6 +8675,7 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .defaults(Defaults(protect_content=True))
         .post_init(start_transaction_monitor)
         .build()
     )
