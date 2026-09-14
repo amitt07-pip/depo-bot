@@ -448,6 +448,11 @@ USER_ACCESS = {
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 
+# SideShift.ai instant exchange (used by /convert for real on-chain swaps)
+SIDESHIFT_API = "https://sideshift.ai/api/v2"
+SIDESHIFT_AFFILIATE_ID = os.getenv("SIDESHIFT_AFFILIATE_ID", "")
+SIDESHIFT_SECRET = os.getenv("SIDESHIFT_SECRET", "")
+
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
 notification_cooldowns = {}  # Track last notification time per user/token to prevent spam
@@ -1178,6 +1183,64 @@ class WalletDatabase:
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS swaps (
+                shift_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                from_asset TEXT NOT NULL,
+                from_network TEXT NOT NULL,
+                to_asset TEXT NOT NULL,
+                to_network TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                deposit_address TEXT,
+                deposit_tx_hash TEXT,
+                status TEXT DEFAULT 'waiting',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def save_swap(self, shift_id: str, user_id: int, from_asset: str,
+                  from_network: str, to_asset: str, to_network: str,
+                  amount: str, deposit_address: str, deposit_tx_hash: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO swaps (shift_id, user_id, from_asset, "
+            "from_network, to_asset, to_network, amount, deposit_address, "
+            "deposit_tx_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (shift_id, user_id, from_asset, from_network, to_asset,
+             to_network, amount, deposit_address, deposit_tx_hash)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_swap(self, shift_id: str) -> Optional[dict]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT shift_id, user_id, from_asset, from_network, to_asset, "
+            "to_network, amount, deposit_address, deposit_tx_hash, status "
+            "FROM swaps WHERE shift_id = ?",
+            (shift_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        keys = ["shift_id", "user_id", "from_asset", "from_network",
+                "to_asset", "to_network", "amount", "deposit_address",
+                "deposit_tx_hash", "status"]
+        return dict(zip(keys, row))
+
+    def update_swap_status(self, shift_id: str, status: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE swaps SET status = ? WHERE shift_id = ?",
+            (status, shift_id)
+        )
         conn.commit()
         conn.close()
 
@@ -4268,55 +4331,6 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["generate_msg_id"] = msg.message_id
 
     return GENERATE_NETWORK
-
-
-async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_authorized(user_id):
-        await update.message.reply_text(
-            "*You are not authorised to use the bot!*",
-            parse_mode="Markdown"
-        )
-        return
-
-    chat_id = update.message.chat_id
-    balances = db.get_all_internal_balances(user_id)
-    assets_with_balance = [
-        asset for asset in CONVERTIBLE_ASSETS
-        if balances.get(asset, Decimal("0")) > 0
-    ]
-
-    if not assets_with_balance:
-        text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
-        keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
-        await send_photo_with_banner(
-            update.message, "convert", text, InlineKeyboardMarkup(keyboard)
-        )
-        return ConversationHandler.END
-
-    balances_str = ", ".join([f"{a} ({balances.get(a, 0):.4f})" for a in assets_with_balance])
-
-    text = (
-        "\U0001F504 *Convert Assets*\n\n"
-        "Convert from?\n\n"
-        f"_{balances_str}_"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
-    ]
-
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    context.user_data["convert_msg_id"] = msg.message_id
-    context.user_data["convert_balances"] = {a: str(balances.get(a, 0)) for a in assets_with_balance}
-
-    return CONVERT_FROM_ASSET
 
 
 async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7749,324 +7763,502 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-CONVERTIBLE_ASSETS = ["ETH", "BNB", "MATIC", "SOL", "TRX", "LTC", "USDT", "USDC"]
+# (bot token, bot network) -> (SideShift coin, SideShift network)
+SIDESHIFT_PAIRS = {
+    ("ETH", "ETH"): ("ETH", "ethereum"),
+    ("BNB", "BSC"): ("BNB", "bsc"),
+    ("MATIC", "POLYGON"): ("POL", "polygon"),
+    ("SOL", "SOLANA"): ("SOL", "solana"),
+    ("TRX", "TRON"): ("TRX", "tron"),
+    ("LTC", "LTC"): ("LTC", "litecoin"),
+    ("BTC", "BTC"): ("BTC", "bitcoin"),
+    ("USDT", "ETH"): ("USDT", "ethereum"),
+    ("USDT", "BSC"): ("USDT", "bsc"),
+    ("USDT", "TRON"): ("USDT", "tron"),
+    ("USDT", "SOLANA"): ("USDT", "solana"),
+    ("USDC", "ETH"): ("USDC", "ethereum"),
+    ("USDC", "BSC"): ("USDC", "bsc"),
+    ("USDC", "POLYGON"): ("USDC", "polygon"),
+    ("USDC", "SOLANA"): ("USDC", "solana"),
+}
+
+SWAP_FINAL_STATUSES = {"settled", "refunded", "expired"}
 
 
-CONVERT_AMOUNT = 10
+def swap_pair_key(asset: str, network: str) -> str:
+    return f"{asset}:{network}"
+
+
+def swap_pair_label(asset: str, network: str) -> str:
+    net_name = NETWORKS.get(network, {}).get("name", network)
+    if asset == NETWORKS.get(network, {}).get("symbol"):
+        return f"{asset} ({net_name})"
+    return f"{asset} on {net_name}"
+
+
+class SideShift:
+    """Minimal SideShift.ai v2 client for variable-rate cross-chain swaps."""
+
+    @staticmethod
+    def _headers() -> dict:
+        headers = {"Content-Type": "application/json"}
+        if SIDESHIFT_SECRET:
+            headers["x-sideshift-secret"] = SIDESHIFT_SECRET
+        return headers
+
+    @staticmethod
+    def configured() -> bool:
+        return bool(SIDESHIFT_AFFILIATE_ID)
+
+    @staticmethod
+    async def get_pair(from_pair, to_pair) -> dict:
+        d_coin, d_net = from_pair
+        s_coin, s_net = to_pair
+        url = (
+            f"{SIDESHIFT_API}/pair/{d_coin.lower()}-{d_net}/"
+            f"{s_coin.lower()}-{s_net}"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    data = await resp.json()
+        except Exception as e:
+            return {"error": str(e)}
+        if "error" in data:
+            return {"error": data["error"].get("message", "Pair unavailable")}
+        return data
+
+    @staticmethod
+    async def create_variable_shift(
+        from_pair, to_pair, settle_address: str, refund_address: str
+    ) -> dict:
+        d_coin, d_net = from_pair
+        s_coin, s_net = to_pair
+        payload = {
+            "settleAddress": settle_address,
+            "refundAddress": refund_address,
+            "affiliateId": SIDESHIFT_AFFILIATE_ID,
+            "depositCoin": d_coin.lower(),
+            "settleCoin": s_coin.lower(),
+            "depositNetwork": d_net,
+            "settleNetwork": s_net,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{SIDESHIFT_API}/shifts/variable",
+                    json=payload,
+                    headers=SideShift._headers(),
+                    timeout=20
+                ) as resp:
+                    data = await resp.json()
+        except Exception as e:
+            return {"error": str(e)}
+        if "error" in data:
+            return {"error": data["error"].get("message", "Shift creation failed")}
+        return data
+
+    @staticmethod
+    async def get_shift(shift_id: str) -> dict:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{SIDESHIFT_API}/shifts/{shift_id}", timeout=15
+                ) as resp:
+                    data = await resp.json()
+        except Exception as e:
+            return {"error": str(e)}
+        if "error" in data:
+            return {"error": data["error"].get("message", "Shift not found")}
+        return data
+
+
+async def get_swap_holdings(user_id: int) -> list:
+    """On-chain balances for every (asset, network) pair SideShift can swap."""
+    wallets = {w["network"]: w["address"] for w in db.get_all_wallets(user_id)}
+
+    async def fetch(asset, network, address):
+        if asset == NETWORKS[network]["symbol"]:
+            result = await BalanceChecker.get_balance(network, address)
+        else:
+            result = await BalanceChecker.get_token_balance(asset, network, address)
+        try:
+            balance = Decimal(str((result or {}).get("balance") or "0"))
+        except Exception:
+            balance = Decimal("0")
+        return asset, network, balance
+
+    tasks = [
+        fetch(asset, network, wallets[network])
+        for (asset, network) in SIDESHIFT_PAIRS
+        if network in wallets
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    holdings = []
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        asset, network, balance = item
+        if balance > 0:
+            holdings.append({"asset": asset, "network": network, "balance": balance})
+    return holdings
+
+
+def swap_targets(user_id: int, from_asset: str, from_network: str) -> list:
+    """Destination pairs the user has a wallet for (settlement address)."""
+    wallets = {w["network"] for w in db.get_all_wallets(user_id)}
+    return [
+        (asset, network) for (asset, network) in SIDESHIFT_PAIRS
+        if network in wallets and (asset, network) != (from_asset, from_network)
+    ]
+
+
+def _swap_cancel_row():
+    return [ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c")]
+
+
+def _fmt_amount(value) -> str:
+    try:
+        d = Decimal(str(value))
+    except Exception:
+        return str(value)
+    return f"{d.normalize():f}"
+
+
+async def _start_convert(bot, chat_id: int, user_id: int, context):
+    context.user_data.pop("swap", None)
+
+    if not SideShift.configured():
+        text = (
+            f"{h_html('convert', 'Convert')}\n\n"
+            "<b>Swap provider is not configured.</b>\n"
+            "Set <code>SIDESHIFT_AFFILIATE_ID</code> on the server to enable "
+            "real-time swaps."
+        )
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("convert"), "rb"),
+            caption=text,
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    loading = await bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=f"{h_html('convert', 'Convert')}\n\n<b>Loading your balances...</b>",
+        parse_mode="HTML"
+    )
+
+    holdings = await get_swap_holdings(user_id)
+    if not holdings:
+        await loading.edit_caption(
+            caption=(
+                f"{h_html('convert', 'Convert')}\n\n"
+                "No swappable assets found in your wallets.\n"
+                "Deposit funds first."
+            ),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    keyboard = []
+    for h in holdings:
+        label = f"{swap_pair_label(h['asset'], h['network'])}  {_fmt_amount(h['balance'])}"
+        keyboard.append([
+            ikb(label, callback_data=f"swap_from:{swap_pair_key(h['asset'], h['network'])}",
+                token=h["asset"])
+        ])
+    keyboard.append(_swap_cancel_row())
+
+    context.user_data["swap"] = {
+        "holdings": {
+            swap_pair_key(h["asset"], h["network"]): str(h["balance"]) for h in holdings
+        }
+    }
+
+    await loading.edit_caption(
+        caption=(
+            f"{h_html('convert', 'Convert')}\n\n"
+            "Real-time swap powered by SideShift.ai\n\n"
+            "<b>Which asset do you want to swap from?</b>"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CONVERT_FROM_ASSET
+
+
+async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text(
+            "*You are not authorised to use the bot!*",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+    return await _start_convert(
+        context.bot, update.message.chat_id, user_id, context
+    )
 
 
 async def show_convert_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
-        return
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat_id
-
     try:
         await query.message.delete()
     except Exception:
         pass
-
-    user_id = query.from_user.id
-    balances = db.get_all_internal_balances(user_id)
-
-    assets_with_balance = [a for a in CONVERTIBLE_ASSETS if balances.get(a, Decimal("0")) > 0]
-
-    if not assets_with_balance:
-        keyboard = [
-            [InlineKeyboardButton("Deposit", callback_data="menu_deposit")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
-        ]
-        text = "*Convert*\n\nNo assets to convert.\nDeposit funds first."
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
-            caption=text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return ConversationHandler.END
-
-    balances_str = ", ".join([f"{a} ({balances.get(a, 0):.4f})" for a in assets_with_balance])
-
-    text = (
-        "\U0001F504 *Convert Assets*\n\n"
-        "Convert from?\n\n"
-        f"_{balances_str}_"
+    return await _start_convert(
+        context.bot, query.message.chat_id, query.from_user.id, context
     )
-
-    keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
-    ]
-
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    context.user_data["convert_msg_id"] = msg.message_id
-    context.user_data["convert_balances"] = {a: str(balances.get(a, 0)) for a in assets_with_balance}
-
-    return CONVERT_FROM_ASSET
 
 
 async def receive_convert_from_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive and parse the 'from' asset from user's input for conversion."""
-    text = update.message.text.strip().upper()
-    chat_id = update.message.chat_id
-    user_id = update.effective_user.id
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
 
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    swap = context.user_data.get("swap") or {}
+    key = query.data.split(":", 1)[1]
+    if key not in swap.get("holdings", {}):
+        await query.answer("Selection expired, run /convert again", show_alert=True)
+        return ConversationHandler.END
 
-    if "convert_msg_id" in context.user_data:
-        try:
-            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
-        except Exception:
-            pass
+    from_asset, from_network = key.split(":")
+    swap.update({
+        "from_asset": from_asset,
+        "from_network": from_network,
+        "balance": swap["holdings"][key],
+    })
+    context.user_data["swap"] = swap
 
-    balances = context.user_data.get("convert_balances", {})
-    
-    from_asset = None
-    if text in CONVERTIBLE_ASSETS:
-        from_asset = text
-    else:
-        text_lower = text.lower()
-        if text_lower in TOKEN_ALIASES:
-            potential = TOKEN_ALIASES[text_lower]
-            if potential in CONVERTIBLE_ASSETS:
-                from_asset = potential
-
-    if not from_asset or from_asset not in balances:
-        balances_str = ", ".join([f"{a} ({balances.get(a, '0')})" for a in balances.keys()])
-        
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
+    targets = swap_targets(query.from_user.id, from_asset, from_network)
+    if not targets:
+        await query.edit_message_caption(
             caption=(
-                "\u26a0\ufe0f *Asset Not Recognized*\n\n"
-                f"I couldn't understand which asset you want to convert.\n\n"
-                f"_Your balances: {balances_str}_\n\n"
-                "Please type a valid asset name (e.g., 'ETH', 'USDT', 'BNB')"
+                f"{h_html('convert', 'Convert')}\n\n"
+                "No destination wallet available. Generate a wallet on the "
+                "target network first."
             ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            parse_mode="HTML"
         )
-        context.user_data["convert_msg_id"] = msg.message_id
-        return CONVERT_FROM_ASSET
-
-    context.user_data["convert_from"] = from_asset
-    balance = Decimal(balances.get(from_asset, "0"))
-
-    to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
-    to_assets_str = ", ".join(to_assets)
-
-    text = (
-        f"\U0001F504 *Convert {from_asset}*\n\n"
-        f"Available: {balance:.6f} {from_asset}\n\n"
-        f"Which asset would you like to convert TO?\n\n"
-        f"_Available: {to_assets_str}_\n\n"
-        "Just type the asset name (e.g., 'USDT', 'ETH', 'BNB')"
-    )
+        return ConversationHandler.END
 
     keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [ikb(swap_pair_label(a, n), callback_data=f"swap_to:{swap_pair_key(a, n)}", token=a)]
+        for (a, n) in targets
     ]
+    keyboard.append(_swap_cancel_row())
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=text,
-        parse_mode="Markdown",
+    await query.edit_message_caption(
+        caption=(
+            f"{h_html('convert', 'Convert')}\n\n"
+            f"From: <b>{esc(swap_pair_label(from_asset, from_network))}</b>\n"
+            f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(from_asset)}</code>\n\n"
+            "<b>Swap to which asset?</b>"
+        ),
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    context.user_data["convert_msg_id"] = msg.message_id
-
     return CONVERT_TO_ASSET
 
 
 async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive and parse the 'to' asset from user's input for conversion."""
-    text = update.message.text.strip().upper()
-    chat_id = update.message.chat_id
-    user_id = update.effective_user.id
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
 
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    swap = context.user_data.get("swap") or {}
+    if "from_asset" not in swap:
+        return ConversationHandler.END
 
-    if "convert_msg_id" in context.user_data:
-        try:
-            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
-        except Exception:
-            pass
-
-    from_asset = context.user_data.get("convert_from")
-    
-    to_asset = None
-    if text in CONVERTIBLE_ASSETS and text != from_asset:
-        to_asset = text
-    else:
-        text_lower = text.lower()
-        if text_lower in TOKEN_ALIASES:
-            potential = TOKEN_ALIASES[text_lower]
-            if potential in CONVERTIBLE_ASSETS and potential != from_asset:
-                to_asset = potential
-
-    if not to_asset:
-        to_assets = [a for a in CONVERTIBLE_ASSETS if a != from_asset]
-        to_assets_str = ", ".join(to_assets)
-        
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
-            caption=(
-                "\u26a0\ufe0f *Asset Not Recognized*\n\n"
-                f"I couldn't understand which asset you want to convert to.\n\n"
-                f"_Available: {to_assets_str}_\n\n"
-                "Please type a valid asset name (e.g., 'USDT', 'ETH', 'BNB')"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
-        )
-        context.user_data["convert_msg_id"] = msg.message_id
+    to_asset, to_network = query.data.split(":", 1)[1].split(":")
+    if (to_asset, to_network) not in SIDESHIFT_PAIRS:
         return CONVERT_TO_ASSET
 
-    context.user_data["convert_to"] = to_asset
-    
-    balances = context.user_data.get("convert_balances", {})
-    balance = Decimal(balances.get(from_asset, "0"))
-    context.user_data["convert_balance"] = str(balance)
+    from_pair = SIDESHIFT_PAIRS[(swap["from_asset"], swap["from_network"])]
+    to_pair = SIDESHIFT_PAIRS[(to_asset, to_network)]
 
-    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
-
-    text = (
-        f"\U0001F504 *Convert {from_asset} to {to_asset}*\n\n"
-        f"Available: {balance:.6f} {from_asset}\n"
-        f"Rate: 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
-        f"Enter the amount of {from_asset} to convert:"
+    await query.edit_message_caption(
+        caption=f"{h_html('convert', 'Convert')}\n\n<b>Fetching live rate...</b>",
+        parse_mode="HTML"
     )
 
-    keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
-    ]
+    pair = await SideShift.get_pair(from_pair, to_pair)
+    if "error" in pair:
+        await query.edit_message_caption(
+            caption=(
+                f"{h_html('convert', 'Convert')}\n\n"
+                f"<b>Pair unavailable:</b> {esc(pair['error'])}"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+        )
+        return ConversationHandler.END
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    swap.update({
+        "to_asset": to_asset,
+        "to_network": to_network,
+        "rate": pair.get("rate"),
+        "min": pair.get("min"),
+        "max": pair.get("max"),
+    })
+    context.user_data["swap"] = swap
+
+    caption = (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"From: <b>{esc(swap_pair_label(swap['from_asset'], swap['from_network']))}</b>\n"
+        f"To: <b>{esc(swap_pair_label(to_asset, to_network))}</b>\n\n"
+        f"Live rate: <code>1 {esc(swap['from_asset'])} \u2248 "
+        f"{esc(_fmt_amount(pair['rate']))} {esc(to_asset)}</code>\n"
+        f"Min: <code>{esc(_fmt_amount(pair['min']))}</code>  "
+        f"Max: <code>{esc(_fmt_amount(pair['max']))}</code> {esc(swap['from_asset'])}\n"
+        f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(swap['from_asset'])}</code>\n\n"
+        f"<b>Enter the amount of {esc(swap['from_asset'])} to swap:</b>"
     )
-    context.user_data["convert_msg_id"] = msg.message_id
-
+    await query.edit_message_caption(
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+    )
     return CONVERT_AMOUNT_AI
 
 
 async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive and process the conversion amount from user's input."""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return ConversationHandler.END
 
-    chat_id = update.message.chat_id
-    amount_str = update.message.text.strip()
+    swap = context.user_data.get("swap") or {}
+    if "to_asset" not in swap:
+        return ConversationHandler.END
 
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    if "convert_msg_id" in context.user_data:
-        try:
-            await context.bot.delete_message(chat_id, context.user_data["convert_msg_id"])
-        except Exception:
-            pass
-
     try:
-        amount = Decimal(amount_str)
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
+        amount = Decimal(update.message.text.strip().replace(",", ""))
     except Exception:
-        from_asset = context.user_data.get("convert_from")
-        to_asset = context.user_data.get("convert_to")
-        balance_str = context.user_data.get("convert_balance", "0")
-        
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
-            caption=(
-                f"\u26a0\ufe0f *Invalid Amount*\n\n"
-                f"Please enter a valid number.\n\n"
-                f"Available: {balance_str} {from_asset}"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        amount = Decimal("0")
+
+    balance = Decimal(swap["balance"])
+    from_asset = swap["from_asset"]
+
+    error = None
+    if amount <= 0:
+        error = "Please enter a valid positive number."
+    elif amount > balance:
+        error = f"Insufficient balance. Available: {_fmt_amount(balance)} {from_asset}"
+    elif swap.get("min") and amount < Decimal(str(swap["min"])):
+        error = f"Minimum is {_fmt_amount(swap['min'])} {from_asset}"
+    elif swap.get("max") and amount > Decimal(str(swap["max"])):
+        error = f"Maximum is {_fmt_amount(swap['max'])} {from_asset}"
+
+    if error:
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=f"<b>{esc(error)}</b>\n\nEnter the amount again:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
         )
-        context.user_data["convert_msg_id"] = msg.message_id
         return CONVERT_AMOUNT_AI
 
-    balance_str = context.user_data.get("convert_balance", "0")
-    try:
-        balance = Decimal(balance_str)
-    except Exception:
-        balance = Decimal("0")
+    from_pair = SIDESHIFT_PAIRS[(from_asset, swap["from_network"])]
+    to_pair = SIDESHIFT_PAIRS[(swap["to_asset"], swap["to_network"])]
+    pair = await SideShift.get_pair(from_pair, to_pair)
+    rate = Decimal(str(pair.get("rate") or swap.get("rate") or "0"))
+    estimated = amount * rate
 
-    from_asset = context.user_data.get("convert_from")
-    to_asset = context.user_data.get("convert_to")
-
-    if amount > balance:
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
-            caption=(
-                f"\u26a0\ufe0f *Insufficient Balance*\n\n"
-                f"You have {balance_str} {from_asset}.\n\n"
-                f"Please enter a smaller amount."
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
-        )
-        context.user_data["convert_msg_id"] = msg.message_id
-        return CONVERT_AMOUNT_AI
-
-    context.user_data["convert_amount"] = str(amount)
-
-    rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
-    to_amount = amount * rate
+    swap["amount"] = str(amount)
+    swap["rate"] = str(rate)
+    context.user_data["swap"] = swap
 
     keyboard = [
         [
-            InlineKeyboardButton("Confirm", callback_data="confirm_convert_ai"),
-            InlineKeyboardButton("Cancel", callback_data="main_menu")
+            ikb("Confirm Swap", callback_data="confirm_convert_ai", emoji_fallback="\u2705"),
+            ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c"),
         ]
     ]
-
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
+    caption = (
+        f"{h_html('convert', 'Confirm Swap')}\n\n"
+        f"You send: <code>{esc(_fmt_amount(amount))} {esc(from_asset)}</code> "
+        f"({esc(NETWORKS[swap['from_network']]['name'])})\n"
+        f"You receive: <code>\u2248 {esc(_fmt_amount(estimated.quantize(Decimal('0.00000001'))))} "
+        f"{esc(swap['to_asset'])}</code> ({esc(NETWORKS[swap['to_network']]['name'])})\n"
+        f"Live rate: <code>1 {esc(from_asset)} \u2248 {esc(_fmt_amount(rate))} {esc(swap['to_asset'])}</code>\n\n"
+        "<i>Final amount is fixed by SideShift when your deposit confirms on-chain. "
+        "Network fees are deducted from your source wallet.</i>"
+    )
+    await context.bot.send_photo(
+        chat_id=update.message.chat_id,
         photo=open(get_banner_path("convert"), "rb"),
-        caption=(
-            f"\U0001F504 *Confirm Conversion*\n\n"
-            f"*From:* {amount:.6f} {from_asset}\n"
-            f"*To:* {to_amount:.6f} {to_asset}\n"
-            f"*Rate:* 1 {from_asset} = {rate:.6f} {to_asset}\n\n"
-            f"Confirm this conversion?"
-        ),
-        parse_mode="Markdown",
+        caption=caption,
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    context.user_data["convert_msg_id"] = msg.message_id
-
     return ConversationHandler.END
 
 
+def _swap_status_text(shift: dict, swap_row: dict = None) -> str:
+    status = shift.get("status", "unknown")
+    status_labels = {
+        "waiting": "Waiting for your deposit to arrive",
+        "pending": "Deposit detected, awaiting confirmations",
+        "processing": "Deposit confirmed, exchanging",
+        "review": "Under review by SideShift",
+        "settling": "Sending funds to your wallet",
+        "settled": "Completed - funds delivered",
+        "refund": "Refund initiated",
+        "refunding": "Refund in progress",
+        "refunded": "Refunded to your wallet",
+        "expired": "Expired - no deposit received",
+        "multiple": "Multiple deposits detected",
+    }
+    lines = [
+        f"{h_html('convert', 'Swap Status')}\n",
+        f"Status: <b>{esc(status_labels.get(status, status.title()))}</b>",
+        f"Shift ID: <code>{esc(shift.get('id', ''))}</code>",
+    ]
+    d_coin = shift.get("depositCoin", "")
+    s_coin = shift.get("settleCoin", "")
+    if shift.get("depositAmount"):
+        lines.append(f"Deposited: <code>{esc(_fmt_amount(shift['depositAmount']))} {esc(d_coin)}</code>")
+    elif swap_row:
+        lines.append(f"Sent: <code>{esc(_fmt_amount(swap_row['amount']))} {esc(swap_row['from_asset'])}</code>")
+    if shift.get("settleAmount"):
+        lines.append(f"Received: <code>{esc(_fmt_amount(shift['settleAmount']))} {esc(s_coin)}</code>")
+    if shift.get("settleHash"):
+        lines.append(f"Settle TX: <code>{esc(shift['settleHash'])}</code>")
+    return "\n".join(lines)
+
+
+def _swap_status_keyboard(shift_id: str, swap_row: dict, shift: dict) -> InlineKeyboardMarkup:
+    rows = []
+    if swap_row and swap_row.get("deposit_tx_hash"):
+        rows.append([
+            ikb("Deposit TX", url=tx_explorer_url(swap_row["from_network"], swap_row["deposit_tx_hash"]),
+                ui_name="explorer")
+        ])
+    if shift.get("settleHash") and swap_row:
+        rows.append([
+            ikb("Settle TX", url=tx_explorer_url(swap_row["to_network"], shift["settleHash"]),
+                ui_name="explorer")
+        ])
+    rows.append([ikb("Track on SideShift", url=f"https://sideshift.ai/orders/{shift_id}", ui_name="explorer")])
+    if shift.get("status") not in SWAP_FINAL_STATUSES:
+        rows.append([ikb("Refresh Status", callback_data=f"swap_status:{shift_id}", emoji_fallback="\U0001F504")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Execute the conversion after confirmation."""
+    """Create the SideShift order and send the source asset to its deposit address."""
     if not await check_callback_auth(update):
         return
     query = update.callback_query
@@ -8075,59 +8267,165 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = query.message.chat_id
     user_id = query.from_user.id
 
-    try:
-        await query.message.delete()
-    except Exception:
-        pass
+    swap = context.user_data.pop("swap", None)
+    if not swap or "amount" not in swap:
+        await query.edit_message_caption(
+            caption="<b>This swap has expired. Run /convert again.</b>",
+            parse_mode="HTML"
+        )
+        return
 
-    from_asset = context.user_data.get("convert_from")
-    to_asset = context.user_data.get("convert_to")
-    amount_str = context.user_data.get("convert_amount", "0")
-    amount = Decimal(amount_str)
+    from_asset, from_network = swap["from_asset"], swap["from_network"]
+    to_asset, to_network = swap["to_asset"], swap["to_network"]
+    amount = swap["amount"]
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=f"*Processing conversion...*",
-        parse_mode="Markdown"
+    await query.edit_message_caption(
+        caption=f"{h_html('convert', 'Convert')}\n\n<b>Creating swap order...</b>",
+        parse_mode="HTML"
     )
 
+    source_wallet = db.get_wallet(user_id, from_network)
+    dest_wallet = db.get_wallet(user_id, to_network)
+    if not source_wallet or not dest_wallet:
+        await query.edit_message_caption(
+            caption="<b>Wallet not found.</b>", parse_mode="HTML"
+        )
+        return
+
+    shift = await SideShift.create_variable_shift(
+        SIDESHIFT_PAIRS[(from_asset, from_network)],
+        SIDESHIFT_PAIRS[(to_asset, to_network)],
+        settle_address=dest_wallet["address"],
+        refund_address=source_wallet["address"],
+    )
+    if "error" in shift:
+        await query.edit_message_caption(
+            caption=(
+                f"{h_html('convert', 'Swap Failed')}\n\n"
+                f"<b>Could not create order:</b> {esc(shift['error'])}"
+            ),
+            parse_mode="HTML"
+        )
+        return
+
+    shift_id = shift.get("id", "")
+    deposit_address = shift.get("depositAddress", "")
+    if not deposit_address:
+        await query.edit_message_caption(
+            caption=f"{h_html('convert', 'Swap Failed')}\n\n<b>Provider returned no deposit address.</b>",
+            parse_mode="HTML"
+        )
+        return
+
+    await query.edit_message_caption(
+        caption=(
+            f"{h_html('convert', 'Convert')}\n\n"
+            f"Order <code>{esc(shift_id)}</code> created.\n"
+            f"<b>Sending {esc(_fmt_amount(amount))} {esc(from_asset)} to the exchange...</b>"
+        ),
+        parse_mode="HTML"
+    )
+
+    net_info = NETWORKS[from_network]
+    token_meta = TOKENS.get(from_asset, {}).get("networks", {}).get(from_network, {})
+    token_address = None if token_meta.get("native") or from_asset == net_info["symbol"] else token_meta.get("address")
+
     try:
-        rate = await PriceFetcher.get_conversion_rate(from_asset, to_asset)
-        to_amount = amount * rate
+        private_key = CryptoUtils.decrypt_private_key(source_wallet["encrypted_private_key"])
+        logger.info(f"User {user_id} swapping {amount} {from_asset}/{from_network} -> {to_asset}/{to_network} via shift {shift_id}")
 
-        success = db.convert_balance(user_id, from_asset, to_asset, amount, to_amount)
-
-        if success:
-            keyboard = [
-                [InlineKeyboardButton("Convert More", callback_data="menu_convert")],
-                [InlineKeyboardButton("Home", callback_data="main_menu")]
-            ]
-            await msg.edit_caption(
-                caption=(
-                    f"\u2705 *Conversion Successful!*\n\n"
-                    f"*Converted:* {amount:.6f} {from_asset}\n"
-                    f"*Received:* {to_amount:.6f} {to_asset}\n"
-                    f"*Rate:* 1 {from_asset} = {rate:.6f} {to_asset}"
-                ),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+        if token_address and net_info["type"] == "evm":
+            result = await WithdrawalHandler.withdraw_evm(
+                from_network, private_key, deposit_address, amount, token_address
+            )
+        elif token_address and net_info["type"] == "solana":
+            result = await WithdrawalHandler.withdraw_solana_token(
+                private_key, deposit_address, amount, token_address,
+                decimals=token_meta.get("decimals", 6)
+            )
+        elif token_address and net_info["type"] == "tron":
+            result = await WithdrawalHandler.withdraw_tron_token(
+                private_key, deposit_address, amount, token_address,
+                decimals=token_meta.get("decimals", 6)
             )
         else:
-            keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
-            await msg.edit_caption(
-                caption=f"\u274c *Conversion Failed*\n\nInsufficient balance.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+            result = await WithdrawalHandler.withdraw(
+                from_network, private_key, deposit_address, amount
             )
     except Exception as e:
-        logger.error(f"Conversion error: {e}")
-        keyboard = [[InlineKeyboardButton("Home", callback_data="main_menu")]]
-        await msg.edit_caption(
-            caption=f"\u274c *Conversion Failed*\n\n{str(e)}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        logger.error(f"Swap deposit send error: {e}")
+        result = {"success": False, "error": str(e)}
+    finally:
+        private_key = None
+
+    if not result.get("success"):
+        await query.edit_message_caption(
+            caption=(
+                f"{h_html('convert', 'Swap Failed')}\n\n"
+                f"Order <code>{esc(shift_id)}</code> was created but the deposit "
+                f"could not be sent:\n<b>{esc(result.get('error', 'Unknown error'))}</b>\n\n"
+                "No funds left your wallet. The order will expire automatically."
+            ),
+            parse_mode="HTML"
         )
+        return
+
+    tx_hash = result.get("tx_hash") or ""
+    explorer_url = result.get("explorer_url") or ""
+    if explorer_url:
+        tx_hash = explorer_url.rstrip("/").split("/")[-1] or tx_hash
+
+    db.save_swap(
+        shift_id, user_id, from_asset, from_network, to_asset, to_network,
+        amount, deposit_address, tx_hash
+    )
+    swap_row = db.get_swap(shift_id)
+
+    caption = (
+        f"{h_html('convert', 'Swap Submitted')}\n\n"
+        f"Sent <code>{esc(_fmt_amount(amount))} {esc(from_asset)}</code> to the exchange.\n"
+        f"You will receive <b>{esc(to_asset)}</b> at "
+        f"<code>{esc(format_address(dest_wallet['address']))}</code> once the deposit confirms.\n\n"
+        f"Shift ID: <code>{esc(shift_id)}</code>\n"
+        f"Deposit TX: <code>{esc(tx_hash)}</code>\n\n"
+        "Tap <b>Refresh Status</b> to track progress."
+    )
+    await query.edit_message_caption(
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=_swap_status_keyboard(shift_id, swap_row, {"status": "waiting"})
+    )
+
+
+async def swap_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh a swap's status from SideShift."""
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    await query.answer("Checking status...")
+
+    shift_id = query.data.split(":", 1)[1]
+    swap_row = db.get_swap(shift_id)
+    if swap_row and swap_row["user_id"] != query.from_user.id:
+        return
+
+    shift = await SideShift.get_shift(shift_id)
+    if "error" in shift:
+        await query.answer(f"Could not fetch status: {shift['error']}", show_alert=True)
+        return
+
+    if swap_row:
+        db.update_swap_status(shift_id, shift.get("status", "unknown"))
+
+    try:
+        await query.edit_message_caption(
+            caption=_swap_status_text(shift, swap_row),
+            parse_mode="HTML",
+            reply_markup=_swap_status_keyboard(shift_id, swap_row, shift)
+        )
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logger.error(f"Swap status edit failed: {e}")
 
 
 async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8136,14 +8434,20 @@ async def cancel_convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    context.user_data.clear()
+    context.user_data.pop("swap", None)
 
-    await query.edit_message_text(
-        "*Conversion Cancelled*",
-        parse_mode="Markdown",
-        reply_markup=get_back_button("main_menu")
-    )
-    
+    try:
+        if query.message.photo:
+            await query.edit_message_caption(
+                caption="<b>Swap Cancelled</b>", parse_mode="HTML"
+            )
+        else:
+            await query.edit_message_text(
+                "<b>Swap Cancelled</b>", parse_mode="HTML"
+            )
+    except Exception:
+        pass
+
     return ConversationHandler.END
 
 
@@ -8912,15 +9216,13 @@ def main():
         ],
         states={
             CONVERT_FROM_ASSET: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    receive_convert_from_asset
+                CallbackQueryHandler(
+                    receive_convert_from_asset, pattern=r"^swap_from:"
                 )
             ],
             CONVERT_TO_ASSET: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    receive_convert_to_asset
+                CallbackQueryHandler(
+                    receive_convert_to_asset, pattern=r"^swap_to:"
                 )
             ],
             CONVERT_AMOUNT_AI: [
@@ -8941,6 +9243,12 @@ def main():
     
     application.add_handler(
         CallbackQueryHandler(confirm_convert_ai, pattern="^confirm_convert_ai$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(swap_status_callback, pattern=r"^swap_status:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(cancel_convert, pattern="^cancel_convert$")
     )
 
     application.add_handler(
