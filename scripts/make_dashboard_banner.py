@@ -145,28 +145,11 @@ def make_dashboard():
     img.crop(logo_box).save(os.path.join(ASSETS, "logo.png"), "PNG", optimize=True)
 
     d = ImageDraw.Draw(img, "RGBA")
-    tx, ty = 330, 130
+    tx, ty = 330, 205
     d.text((tx, ty), "VM CRYPTO BOT", font=font(FONT_BOLD, 84), fill=WHITE)
     d.rounded_rectangle((tx, ty + 104, tx + 300, ty + 110), radius=3, fill=WHITE)
     d.rounded_rectangle((tx + 312, ty + 104, tx + 360, ty + 110), radius=3, fill=DIM)
-    d.text((tx, ty + 130), "Secure Multi-Chain Wallet Dashboard", font=font(FONT_REG, 34), fill=GREY)
-
-    f_pill = font(FONT_REG, 22)
-    px_, py_ = tx, ty + 200
-    pill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    pd = ImageDraw.Draw(pill_layer)
-    for p in ["Deposit", "Withdraw", "Convert", "Balances", "Explorer"]:
-        w = pd.textlength(p, font=f_pill) + 36
-        pd.rounded_rectangle((px_, py_, px_ + w, py_ + 42), radius=21, fill=(255, 255, 255, 18),
-                             outline=(255, 255, 255, 170), width=1)
-        pd.text((px_ + 18, py_ + 9), p, font=f_pill, fill=WHITE)
-        px_ += w + 12
-    img = Image.alpha_composite(img, pill_layer)
-
-    d = ImageDraw.Draw(img, "RGBA")
-    f_mono = font(FONT_MONO, 21)
-    d.text((tx, ty + 270), "Networks  ETH · BSC · Polygon · Solana · Tron · LTC · BTC · TON", font=f_mono, fill=GREY)
-    d.text((tx, ty + 302), "Tokens    USDT · USDC · ETH · BNB · MATIC · SOL · TRX · LTC", font=f_mono, fill=GREY)
+    d.text((tx, ty + 130), "Secure Multi-Chain Wallet", font=font(FONT_REG, 34), fill=GREY)
 
     footer(img, card)
     out = os.path.join(ASSETS, "welcome.png")
