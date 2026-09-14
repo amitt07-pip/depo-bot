@@ -10,6 +10,7 @@ import asyncio
 import aiohttp
 import re
 import inspect
+import contextvars
 from typing import Optional
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
@@ -24,12 +25,14 @@ except ImportError:
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
     Defaults,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -340,6 +343,68 @@ def _install_markdown_to_html_bridge():
 
 
 _install_markdown_to_html_bridge()
+
+
+# Per-user ownership of interactive bot messages: (chat_id, message_id) -> user_id.
+# Only the user who triggered a menu may press its buttons.
+CURRENT_USER_ID = contextvars.ContextVar("current_user_id", default=None)
+MESSAGE_OWNERS = {}
+_MESSAGE_OWNERS_MAX = 5000
+
+
+def _remember_owner(message, owner_id):
+    if owner_id is None or message is None or not hasattr(message, "message_id"):
+        return
+    if len(MESSAGE_OWNERS) >= _MESSAGE_OWNERS_MAX:
+        for key in list(MESSAGE_OWNERS)[: _MESSAGE_OWNERS_MAX // 5]:
+            MESSAGE_OWNERS.pop(key, None)
+    MESSAGE_OWNERS[(message.chat_id, message.message_id)] = owner_id
+
+
+def _install_message_owner_tracking():
+    """Record which user each keyboard-bearing bot message belongs to."""
+    from telegram import Bot
+
+    def _wrap(method_name):
+        orig = getattr(Bot, method_name)
+
+        async def wrapper(self, *args, **kwargs):
+            result = await orig(self, *args, **kwargs)
+            if kwargs.get("reply_markup") is not None:
+                _remember_owner(result, CURRENT_USER_ID.get())
+            return result
+
+        wrapper.__name__ = getattr(orig, "__name__", method_name)
+        wrapper.__doc__ = getattr(orig, "__doc__", None)
+        setattr(Bot, method_name, wrapper)
+
+    for name in ("send_message", "send_photo", "send_document", "send_animation",
+                 "edit_message_text", "edit_message_caption", "edit_message_media",
+                 "edit_message_reply_markup"):
+        _wrap(name)
+
+
+_install_message_owner_tracking()
+
+
+async def track_update_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Runs before every handler: bind the acting user and reject button
+    presses on menus that belong to somebody else."""
+    user = update.effective_user
+    CURRENT_USER_ID.set(user.id if user else None)
+
+    query = update.callback_query
+    if not query or not query.message or not user:
+        return
+    if (query.data or "").startswith("reply_to_owner:"):
+        return
+    owner = MESSAGE_OWNERS.get((query.message.chat_id, query.message.message_id))
+    if owner is not None and owner != user.id:
+        try:
+            await query.answer("This menu belongs to another user.", show_alert=True)
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
 
 
 def get_banner_path(name: str) -> str:
@@ -8979,6 +9044,8 @@ def main():
         .post_init(start_transaction_monitor)
         .build()
     )
+
+    application.add_handler(TypeHandler(Update, track_update_user), group=-1)
 
     deposit_handler = ConversationHandler(
         entry_points=[
