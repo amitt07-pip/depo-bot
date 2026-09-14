@@ -109,11 +109,32 @@ d.ellipse((cx - 64, cy - 64, cx + 64, cy + 64), outline=(150, 130, 255, 120), wi
 # Stylised "V" made of two thick strokes with a coin dot at the vertex
 v_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 vd = ImageDraw.Draw(v_layer)
-vd.line((cx - 50, cy - 52, cx, cy + 38), fill=(255, 255, 255, 255), width=20)
-vd.line((cx + 50, cy - 52, cx, cy + 38), fill=(0, 220, 230, 255), width=20)
-for (ex, ey) in [(cx - 50, cy - 52), (cx + 50, cy - 52)]:
-    vd.ellipse((ex - 10, ey - 10, ex + 10, ey + 10), fill=(255, 255, 255, 255) if ex < cx else (0, 220, 230, 255))
-vd.ellipse((cx - 16, cy + 24, cx + 16, cy + 56), fill=(255, 205, 60, 255), outline=(255, 240, 180, 255), width=3)
+# Symbolic emblem: gold coin with orbit ring and chain-link nodes
+coin_r = 44
+for i in range(14, 0, -1):
+    vd.ellipse((cx - coin_r - i, cy - coin_r - i, cx + coin_r + i, cy + coin_r + i), fill=(255, 200, 60, 5))
+vd.ellipse((cx - coin_r, cy - coin_r, cx + coin_r, cy + coin_r), fill=(255, 196, 56, 255),
+           outline=(255, 236, 170, 255), width=4)
+vd.ellipse((cx - coin_r + 12, cy - coin_r + 12, cx + coin_r - 12, cy + coin_r - 12),
+           outline=(200, 140, 20, 255), width=3)
+vd.rectangle((cx - 4, cy - 16, cx + 4, cy + 16), fill=(200, 140, 20, 255))
+vd.rectangle((cx - 12, cy - 4, cx + 12, cy + 4), fill=(200, 140, 20, 255))
+
+# Tilted orbit ring (ellipse) passing behind/in front of the coin
+orbit = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+od2 = ImageDraw.Draw(orbit)
+od2.ellipse((cx - 78, cy - 30, cx + 78, cy + 30), outline=(0, 220, 230, 255), width=6)
+orbit = orbit.rotate(-28, center=(cx, cy), resample=Image.BICUBIC)
+# Nodes on the orbit
+for ang in (20, 200):
+    a = math.radians(ang)
+    ox, oy = 78 * math.cos(a), 30 * math.sin(a)
+    rot = math.radians(28)
+    nx = cx + ox * math.cos(rot) - oy * math.sin(rot)
+    ny = cy + ox * math.sin(rot) + oy * math.cos(rot)
+    ImageDraw.Draw(orbit).ellipse((nx - 9, ny - 9, nx + 9, ny + 9), fill=(255, 255, 255, 255),
+                                  outline=(0, 220, 230, 255), width=3)
+img = Image.alpha_composite(img, orbit)
 img = Image.alpha_composite(img, v_layer)
 
 # Standalone logo export
