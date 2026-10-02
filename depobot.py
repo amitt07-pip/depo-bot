@@ -9,6 +9,7 @@ import base64
 import asyncio
 import time
 import aiohttp
+import requests
 import re
 import inspect
 import contextvars
@@ -594,11 +595,11 @@ NETWORKS = {
     },
     "BSC": {
         "name": "BNB Chain",
-        "rpc": "https://bsc-rpc.publicnode.com",
+        "rpc": "https://bsc-dataseed.binance.org",
         "rpc_fallbacks": [
-            "https://bsc-dataseed.binance.org",
             "https://bsc-dataseed1.defibit.io",
-            "https://bsc-dataseed1.ninicoin.io"
+            "https://bsc-dataseed1.ninicoin.io",
+            "https://bsc-rpc.publicnode.com"
         ],
         "chain_id": 56,
         "symbol": "BNB",
@@ -622,11 +623,11 @@ NETWORKS = {
     },
     "POLYGON": {
         "name": "Polygon",
-        "rpc": "https://polygon-bor-rpc.publicnode.com",
+        "rpc": "https://polygon.drpc.org",
         "rpc_fallbacks": [
-            "https://polygon.drpc.org",
-            "https://polygon.publicnode.com",
-            "https://1rpc.io/matic"
+            "https://1rpc.io/matic",
+            "https://polygon-bor-rpc.publicnode.com",
+            "https://polygon.publicnode.com"
         ],
         "chain_id": 137,
         "symbol": "MATIC",
@@ -734,6 +735,26 @@ def evm_call(network: str, fn):
             return result
         except Exception as e:
             last_error = e
+            _mark_rpc_failed(network, rpc, e)
+    raise last_error or RuntimeError(f"No RPC available for {network}")
+
+
+def evm_send_raw(network: str, raw_tx, tx_hash) -> str:
+    """Broadcast a signed tx, trying each RPC until one accepts it."""
+    tx_hash = Web3.to_hex(tx_hash)
+    last_error = None
+    for rpc in evm_rpc_order(network):
+        try:
+            _web3_for(rpc).eth.send_raw_transaction(raw_tx)
+            _WEB3_PREFERRED[network] = rpc
+            return tx_hash
+        except Exception as e:
+            message = str(e).lower()
+            if "already known" in message or "known transaction" in message:
+                return tx_hash
+            last_error = e
+            if not isinstance(e, (requests.exceptions.RequestException, OSError)):
+                raise
             _mark_rpc_failed(network, rpc, e)
     raise last_error or RuntimeError(f"No RPC available for {network}")
 
@@ -2939,11 +2960,14 @@ class WithdrawalHandler:
                 }
 
             signed_tx = w3.eth.account.sign_transaction(tx, private_key)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_hash = await asyncio.to_thread(
+                evm_send_raw, network, signed_tx.raw_transaction, signed_tx.hash
+            )
+            tx_hash = tx_hash[2:] if tx_hash.startswith("0x") else tx_hash
             return {
                 "success": True,
-                "tx_hash": tx_hash.hex(),
-                "explorer_url": f"{network_info['explorer']}/tx/0x{tx_hash.hex()}"
+                "tx_hash": tx_hash,
+                "explorer_url": f"{network_info['explorer']}/tx/0x{tx_hash}"
             }
         except Exception as e:
             logger.error(f"EVM withdrawal error: {e}")
@@ -8291,33 +8315,46 @@ class LiFi:
 
     @staticmethod
     def _execute_sync(network: str, private_key: str, quote: dict) -> str:
-        w3 = get_web3_with_retry(network)
         account = Account.from_key(private_key)
         chain_id = NETWORKS[network]["chain_id"]
         tx_request = quote["transaction_request"]
-        nonce = w3.eth.get_transaction_count(account.address)
-        gas_price = max(_hex_int(tx_request.get("gasPrice")), w3.eth.gas_price)
+        nonce = evm_call(network, lambda w3: w3.eth.get_transaction_count(account.address))
+        gas_price = max(
+            _hex_int(tx_request.get("gasPrice")),
+            evm_call(network, lambda w3: w3.eth.gas_price)
+        )
 
         token = quote["from_token"]
         spender = quote.get("approval_address")
         if token.lower() != LIFI_NATIVE_TOKEN and spender:
-            contract = w3.eth.contract(
-                address=Web3.to_checksum_address(token), abi=ERC20_APPROVE_ABI
-            )
+            token_address = Web3.to_checksum_address(token)
             spender = Web3.to_checksum_address(spender)
-            allowance = contract.functions.allowance(account.address, spender).call()
+
+            def contract(w3):
+                return w3.eth.contract(address=token_address, abi=ERC20_APPROVE_ABI)
+
+            allowance = evm_call(
+                network,
+                lambda w3: contract(w3).functions.allowance(account.address, spender).call()
+            )
             if allowance < quote["from_amount_raw"]:
-                approve_tx = contract.functions.approve(
-                    spender, quote["from_amount_raw"]
-                ).build_transaction({
-                    "from": account.address,
-                    "nonce": nonce,
-                    "gasPrice": gas_price,
-                    "chainId": chain_id,
-                })
+                approve_tx = evm_call(
+                    network,
+                    lambda w3: contract(w3).functions.approve(
+                        spender, quote["from_amount_raw"]
+                    ).build_transaction({
+                        "from": account.address,
+                        "nonce": nonce,
+                        "gasPrice": gas_price,
+                        "chainId": chain_id,
+                    })
+                )
                 signed = account.sign_transaction(approve_tx)
-                approve_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=180)
+                approve_hash = evm_send_raw(network, signed.raw_transaction, signed.hash)
+                receipt = evm_call(
+                    network,
+                    lambda w3: w3.eth.wait_for_transaction_receipt(approve_hash, timeout=180)
+                )
                 if receipt.status != 1:
                     raise RuntimeError("Token approval transaction failed")
                 nonce += 1
@@ -8333,7 +8370,7 @@ class LiFi:
         }
         symbol = NETWORKS[network]["symbol"]
         needed = tx["value"] + tx["gas"] * gas_price
-        have = w3.eth.get_balance(account.address)
+        have = evm_call(network, lambda w3: w3.eth.get_balance(account.address))
         if have < needed:
             raise ValueError(
                 f"Insufficient {symbol} for amount + gas. Need ~"
@@ -8341,7 +8378,7 @@ class LiFi:
                 f"{Web3.from_wei(have, 'ether'):.6f} {symbol}"
             )
         signed = account.sign_transaction(tx)
-        return Web3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
+        return evm_send_raw(network, signed.raw_transaction, signed.hash)
 
     @staticmethod
     async def execute(network: str, private_key: str, quote: dict) -> dict:
