@@ -1391,8 +1391,23 @@ class WalletDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        self._link_opbnb_wallets(cursor)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _link_opbnb_wallets(cursor, user_id: int = None):
+        """opBNB uses the same EVM key format: reuse the user's BSC (or ETH/Polygon) wallet."""
+        for source in ("BSC", "ETH", "POLYGON"):
+            cursor.execute(
+                "INSERT OR IGNORE INTO wallets "
+                "(user_id, network, address, encrypted_private_key, interface_id) "
+                "SELECT user_id, 'OPBNB', address, encrypted_private_key, interface_id "
+                "FROM wallets w WHERE w.network = ? AND (? IS NULL OR w.user_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM wallets o "
+                "WHERE o.user_id = w.user_id AND o.network = 'OPBNB')",
+                (source, user_id, user_id)
+            )
 
     def save_swap(self, shift_id: str, user_id: int, from_asset: str,
                   from_network: str, to_asset: str, to_network: str,
@@ -1466,6 +1481,8 @@ class WalletDatabase:
             "VALUES (?, ?, ?, ?)",
             (user_id, network, address, encrypted_private_key)
         )
+        if network in ("BSC", "ETH", "POLYGON"):
+            self._link_opbnb_wallets(cursor, user_id)
         conn.commit()
         conn.close()
 
