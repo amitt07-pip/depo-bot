@@ -387,6 +387,30 @@ def _install_message_owner_tracking():
 _install_message_owner_tracking()
 
 
+def _install_safe_callback_answer():
+    """Expired callback queries must not abort the handler that answers them."""
+    from telegram import CallbackQuery
+    from telegram.error import BadRequest
+
+    orig = CallbackQuery.answer
+
+    async def answer(self, *args, **kwargs):
+        try:
+            return await orig(self, *args, **kwargs)
+        except BadRequest as e:
+            msg = str(e).lower()
+            if "query is too old" in msg or "query id is invalid" in msg:
+                logger.debug(f"Ignoring expired callback query: {e}")
+                return False
+            raise
+
+    answer.__doc__ = orig.__doc__
+    CallbackQuery.answer = answer
+
+
+_install_safe_callback_answer()
+
+
 async def track_update_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Runs before every handler: bind the acting user and reject button
     presses on menus that belong to somebody else."""
@@ -540,11 +564,11 @@ NETWORKS = {
     },
     "BSC": {
         "name": "BNB Chain",
-        "rpc": "https://bsc-dataseed.binance.org",
+        "rpc": "https://bsc-rpc.publicnode.com",
         "rpc_fallbacks": [
+            "https://bsc-dataseed.binance.org",
             "https://bsc-dataseed1.defibit.io",
-            "https://bsc-dataseed1.ninicoin.io",
-            "https://bsc.publicnode.com"
+            "https://bsc-dataseed1.ninicoin.io"
         ],
         "chain_id": 56,
         "symbol": "BNB",
@@ -556,13 +580,9 @@ NETWORKS = {
         "name": "Polygon",
         "rpc": "https://polygon-bor-rpc.publicnode.com",
         "rpc_fallbacks": [
+            "https://polygon.drpc.org",
             "https://polygon.publicnode.com",
-            "https://1rpc.io/matic",
-            "https://polygon-rpc.com",
-            "https://rpc-mainnet.maticvigil.com",
-            "https://matic-mainnet.chainstacklabs.com",
-            "https://polygon.blockpi.network/v1/rpc/public",
-            "https://rpc.ankr.com/polygon"
+            "https://1rpc.io/matic"
         ],
         "chain_id": 137,
         "symbol": "MATIC",
@@ -620,27 +640,59 @@ NETWORKS = {
     }
 }
 
-# Helper function to get Web3 with retry and fallback
-def get_web3_with_retry(network: str, max_retries: int = 3):
-    """Get a Web3 instance, trying fallback RPCs if the primary fails."""
-    network_info = NETWORKS.get(network)
-    if not network_info:
-        return None
-    
-    rpcs = [network_info["rpc"]] + network_info.get("rpc_fallbacks", [])
-    
-    for rpc in rpcs:
+_WEB3_CLIENTS = {}
+_WEB3_PREFERRED = {}
+
+
+def _web3_for(rpc: str) -> Web3:
+    w3 = _WEB3_CLIENTS.get(rpc)
+    if w3 is None:
+        w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 8}))
+        _WEB3_CLIENTS[rpc] = w3
+    return w3
+
+
+def evm_rpc_order(network: str) -> list:
+    """RPC URLs for a network, last known-good endpoint first."""
+    network_info = NETWORKS.get(network) or {}
+    rpcs = [network_info.get("rpc")] + network_info.get("rpc_fallbacks", [])
+    rpcs = [r for r in rpcs if r]
+    preferred = _WEB3_PREFERRED.get(network)
+    if preferred in rpcs:
+        rpcs.remove(preferred)
+        rpcs.insert(0, preferred)
+    return rpcs
+
+
+def evm_call(network: str, fn):
+    """Run fn(w3) against each RPC until one succeeds (blocking)."""
+    last_error = None
+    for rpc in evm_rpc_order(network):
         try:
-            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 10}))
-            # Test connection
+            result = fn(_web3_for(rpc))
+            _WEB3_PREFERRED[network] = rpc
+            return result
+        except Exception as e:
+            last_error = e
+            logger.warning(f"RPC {rpc} failed: {e}, trying next...")
+            if _WEB3_PREFERRED.get(network) == rpc:
+                _WEB3_PREFERRED.pop(network, None)
+    raise last_error or RuntimeError(f"No RPC available for {network}")
+
+
+def get_web3_with_retry(network: str, max_retries: int = 3):
+    """Get a Web3 instance for a network, preferring the last working RPC."""
+    if network not in NETWORKS:
+        return None
+    for rpc in evm_rpc_order(network):
+        w3 = _web3_for(rpc)
+        try:
             w3.eth.block_number
+            _WEB3_PREFERRED[network] = rpc
             return w3
         except Exception as e:
             logger.warning(f"RPC {rpc} failed: {e}, trying next...")
-            continue
-    
-    # If all fail, return the primary anyway (let the caller handle the error)
-    return Web3(Web3.HTTPProvider(network_info["rpc"]))
+    return _web3_for(NETWORKS[network]["rpc"])
 
 TOKENS = {
     "ETH": {
@@ -1691,6 +1743,9 @@ class WalletGenerator:
             raise ValueError(f"Unknown network type: {network_info['type']}")
 
 
+_TOKEN_META_CACHE = {}
+
+
 class BalanceChecker:
     @staticmethod
     async def get_evm_balance(
@@ -1699,34 +1754,47 @@ class BalanceChecker:
         token_address: str = None
     ) -> dict:
         network_info = NETWORKS[network]
-        w3 = get_web3_with_retry(network)
+        owner = Web3.to_checksum_address(address)
 
         if token_address:
-            contract = w3.eth.contract(
-                address=Web3.to_checksum_address(token_address),
-                abi=ERC20_ABI
-            )
+            token = Web3.to_checksum_address(token_address)
+            cache_key = (network, token)
+
+            def fetch(w3):
+                contract = w3.eth.contract(address=token, abi=ERC20_ABI)
+                raw = contract.functions.balanceOf(owner).call()
+                meta = _TOKEN_META_CACHE.get(cache_key)
+                if meta is None:
+                    meta = (
+                        contract.functions.decimals().call(),
+                        contract.functions.symbol().call(),
+                    )
+                    _TOKEN_META_CACHE[cache_key] = meta
+                return raw, meta
+
             try:
-                balance = contract.functions.balanceOf(
-                    Web3.to_checksum_address(address)
-                ).call()
-                decimals = contract.functions.decimals().call()
-                symbol = contract.functions.symbol().call()
+                raw, (decimals, symbol) = await asyncio.to_thread(evm_call, network, fetch)
                 return {
-                    "balance": str(Decimal(balance) / Decimal(10 ** decimals)),
+                    "balance": str(Decimal(raw) / Decimal(10 ** decimals)),
                     "symbol": symbol,
-                    "raw_balance": balance
+                    "raw_balance": raw
                 }
             except Exception as e:
-                logger.error(f"Error getting token balance: {e}")
+                logger.error(f"Error getting token balance on {network}: {e}")
                 return {"balance": "0", "symbol": "TOKEN", "error": str(e)}
-        else:
-            balance = w3.eth.get_balance(Web3.to_checksum_address(address))
-            return {
-                "balance": str(Web3.from_wei(balance, "ether")),
-                "symbol": network_info["symbol"],
-                "raw_balance": balance
-            }
+
+        try:
+            raw = await asyncio.to_thread(
+                evm_call, network, lambda w3: w3.eth.get_balance(owner)
+            )
+        except Exception as e:
+            logger.error(f"Error getting {network} native balance: {e}")
+            return {"balance": "0", "symbol": network_info["symbol"], "error": str(e)}
+        return {
+            "balance": str(Web3.from_wei(raw, "ether")),
+            "symbol": network_info["symbol"],
+            "raw_balance": raw
+        }
 
     @staticmethod
     async def get_solana_balance(address: str) -> dict:
@@ -4547,82 +4615,51 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
 async def _gather_address_balances(address: str, detected):
     """Fetch all token/native balances for an address and compute USD value."""
     stablecoins = ["USDT", "USDC"]
-    balances = []
-    total_usd = Decimal("0")
-    errors = []
-
     networks = detected if isinstance(detected, list) else [detected]
 
-    for network in networks:
+    async def fetch_entry(network, token=None):
         network_info = NETWORKS.get(network, {})
         network_name = network_info.get("name", network)
-        net_type = network_info.get("type", "")
-        explorer_url = address_explorer_url(network, address)
+        try:
+            if token is None:
+                info = await BalanceChecker.get_balance(network, address)
+            else:
+                info = await BalanceChecker.get_token_balance(token, network, address)
+            if info.get("error"):
+                if token is None and network_info.get("type") in ("btc", "ltc"):
+                    return None, f"{network_name}: {info.get('error')}"
+                return None, None
+            symbol = token or info.get("symbol") or network_info.get("symbol", network)
+            balance = Decimal(str(info.get("balance", "0")))
+            usd_value = balance * await PriceFetcher.get_price(symbol)
+            return {
+                "network": network,
+                "network_name": network_name,
+                "token": symbol,
+                "balance": balance,
+                "usd_value": usd_value,
+                "explorer_url": address_explorer_url(network, address),
+            }, None
+        except Exception as e:
+            label = f"{network_name} {token}" if token else network_name
+            logger.error(f"Error checking {label} balance: {e}")
+            return None, f"{label}: error"
 
-        if net_type in ("btc", "ltc"):
-            try:
-                balance_info = await BalanceChecker.get_balance(network, address)
-                if balance_info.get("error"):
-                    errors.append(f"{network_name}: {balance_info.get('error')}")
-                    continue
-                balance = Decimal(str(balance_info.get("balance", "0")))
-                symbol = balance_info.get("symbol", network)
-                price = await PriceFetcher.get_price(symbol)
-                usd_value = balance * price
-                total_usd += usd_value
-                balances.append({
-                    "network": network,
-                    "network_name": network_name,
-                    "token": symbol,
-                    "balance": balance,
-                    "usd_value": usd_value,
-                    "explorer_url": explorer_url,
-                })
-            except Exception as e:
-                logger.error(f"Error checking {network} balance: {e}")
-                errors.append(f"{network_name}: error")
-        else:
-            # Native balance
-            try:
-                native_symbol = network_info.get("symbol", network)
-                native_info = await BalanceChecker.get_balance(network, address)
-                if not native_info.get("error"):
-                    native_balance = Decimal(str(native_info.get("balance", "0")))
-                    native_price = await PriceFetcher.get_price(native_symbol)
-                    native_usd = native_balance * native_price
-                    total_usd += native_usd
-                    balances.append({
-                        "network": network,
-                        "network_name": network_name,
-                        "token": native_symbol,
-                        "balance": native_balance,
-                        "usd_value": native_usd,
-                        "explorer_url": explorer_url,
-                    })
-            except Exception as e:
-                logger.error(f"Error checking {network} native balance: {e}")
+    jobs = []
+    for network in networks:
+        jobs.append(fetch_entry(network))
+        if NETWORKS.get(network, {}).get("type", "") not in ("btc", "ltc"):
+            jobs.extend(fetch_entry(network, token) for token in stablecoins)
 
-            # Token balances
-            for token in stablecoins:
-                try:
-                    balance_info = await BalanceChecker.get_token_balance(token, network, address)
-                    if balance_info.get("error"):
-                        continue
-                    balance = Decimal(str(balance_info.get("balance", "0")))
-                    price = await PriceFetcher.get_price(token)
-                    usd_value = balance * price
-                    total_usd += usd_value
-                    balances.append({
-                        "network": network,
-                        "network_name": network_name,
-                        "token": token,
-                        "balance": balance,
-                        "usd_value": usd_value,
-                        "explorer_url": explorer_url,
-                    })
-                except Exception as e:
-                    logger.error(f"Error checking {token} on {network}: {e}")
-                    errors.append(f"{network_name} {token}: error")
+    balances = []
+    errors = []
+    total_usd = Decimal("0")
+    for entry, error in await asyncio.gather(*jobs):
+        if entry:
+            balances.append(entry)
+            total_usd += entry["usd_value"]
+        if error:
+            errors.append(error)
 
     return balances, total_usd, errors
 
@@ -9018,6 +9055,10 @@ async def start_transaction_monitor(application):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Global error handler to prevent bot from dying on exceptions."""
+    err_text = str(context.error).lower()
+    if "query is too old" in err_text or "message is not modified" in err_text:
+        logger.warning(f"Ignored Telegram error: {context.error}")
+        return
     logger.error(f"Exception while handling an update: {context.error}")
     logger.error(f"Traceback: {traceback.format_exc()}")
     
