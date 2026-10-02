@@ -174,6 +174,7 @@ TOKEN_EMOJI = {
 NETWORK_TOKEN_ICON = {
     "ETH": "ETH",
     "BSC": "BNB",
+    "OPBNB": "BNB",
     "POLYGON": "MATIC",
     "SOLANA": "SOL",
     "TRON": "TRX",
@@ -543,6 +544,10 @@ SIDESHIFT_API = "https://sideshift.ai/api/v2"
 SIDESHIFT_AFFILIATE_ID = os.getenv("SIDESHIFT_AFFILIATE_ID", "")
 SIDESHIFT_SECRET = os.getenv("SIDESHIFT_SECRET", "")
 
+# LI.FI DEX/bridge aggregator (EVM chains incl. opBNB; API key optional)
+LIFI_API = "https://li.quest/v1"
+LIFI_API_KEY = os.getenv("LIFI_API_KEY", "")
+
 wallet_balances_cache = {}
 wallet_cache_initialized = False  # Flag to track if cache has been initialized on first run
 notification_cooldowns = {}  # Track last notification time per user/token to prevent spam
@@ -574,6 +579,20 @@ NETWORKS = {
         "chain_id": 56,
         "symbol": "BNB",
         "explorer": "https://bscscan.com",
+        "type": "evm",
+        "icon": "\U0001F7E1"
+    },
+    "OPBNB": {
+        "name": "opBNB",
+        "rpc": "https://opbnb-mainnet-rpc.bnbchain.org",
+        "rpc_fallbacks": [
+            "https://opbnb.drpc.org",
+            "https://opbnb-rpc.publicnode.com",
+            "https://1rpc.io/opbnb"
+        ],
+        "chain_id": 204,
+        "symbol": "BNB",
+        "explorer": "https://opbnb.bscscan.com",
         "type": "evm",
         "icon": "\U0001F7E1"
     },
@@ -726,7 +745,8 @@ TOKENS = {
         "icon": "\U0001F7E1",
         "native": True,
         "networks": {
-            "BSC": {"native": True, "decimals": 18}
+            "BSC": {"native": True, "decimals": 18},
+            "OPBNB": {"native": True, "decimals": 18}
         }
     },
     "MATIC": {
@@ -767,6 +787,10 @@ TOKENS = {
             },
             "BSC": {
                 "address": "0x55d398326f99059fF775485246999027B3197955",
+                "decimals": 18
+            },
+            "OPBNB": {
+                "address": "0x9e5AAC1Ba1a2e6aEd6b32689DFcF62A509Ca96f3",
                 "decimals": 18
             },
             "POLYGON": {
@@ -857,6 +881,7 @@ GENERATE_NETWORK, GENERATE_CONFIRM = range(9, 11)
 BALANCE_NETWORK = 11
 CONVERT_FROM_ASSET, CONVERT_TO_ASSET, CONVERT_AMOUNT_AI = range(12, 15)
 WITHDRAW_QUICK_NETWORK = 15
+CONVERT_PROVIDER = 16
 
 pending_withdrawals = {}
 
@@ -888,6 +913,7 @@ NETWORK_ALIASES = {
     "erc20": "ETH", "erc-20": "ETH", "etherium": "ETH", "etherem": "ETH", "ether": "ETH",
     "bsc": "BSC", "binance": "BSC", "binance smart chain": "BSC", "bnb chain": "BSC", "bnb": "BSC",
     "bep20": "BSC", "bep-20": "BSC", "bnb smart chain": "BSC", "smartchain": "BSC", "binance chain": "BSC",
+    "opbnb": "OPBNB", "op bnb": "OPBNB", "opbnb chain": "OPBNB", "op-bnb": "OPBNB",
     "polygon": "POLYGON", "matic": "POLYGON", "poly": "POLYGON", "pol": "POLYGON",
     "matic network": "POLYGON", "polygon mainnet": "POLYGON", "polyg": "POLYGON",
     "solana": "SOLANA", "sol": "SOLANA", "solan": "SOLANA",
@@ -935,7 +961,7 @@ def detect_network_from_address(address: str):
     
     Returns:
         - Single network key (e.g., 'TRON', 'SOLANA', 'LTC') if uniquely identifiable
-        - List of possible networks (e.g., ['ETH', 'BSC', 'POLYGON']) for EVM addresses
+        - List of possible networks (e.g., ['ETH', 'BSC', 'OPBNB', 'POLYGON']) for EVM addresses
         - None if address format is not recognized
     """
     address = address.strip()
@@ -965,7 +991,7 @@ def detect_network_from_address(address: str):
         return 'TON'
 
     if address.startswith('0x') and len(address) == 42:
-        return ['ETH', 'BSC', 'POLYGON']
+        return ['ETH', 'BSC', 'OPBNB', 'POLYGON']
     
     return None
 
@@ -973,7 +999,7 @@ def is_valid_address(address: str, network: str) -> bool:
     """Validate if address format is correct for the given network."""
     address = address.strip()
     
-    if network in ['ETH', 'BSC', 'POLYGON']:
+    if network in ['ETH', 'BSC', 'OPBNB', 'POLYGON']:
         return address.startswith('0x') and len(address) == 42
     elif network == 'TRON':
         return address.startswith('T') and len(address) == 34
@@ -995,6 +1021,8 @@ def is_valid_address(address: str, network: str) -> bool:
 
 EXPLORER_DOMAIN_NETWORK = {
     "etherscan.io": "ETH",
+    "opbnb.bscscan.com": "OPBNB",
+    "opbnbscan.com": "OPBNB",
     "bscscan.com": "BSC",
     "polygonscan.com": "POLYGON",
     "solscan.io": "SOLANA",
@@ -1077,7 +1105,7 @@ def detect_tx_hash(text: str):
     t = text.strip()
 
     if re.fullmatch(r"0x[0-9a-fA-F]{64}", t):
-        return (["ETH", "BSC", "POLYGON"], t)
+        return (["ETH", "BSC", "OPBNB", "POLYGON"], t)
     if re.fullmatch(r"[0-9a-fA-F]{64}", t):
         return (["TRON", "LTC", "BTC"], t)
     if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", t):
@@ -4003,7 +4031,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{ui('coin')}  <b>Available Tokens:</b>\n"
             "    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC\n\n"
             f"{ui('explorer')}  <b>Available Networks:</b>\n"
-            "    ETH, BSC, POLYGON, SOLANA, TRON, LTC"
+            "    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC"
         )
         await update.message.reply_text(usage_text, parse_mode="HTML")
         return
@@ -4035,7 +4063,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\u274C *Invalid Network*\n\n"
             f"Network `{network}` is not supported.\n\n"
             f"\U0001F310 *Available Networks:*\n"
-            f"    ETH, BSC, POLYGON, SOLANA, TRON, LTC",
+            f"    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC",
             parse_mode="Markdown"
         )
         return
@@ -7898,6 +7926,200 @@ SIDESHIFT_PAIRS = {
 
 SWAP_FINAL_STATUSES = {"settled", "refunded", "expired"}
 
+LIFI_NATIVE_TOKEN = "0x0000000000000000000000000000000000000000"
+LIFI_FINAL_STATUSES = {"DONE", "FAILED", "INVALID"}
+LIFI_SLIPPAGE = "0.005"
+
+ERC20_APPROVE_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"},
+                   {"name": "_spender", "type": "address"}],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "type": "function"
+    },
+    {
+        "constant": False,
+        "inputs": [{"name": "_spender", "type": "address"},
+                   {"name": "_value", "type": "uint256"}],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "type": "function"
+    },
+]
+
+
+def _build_lifi_pairs() -> dict:
+    """(bot token, bot network) -> (chain id, token address, decimals) for EVM chains."""
+    pairs = {}
+    for network, info in NETWORKS.items():
+        if info.get("type") != "evm":
+            continue
+        pairs[(info["symbol"], network)] = (info["chain_id"], LIFI_NATIVE_TOKEN, 18)
+        for token in ("USDT", "USDC"):
+            meta = TOKENS.get(token, {}).get("networks", {}).get(network)
+            if meta and meta.get("address"):
+                pairs[(token, network)] = (info["chain_id"], meta["address"], meta["decimals"])
+    return pairs
+
+
+LIFI_PAIRS = _build_lifi_pairs()
+
+SWAP_PROVIDERS = {
+    "sideshift": "SideShift.ai",
+    "lifi": "LI.FI",
+}
+
+
+def provider_pairs(provider: str) -> dict:
+    return LIFI_PAIRS if provider == "lifi" else SIDESHIFT_PAIRS
+
+
+def _hex_int(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    value = str(value)
+    return int(value, 16) if value.startswith("0x") else int(value)
+
+
+class LiFi:
+    """Minimal LI.FI client: quotes plus a signed transaction from the user's wallet."""
+
+    @staticmethod
+    def _headers() -> dict:
+        return {"x-lifi-api-key": LIFI_API_KEY} if LIFI_API_KEY else {}
+
+    @staticmethod
+    async def get_quote(from_key, to_key, amount: Decimal,
+                        from_address: str, to_address: str) -> dict:
+        from_chain, from_token, from_decimals = LIFI_PAIRS[from_key]
+        to_chain, to_token, to_decimals = LIFI_PAIRS[to_key]
+        raw_amount = int(Decimal(amount) * Decimal(10 ** from_decimals))
+        if raw_amount <= 0:
+            return {"error": "Amount too small"}
+        params = {
+            "fromChain": str(from_chain),
+            "toChain": str(to_chain),
+            "fromToken": from_token,
+            "toToken": to_token,
+            "fromAmount": str(raw_amount),
+            "fromAddress": from_address,
+            "toAddress": to_address,
+            "slippage": LIFI_SLIPPAGE,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{LIFI_API}/quote", params=params,
+                    headers=LiFi._headers(), timeout=30
+                ) as resp:
+                    data = await resp.json(content_type=None)
+        except Exception as e:
+            return {"error": str(e)}
+        estimate = (data or {}).get("estimate")
+        tx_request = (data or {}).get("transactionRequest")
+        if not estimate or not tx_request:
+            return {"error": (data or {}).get("message") or "No route available"}
+        scale = Decimal(10 ** to_decimals)
+        to_amount = Decimal(estimate.get("toAmount") or 0) / scale
+        return {
+            "from_amount_raw": raw_amount,
+            "from_token": from_token,
+            "from_chain": from_chain,
+            "to_chain": to_chain,
+            "to_amount": to_amount,
+            "to_amount_min": Decimal(estimate.get("toAmountMin") or 0) / scale,
+            "rate": to_amount / Decimal(amount),
+            "approval_address": estimate.get("approvalAddress"),
+            "tool": (data.get("toolDetails") or {}).get("name") or data.get("tool", ""),
+            "duration": estimate.get("executionDuration"),
+            "transaction_request": tx_request,
+        }
+
+    @staticmethod
+    def _execute_sync(network: str, private_key: str, quote: dict) -> str:
+        w3 = get_web3_with_retry(network)
+        account = Account.from_key(private_key)
+        chain_id = NETWORKS[network]["chain_id"]
+        tx_request = quote["transaction_request"]
+        nonce = w3.eth.get_transaction_count(account.address)
+        gas_price = max(_hex_int(tx_request.get("gasPrice")), w3.eth.gas_price)
+
+        token = quote["from_token"]
+        spender = quote.get("approval_address")
+        if token.lower() != LIFI_NATIVE_TOKEN and spender:
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(token), abi=ERC20_APPROVE_ABI
+            )
+            spender = Web3.to_checksum_address(spender)
+            allowance = contract.functions.allowance(account.address, spender).call()
+            if allowance < quote["from_amount_raw"]:
+                approve_tx = contract.functions.approve(
+                    spender, quote["from_amount_raw"]
+                ).build_transaction({
+                    "from": account.address,
+                    "nonce": nonce,
+                    "gasPrice": gas_price,
+                    "chainId": chain_id,
+                })
+                signed = account.sign_transaction(approve_tx)
+                approve_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=180)
+                if receipt.status != 1:
+                    raise RuntimeError("Token approval transaction failed")
+                nonce += 1
+
+        tx = {
+            "to": Web3.to_checksum_address(tx_request["to"]),
+            "data": tx_request["data"],
+            "value": _hex_int(tx_request.get("value")),
+            "gas": _hex_int(tx_request.get("gasLimit")) or 500000,
+            "gasPrice": gas_price,
+            "nonce": nonce,
+            "chainId": chain_id,
+        }
+        symbol = NETWORKS[network]["symbol"]
+        needed = tx["value"] + tx["gas"] * gas_price
+        have = w3.eth.get_balance(account.address)
+        if have < needed:
+            raise ValueError(
+                f"Insufficient {symbol} for amount + gas. Need ~"
+                f"{Web3.from_wei(needed, 'ether'):.6f} {symbol}, have "
+                f"{Web3.from_wei(have, 'ether'):.6f} {symbol}"
+            )
+        signed = account.sign_transaction(tx)
+        return Web3.to_hex(w3.eth.send_raw_transaction(signed.raw_transaction))
+
+    @staticmethod
+    async def execute(network: str, private_key: str, quote: dict) -> dict:
+        try:
+            tx_hash = await asyncio.to_thread(
+                LiFi._execute_sync, network, private_key, quote
+            )
+            return {"success": True, "tx_hash": tx_hash}
+        except Exception as e:
+            logger.error(f"LI.FI swap send error: {e}")
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    async def get_status(tx_hash: str, from_chain: int, to_chain: int) -> dict:
+        params = {"txHash": tx_hash, "fromChain": str(from_chain), "toChain": str(to_chain)}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{LIFI_API}/status", params=params,
+                    headers=LiFi._headers(), timeout=20
+                ) as resp:
+                    data = await resp.json(content_type=None)
+        except Exception as e:
+            return {"error": str(e)}
+        if not isinstance(data, dict) or "status" not in data:
+            return {"error": (data or {}).get("message", "Status unavailable")}
+        return data
+
 
 def swap_pair_key(asset: str, network: str) -> str:
     return f"{asset}:{network}"
@@ -7987,8 +8209,8 @@ class SideShift:
         return data
 
 
-async def get_swap_holdings(user_id: int) -> list:
-    """On-chain balances for every (asset, network) pair SideShift can swap."""
+async def get_swap_holdings(user_id: int, pairs: dict) -> list:
+    """On-chain balances for every (asset, network) pair the provider can swap."""
     wallets = {w["network"]: w["address"] for w in db.get_all_wallets(user_id)}
 
     async def fetch(asset, network, address):
@@ -8004,7 +8226,7 @@ async def get_swap_holdings(user_id: int) -> list:
 
     tasks = [
         fetch(asset, network, wallets[network])
-        for (asset, network) in SIDESHIFT_PAIRS
+        for (asset, network) in pairs
         if network in wallets
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -8018,11 +8240,11 @@ async def get_swap_holdings(user_id: int) -> list:
     return holdings
 
 
-def swap_targets(user_id: int, from_asset: str, from_network: str) -> list:
+def swap_targets(user_id: int, from_asset: str, from_network: str, pairs: dict) -> list:
     """Destination pairs the user has a wallet for (settlement address)."""
     wallets = {w["network"] for w in db.get_all_wallets(user_id)}
     return [
-        (asset, network) for (asset, network) in SIDESHIFT_PAIRS
+        (asset, network) for (asset, network) in pairs
         if network in wallets and (asset, network) != (from_asset, from_network)
     ]
 
@@ -8042,34 +8264,57 @@ def _fmt_amount(value) -> str:
 async def _start_convert(bot, chat_id: int, user_id: int, context):
     context.user_data.pop("swap", None)
 
-    if not SideShift.configured():
-        text = (
-            f"{h_html('convert', 'Convert')}\n\n"
-            "<b>Swap provider is not configured.</b>\n"
-            "Set <code>SIDESHIFT_AFFILIATE_ID</code> on the server to enable "
-            "real-time swaps."
-        )
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("convert"), "rb"),
-            caption=text,
-            parse_mode="HTML"
-        )
-        return ConversationHandler.END
-
-    loading = await bot.send_photo(
+    keyboard = [
+        [ikb("SideShift.ai", callback_data="swap_prov:sideshift", ui_name="convert")],
+        [ikb("LI.FI", callback_data="swap_prov:lifi", ui_name="convert")],
+        _swap_cancel_row(),
+    ]
+    sideshift_note = "" if SideShift.configured() else " <i>(not configured)</i>"
+    await bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("convert"), "rb"),
+        caption=(
+            f"{h_html('convert', 'Convert')}\n\n"
+            f"<b>SideShift.ai</b>{sideshift_note}\n"
+            "Cross-chain: BTC, LTC, SOL, TRON, ETH, BSC, Polygon\n\n"
+            "<b>LI.FI</b>\n"
+            "DEX + bridges: ETH, BSC, opBNB, Polygon\n\n"
+            "<b>Choose a swap provider:</b>"
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CONVERT_PROVIDER
+
+
+async def receive_convert_provider(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    provider = query.data.split(":", 1)[1]
+    if provider not in SWAP_PROVIDERS:
+        await query.answer()
+        return CONVERT_PROVIDER
+    if provider == "sideshift" and not SideShift.configured():
+        await query.answer(
+            "SideShift is not configured. Set SIDESHIFT_AFFILIATE_ID on the server, or choose LI.FI.",
+            show_alert=True
+        )
+        return CONVERT_PROVIDER
+    await query.answer()
+
+    provider_name = SWAP_PROVIDERS[provider]
+    await query.edit_message_caption(
         caption=f"{h_html('convert', 'Convert')}\n\n<b>Loading your balances...</b>",
         parse_mode="HTML"
     )
 
-    holdings = await get_swap_holdings(user_id)
+    holdings = await get_swap_holdings(query.from_user.id, provider_pairs(provider))
     if not holdings:
-        await loading.edit_caption(
+        await query.edit_message_caption(
             caption=(
                 f"{h_html('convert', 'Convert')}\n\n"
-                "No swappable assets found in your wallets.\n"
+                f"No assets swappable via {esc(provider_name)} found in your wallets.\n"
                 "Deposit funds first."
             ),
             parse_mode="HTML"
@@ -8086,15 +8331,16 @@ async def _start_convert(bot, chat_id: int, user_id: int, context):
     keyboard.append(_swap_cancel_row())
 
     context.user_data["swap"] = {
+        "provider": provider,
         "holdings": {
             swap_pair_key(h["asset"], h["network"]): str(h["balance"]) for h in holdings
         }
     }
 
-    await loading.edit_caption(
+    await query.edit_message_caption(
         caption=(
             f"{h_html('convert', 'Convert')}\n\n"
-            "Real-time swap powered by SideShift.ai\n\n"
+            f"Real-time swap powered by {esc(provider_name)}\n\n"
             "<b>Which asset do you want to swap from?</b>"
         ),
         parse_mode="HTML",
@@ -8150,7 +8396,10 @@ async def receive_convert_from_asset(update: Update, context: ContextTypes.DEFAU
     })
     context.user_data["swap"] = swap
 
-    targets = swap_targets(query.from_user.id, from_asset, from_network)
+    targets = swap_targets(
+        query.from_user.id, from_asset, from_network,
+        provider_pairs(swap.get("provider", "sideshift"))
+    )
     if not targets:
         await query.edit_message_caption(
             caption=(
@@ -8191,19 +8440,30 @@ async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT
     if "from_asset" not in swap:
         return ConversationHandler.END
 
+    provider = swap.get("provider", "sideshift")
+    pairs = provider_pairs(provider)
     to_asset, to_network = query.data.split(":", 1)[1].split(":")
-    if (to_asset, to_network) not in SIDESHIFT_PAIRS:
+    if (to_asset, to_network) not in pairs:
         return CONVERT_TO_ASSET
-
-    from_pair = SIDESHIFT_PAIRS[(swap["from_asset"], swap["from_network"])]
-    to_pair = SIDESHIFT_PAIRS[(to_asset, to_network)]
 
     await query.edit_message_caption(
         caption=f"{h_html('convert', 'Convert')}\n\n<b>Fetching live rate...</b>",
         parse_mode="HTML"
     )
 
-    pair = await SideShift.get_pair(from_pair, to_pair)
+    if provider == "lifi":
+        user_id = query.from_user.id
+        source_wallet = db.get_wallet(user_id, swap["from_network"])
+        dest_wallet = db.get_wallet(user_id, to_network)
+        quote = await LiFi.get_quote(
+            (swap["from_asset"], swap["from_network"]), (to_asset, to_network),
+            Decimal(swap["balance"]), source_wallet["address"], dest_wallet["address"]
+        )
+        pair = quote if "error" in quote else {"rate": quote["rate"], "min": None, "max": None}
+    else:
+        pair = await SideShift.get_pair(
+            pairs[(swap["from_asset"], swap["from_network"])], pairs[(to_asset, to_network)]
+        )
     if "error" in pair:
         await query.edit_message_caption(
             caption=(
@@ -8230,8 +8490,11 @@ async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT
         f"To: <b>{esc(swap_pair_label(to_asset, to_network))}</b>\n\n"
         f"Live rate: <code>1 {esc(swap['from_asset'])} \u2248 "
         f"{esc(_fmt_amount(pair['rate']))} {esc(to_asset)}</code>\n"
-        f"Min: <code>{esc(_fmt_amount(pair['min']))}</code>  "
-        f"Max: <code>{esc(_fmt_amount(pair['max']))}</code> {esc(swap['from_asset'])}\n"
+        + (
+            f"Min: <code>{esc(_fmt_amount(pair['min']))}</code>  "
+            f"Max: <code>{esc(_fmt_amount(pair['max']))}</code> {esc(swap['from_asset'])}\n"
+            if pair.get("min") and pair.get("max") else ""
+        ) +
         f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(swap['from_asset'])}</code>\n\n"
         f"<b>Enter the amount of {esc(swap['from_asset'])} to swap:</b>"
     )
@@ -8284,11 +8547,41 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
         )
         return CONVERT_AMOUNT_AI
 
-    from_pair = SIDESHIFT_PAIRS[(from_asset, swap["from_network"])]
-    to_pair = SIDESHIFT_PAIRS[(swap["to_asset"], swap["to_network"])]
-    pair = await SideShift.get_pair(from_pair, to_pair)
-    rate = Decimal(str(pair.get("rate") or swap.get("rate") or "0"))
-    estimated = amount * rate
+    provider = swap.get("provider", "sideshift")
+    if provider == "lifi":
+        source_wallet = db.get_wallet(user_id, swap["from_network"])
+        dest_wallet = db.get_wallet(user_id, swap["to_network"])
+        quote = await LiFi.get_quote(
+            (from_asset, swap["from_network"]), (swap["to_asset"], swap["to_network"]),
+            amount, source_wallet["address"], dest_wallet["address"]
+        )
+        if "error" in quote:
+            await context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"<b>No route for this amount:</b> {esc(quote['error'])}\n\nEnter the amount again:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+            )
+            return CONVERT_AMOUNT_AI
+        rate = quote["rate"]
+        estimated = quote["to_amount"]
+        footer = (
+            f"<i>Route: {esc(quote['tool'])}. Minimum received after slippage: "
+            f"{esc(_fmt_amount(quote['to_amount_min'].quantize(Decimal('0.00000001'))))} "
+            f"{esc(swap['to_asset'])}. Gas is paid from your source wallet.</i>"
+        )
+    else:
+        pairs = provider_pairs(provider)
+        pair = await SideShift.get_pair(
+            pairs[(from_asset, swap["from_network"])],
+            pairs[(swap["to_asset"], swap["to_network"])]
+        )
+        rate = Decimal(str(pair.get("rate") or swap.get("rate") or "0"))
+        estimated = amount * rate
+        footer = (
+            "<i>Final amount is fixed by SideShift when your deposit confirms on-chain. "
+            "Network fees are deducted from your source wallet.</i>"
+        )
 
     swap["amount"] = str(amount)
     swap["rate"] = str(rate)
@@ -8307,8 +8600,7 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
         f"You receive: <code>\u2248 {esc(_fmt_amount(estimated.quantize(Decimal('0.00000001'))))} "
         f"{esc(swap['to_asset'])}</code> ({esc(NETWORKS[swap['to_network']]['name'])})\n"
         f"Live rate: <code>1 {esc(from_asset)} \u2248 {esc(_fmt_amount(rate))} {esc(swap['to_asset'])}</code>\n\n"
-        "<i>Final amount is fixed by SideShift when your deposit confirms on-chain. "
-        "Network fees are deducted from your source wallet.</i>"
+        f"{footer}"
     )
     await context.bot.send_photo(
         chat_id=update.message.chat_id,
@@ -8371,8 +8663,128 @@ def _swap_status_keyboard(shift_id: str, swap_row: dict, shift: dict) -> InlineK
     return InlineKeyboardMarkup(rows)
 
 
+def _lifi_swap_id(tx_hash: str) -> str:
+    return "lf-" + tx_hash.lower().removeprefix("0x")[:24]
+
+
+def _lifi_status_text(status: dict, swap_row: dict) -> str:
+    state = status.get("status", "NOT_FOUND")
+    labels = {
+        "NOT_FOUND": "Waiting for the transaction to be indexed",
+        "PENDING": "In progress",
+        "DONE": "Completed - funds delivered",
+        "FAILED": "Failed",
+        "INVALID": "Invalid transaction",
+    }
+    lines = [
+        f"{h_html('convert', 'Swap Status')}\n",
+        f"Status: <b>{esc(labels.get(state, state.title()))}</b>",
+    ]
+    if status.get("substatusMessage"):
+        lines.append(f"<i>{esc(status['substatusMessage'])}</i>")
+    lines.append(
+        f"Sent: <code>{esc(_fmt_amount(swap_row['amount']))} {esc(swap_row['from_asset'])}</code> "
+        f"({esc(NETWORKS.get(swap_row['from_network'], {}).get('name', swap_row['from_network']))})"
+    )
+    receiving = status.get("receiving") or {}
+    token = receiving.get("token") or {}
+    if receiving.get("amount") and token.get("decimals") is not None:
+        received = Decimal(receiving["amount"]) / Decimal(10 ** int(token["decimals"]))
+        lines.append(f"Received: <code>{esc(_fmt_amount(received))} {esc(token.get('symbol', swap_row['to_asset']))}</code>")
+    lines.append(f"TX: <code>{esc(swap_row['deposit_tx_hash'])}</code>")
+    return "\n".join(lines)
+
+
+def _lifi_status_keyboard(swap_row: dict, status: dict) -> InlineKeyboardMarkup:
+    tx_hash = swap_row["deposit_tx_hash"]
+    rows = [[ikb("Source TX", url=tx_explorer_url(swap_row["from_network"], tx_hash), ui_name="explorer")]]
+    receiving = status.get("receiving") or {}
+    if receiving.get("txLink") and receiving.get("txHash") != tx_hash:
+        rows.append([ikb("Destination TX", url=receiving["txLink"], ui_name="explorer")])
+    rows.append([ikb("Track on LI.FI", url=f"https://scan.li.fi/tx/{tx_hash}", ui_name="explorer")])
+    if status.get("status") not in LIFI_FINAL_STATUSES:
+        rows.append([ikb("Refresh Status", callback_data=f"swap_status:{swap_row['shift_id']}",
+                         emoji_fallback="\U0001F504")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _confirm_lifi_swap(query, swap: dict, user_id: int):
+    from_asset, from_network = swap["from_asset"], swap["from_network"]
+    to_asset, to_network = swap["to_asset"], swap["to_network"]
+    amount = swap["amount"]
+
+    source_wallet = db.get_wallet(user_id, from_network)
+    dest_wallet = db.get_wallet(user_id, to_network)
+    if not source_wallet or not dest_wallet:
+        await query.edit_message_caption(caption="<b>Wallet not found.</b>", parse_mode="HTML")
+        return
+
+    await query.edit_message_caption(
+        caption=f"{h_html('convert', 'Convert')}\n\n<b>Getting a fresh LI.FI route...</b>",
+        parse_mode="HTML"
+    )
+    quote = await LiFi.get_quote(
+        (from_asset, from_network), (to_asset, to_network),
+        Decimal(amount), source_wallet["address"], dest_wallet["address"]
+    )
+    if "error" in quote:
+        await query.edit_message_caption(
+            caption=(
+                f"{h_html('convert', 'Swap Failed')}\n\n"
+                f"<b>Could not get a route:</b> {esc(quote['error'])}"
+            ),
+            parse_mode="HTML"
+        )
+        return
+
+    await query.edit_message_caption(
+        caption=(
+            f"{h_html('convert', 'Convert')}\n\n"
+            f"<b>Sending {esc(_fmt_amount(amount))} {esc(from_asset)} via {esc(quote['tool'])}...</b>"
+        ),
+        parse_mode="HTML"
+    )
+
+    try:
+        private_key = CryptoUtils.decrypt_private_key(source_wallet["encrypted_private_key"])
+        logger.info(f"User {user_id} swapping {amount} {from_asset}/{from_network} -> {to_asset}/{to_network} via LI.FI")
+        result = await LiFi.execute(from_network, private_key, quote)
+    finally:
+        private_key = None
+
+    if not result.get("success"):
+        await query.edit_message_caption(
+            caption=(
+                f"{h_html('convert', 'Swap Failed')}\n\n"
+                f"<b>{esc(result.get('error', 'Unknown error'))}</b>"
+            ),
+            parse_mode="HTML"
+        )
+        return
+
+    tx_hash = result["tx_hash"]
+    swap_id = _lifi_swap_id(tx_hash)
+    db.save_swap(
+        swap_id, user_id, from_asset, from_network, to_asset, to_network,
+        amount, "lifi", tx_hash
+    )
+    swap_row = db.get_swap(swap_id)
+    await query.edit_message_caption(
+        caption=(
+            f"{h_html('convert', 'Swap Submitted')}\n\n"
+            f"Sent <code>{esc(_fmt_amount(amount))} {esc(from_asset)}</code> via {esc(quote['tool'])}.\n"
+            f"You will receive \u2248 <b>{esc(_fmt_amount(quote['to_amount'].quantize(Decimal('0.00000001'))))} "
+            f"{esc(to_asset)}</b> at <code>{esc(format_address(dest_wallet['address']))}</code>.\n\n"
+            f"TX: <code>{esc(tx_hash)}</code>\n\n"
+            "Tap <b>Refresh Status</b> to track progress."
+        ),
+        parse_mode="HTML",
+        reply_markup=_lifi_status_keyboard(swap_row, {"status": "PENDING"})
+    )
+
+
 async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create the SideShift order and send the source asset to its deposit address."""
+    """Create the swap order and send the source asset from the user's wallet."""
     if not await check_callback_auth(update):
         return
     query = update.callback_query
@@ -8389,6 +8801,10 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if swap.get("provider") == "lifi":
+        await _confirm_lifi_swap(query, swap, user_id)
+        return
+
     from_asset, from_network = swap["from_asset"], swap["from_network"]
     to_asset, to_network = swap["to_asset"], swap["to_network"]
     amount = swap["amount"]
@@ -8403,6 +8819,12 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not source_wallet or not dest_wallet:
         await query.edit_message_caption(
             caption="<b>Wallet not found.</b>", parse_mode="HTML"
+        )
+        return
+
+    if (from_asset, from_network) not in SIDESHIFT_PAIRS or (to_asset, to_network) not in SIDESHIFT_PAIRS:
+        await query.edit_message_caption(
+            caption="<b>This pair is not supported by SideShift.</b>", parse_mode="HTML"
         )
         return
 
@@ -8521,6 +8943,29 @@ async def swap_status_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     shift_id = query.data.split(":", 1)[1]
     swap_row = db.get_swap(shift_id)
     if swap_row and swap_row["user_id"] != query.from_user.id:
+        return
+
+    if shift_id.startswith("lf-"):
+        if not swap_row:
+            return
+        status = await LiFi.get_status(
+            swap_row["deposit_tx_hash"],
+            NETWORKS[swap_row["from_network"]]["chain_id"],
+            NETWORKS[swap_row["to_network"]]["chain_id"],
+        )
+        if "error" in status:
+            await query.answer(f"Could not fetch status: {status['error']}", show_alert=True)
+            return
+        db.update_swap_status(shift_id, status.get("status", "UNKNOWN").lower())
+        try:
+            await query.edit_message_caption(
+                caption=_lifi_status_text(status, swap_row),
+                parse_mode="HTML",
+                reply_markup=_lifi_status_keyboard(swap_row, status)
+            )
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                logger.error(f"Swap status edit failed: {e}")
         return
 
     shift = await SideShift.get_shift(shift_id)
@@ -8753,6 +9198,7 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
     network_to_asset = {
         "ETH": "ETH",
         "BSC": "BNB",
+        "OPBNB": "BNB",
         "POLYGON": "MATIC",
         "SOLANA": "SOL",
         "TRON": "TRX",
@@ -9335,6 +9781,11 @@ def main():
             )
         ],
         states={
+            CONVERT_PROVIDER: [
+                CallbackQueryHandler(
+                    receive_convert_provider, pattern=r"^swap_prov:"
+                )
+            ],
             CONVERT_FROM_ASSET: [
                 CallbackQueryHandler(
                     receive_convert_from_asset, pattern=r"^swap_from:"
