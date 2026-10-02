@@ -8378,6 +8378,8 @@ def swap_pair_key(asset: str, network: str) -> str:
 def swap_pair_label(asset: str, network: str) -> str:
     net_name = NETWORKS.get(network, {}).get("name", network)
     if asset == NETWORKS.get(network, {}).get("symbol"):
+        if network == "OPBNB":
+            return f"{asset} ({net_name} native)"
         return f"{asset} ({net_name})"
     return f"{asset} on {net_name}"
 
