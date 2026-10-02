@@ -7,6 +7,7 @@ import logging
 import hashlib
 import base64
 import asyncio
+import time
 import aiohttp
 import re
 import inspect
@@ -642,6 +643,8 @@ NETWORKS = {
 
 _WEB3_CLIENTS = {}
 _WEB3_PREFERRED = {}
+_RPC_COOLDOWN = {}
+_RPC_COOLDOWN_SECONDS = 300
 
 
 def _web3_for(rpc: str) -> Web3:
@@ -652,16 +655,29 @@ def _web3_for(rpc: str) -> Web3:
     return w3
 
 
+def _mark_rpc_failed(network: str, rpc: str, error: Exception):
+    if rpc not in _RPC_COOLDOWN:
+        logger.warning(f"RPC {rpc} failed ({error}); skipping it for {_RPC_COOLDOWN_SECONDS // 60} min")
+    _RPC_COOLDOWN[rpc] = time.time() + _RPC_COOLDOWN_SECONDS
+    if _WEB3_PREFERRED.get(network) == rpc:
+        _WEB3_PREFERRED.pop(network, None)
+
+
 def evm_rpc_order(network: str) -> list:
-    """RPC URLs for a network, last known-good endpoint first."""
+    """RPC URLs for a network: last known-good first, cooling-down ones last."""
     network_info = NETWORKS.get(network) or {}
     rpcs = [network_info.get("rpc")] + network_info.get("rpc_fallbacks", [])
     rpcs = [r for r in rpcs if r]
+    now = time.time()
+    for rpc in [r for r, until in _RPC_COOLDOWN.items() if until <= now]:
+        _RPC_COOLDOWN.pop(rpc, None)
+    healthy = [r for r in rpcs if r not in _RPC_COOLDOWN]
+    cooling = [r for r in rpcs if r in _RPC_COOLDOWN]
     preferred = _WEB3_PREFERRED.get(network)
-    if preferred in rpcs:
-        rpcs.remove(preferred)
-        rpcs.insert(0, preferred)
-    return rpcs
+    if preferred in healthy:
+        healthy.remove(preferred)
+        healthy.insert(0, preferred)
+    return healthy + cooling
 
 
 def evm_call(network: str, fn):
@@ -671,12 +687,11 @@ def evm_call(network: str, fn):
         try:
             result = fn(_web3_for(rpc))
             _WEB3_PREFERRED[network] = rpc
+            _RPC_COOLDOWN.pop(rpc, None)
             return result
         except Exception as e:
             last_error = e
-            logger.warning(f"RPC {rpc} failed: {e}, trying next...")
-            if _WEB3_PREFERRED.get(network) == rpc:
-                _WEB3_PREFERRED.pop(network, None)
+            _mark_rpc_failed(network, rpc, e)
     raise last_error or RuntimeError(f"No RPC available for {network}")
 
 
@@ -689,9 +704,10 @@ def get_web3_with_retry(network: str, max_retries: int = 3):
         try:
             w3.eth.block_number
             _WEB3_PREFERRED[network] = rpc
+            _RPC_COOLDOWN.pop(rpc, None)
             return w3
         except Exception as e:
-            logger.warning(f"RPC {rpc} failed: {e}, trying next...")
+            _mark_rpc_failed(network, rpc, e)
     return _web3_for(NETWORKS[network]["rpc"])
 
 TOKENS = {
