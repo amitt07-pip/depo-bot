@@ -413,11 +413,35 @@ def _install_safe_callback_answer():
 _install_safe_callback_answer()
 
 
+_KNOWN_BOT_CHATS = {}
+
+
+def _remember_bot_chat(update: Update):
+    """Keep a persistent list of groups/channels the bot is in (for /get_link)."""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup", "channel"):
+        return
+    try:
+        member_update = update.my_chat_member
+        if member_update and member_update.new_chat_member.status in ("left", "kicked"):
+            _KNOWN_BOT_CHATS.pop(chat.id, None)
+            db.remove_bot_chat(chat.id)
+            return
+        title = chat.title or str(chat.id)
+        if _KNOWN_BOT_CHATS.get(chat.id) != title or member_update:
+            _KNOWN_BOT_CHATS[chat.id] = title
+            db.save_bot_chat(chat.id, title, chat.type)
+    except Exception as e:
+        logger.debug(f"Could not record chat {chat.id}: {e}")
+
+
 async def track_update_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Runs before every handler: bind the acting user and reject button
     presses on menus that belong to somebody else."""
     user = update.effective_user
     CURRENT_USER_ID.set(user.id if user else None)
+
+    _remember_bot_chat(update)
 
     query = update.callback_query
     if not query or not query.message or not user:
@@ -1345,6 +1369,14 @@ class WalletDatabase:
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_chats (
+                chat_id INTEGER PRIMARY KEY,
+                title TEXT,
+                chat_type TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS swaps (
                 shift_id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -1639,6 +1671,30 @@ class WalletDatabase:
         )
         conn.commit()
         conn.close()
+
+    def save_bot_chat(self, chat_id: int, title: str, chat_type: str):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_chats (chat_id, title, chat_type, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (chat_id, title, chat_type)
+        )
+        conn.commit()
+        conn.close()
+
+    def remove_bot_chat(self, chat_id: int):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM bot_chats WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+
+    def get_bot_chats(self) -> list:
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT chat_id, title, chat_type FROM bot_chats ORDER BY title"
+        ).fetchall()
+        conn.close()
+        return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]} for r in rows]
 
     def get_authorized_users(self) -> list:
         conn = sqlite3.connect(self.db_path)
@@ -3651,7 +3707,8 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "*Messaging*\n"
         "• `/send <chat_id> <message>` — send a message through the bot (supports premium emoji)\n\n"
         "*Groups*\n"
-        "• `/get_link <chat_id|@username> [max_uses]` — new invite link for a group where the bot is admin (or send `/get_link` inside the group)\n\n"
+        "• `/get_link` — pick a group where the bot is admin and get a fresh invite link\n"
+        "• `/get_link <chat_id|@username> [max_uses]` — invite link for a specific group\n\n"
         "*Help*\n"
         "• `/admin_help` — show this message"
     )
@@ -3680,11 +3737,7 @@ async def get_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = current_chat.id
         extra = args
     else:
-        await update.message.reply_text(
-            "<b>Usage:</b> <code>/get_link &lt;chat_id | @username&gt; [max_uses]</code>\n"
-            "Or send <code>/get_link</code> inside the group.",
-            parse_mode="HTML"
-        )
+        await _send_get_link_picker(update, context)
         return
 
     member_limit = None
@@ -3743,6 +3796,97 @@ async def get_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Start a private chat with the bot first so I can DM you the link."
         )
+
+
+async def _bot_can_invite(bot, chat_id: int):
+    """Return (chat, True/False) or (None, False) if the bot is no longer in the chat."""
+    try:
+        chat = await bot.get_chat(chat_id)
+        me = await bot.get_chat_member(chat_id, bot.id)
+    except Exception:
+        return None, False
+    can_invite = me.status == "creator" or (
+        me.status == "administrator" and getattr(me, "can_invite_users", False)
+    )
+    return chat, can_invite
+
+
+async def _send_get_link_picker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = await update.message.reply_text(
+        "<b>Checking groups where the bot is admin...</b>",
+        parse_mode="HTML", protect_content=False
+    )
+
+    known = db.get_bot_chats()
+    if ALLOWED_CHAT_ID and ALLOWED_CHAT_ID not in {c["chat_id"] for c in known}:
+        known.append({"chat_id": ALLOWED_CHAT_ID, "title": str(ALLOWED_CHAT_ID), "chat_type": "supergroup"})
+
+    results = await asyncio.gather(
+        *[_bot_can_invite(context.bot, c["chat_id"]) for c in known]
+    )
+    keyboard = []
+    for entry, (chat, can_invite) in zip(known, results):
+        if chat is None:
+            continue
+        title = chat.title or str(chat.id)
+        if title != entry["title"]:
+            db.save_bot_chat(chat.id, title, chat.type)
+        if can_invite:
+            label = title if len(title) <= 40 else title[:39] + "\u2026"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"getlink:{chat.id}")])
+
+    if not keyboard:
+        await status.edit_text(
+            "<b>No groups found where the bot can create invite links.</b>\n\n"
+            "Make the bot an admin with <i>Invite Users via Link</i>. If it already is, "
+            "send any message in that group (or re-promote the bot) so it gets listed, "
+            "or use <code>/get_link &lt;chat_id&gt;</code>.",
+            parse_mode="HTML"
+        )
+        return
+
+    await status.edit_text(
+        "<b>Select a group to generate an invite link:</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def get_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("You are not authorized to use this.", show_alert=True)
+        return
+    try:
+        chat_id = int(query.data.split(":", 1)[1])
+    except ValueError:
+        await query.answer()
+        return
+    await query.answer()
+    await query.edit_message_text("<b>Generating invite link...</b>", parse_mode="HTML")
+
+    chat, can_invite = await _bot_can_invite(context.bot, chat_id)
+    if chat is None or not can_invite:
+        await query.edit_message_text(
+            "<b>The bot is no longer an admin with invite permission in that group.</b>",
+            parse_mode="HTML"
+        )
+        return
+    try:
+        invite = await context.bot.create_chat_invite_link(
+            chat.id, name=f"get_link {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+    except Exception as e:
+        await query.edit_message_text(
+            f"<b>Failed to create invite link:</b> {esc(str(e))}", parse_mode="HTML"
+        )
+        return
+    await query.edit_message_text(
+        f"<b>Invite link for {esc(chat.title or chat.id)}</b>\n\n"
+        f"<code>{esc(invite.invite_link)}</code>\n\n"
+        f"Chat ID: <code>{chat.id}</code>",
+        parse_mode="HTML"
+    )
 
 
 def get_friendly_error(error) -> str:
@@ -9816,6 +9960,7 @@ def main():
     application.add_handler(CommandHandler("remove", admin_remove_command))
     application.add_handler(CommandHandler("admin_help", admin_help_command))
     application.add_handler(CommandHandler("get_link", get_link_command))
+    application.add_handler(CallbackQueryHandler(get_link_callback, pattern=r"^getlink:-?\d+$"))
 
     application.add_handler(
         MessageHandler(
@@ -9868,8 +10013,12 @@ def main():
             CallbackQueryHandler(
                 show_convert_menu,
                 pattern=r"^menu_convert$"
-            )
+            ),
+            CallbackQueryHandler(receive_convert_provider, pattern=r"^swap_prov:"),
+            CallbackQueryHandler(receive_convert_from_asset, pattern=r"^swap_from:"),
+            CallbackQueryHandler(receive_convert_to_asset, pattern=r"^swap_to:"),
         ],
+        allow_reentry=True,
         states={
             CONVERT_PROVIDER: [
                 CallbackQueryHandler(
@@ -10033,7 +10182,7 @@ def main():
 
     logger.info("Starting Depo Bot with enhanced UI...")
     application.run_polling(
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message", "callback_query", "my_chat_member"],
         drop_pending_updates=True
     )
 
