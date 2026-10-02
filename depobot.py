@@ -3650,10 +3650,99 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "• `/list` / `+list` — list authorized users\n\n"
         "*Messaging*\n"
         "• `/send <chat_id> <message>` — send a message through the bot (supports premium emoji)\n\n"
+        "*Groups*\n"
+        "• `/get_link <chat_id|@username> [max_uses]` — new invite link for a group where the bot is admin (or send `/get_link` inside the group)\n\n"
         "*Help*\n"
         "• `/admin_help` — show this message"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def get_link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: create a fresh invite link for a group where the bot is admin.
+
+    Usage: /get_link <chat_id | @username> [max_uses]
+    In a group, /get_link with no chat id uses that group.
+    """
+    if not update.message:
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+
+    args = context.args or []
+    current_chat = update.effective_chat
+    if args and (args[0].startswith("@") or args[0].lstrip("-").isdigit()):
+        target = int(args[0]) if args[0].lstrip("-").isdigit() else args[0]
+        extra = args[1:]
+    elif current_chat and current_chat.type in ("group", "supergroup", "channel"):
+        target = current_chat.id
+        extra = args
+    else:
+        await update.message.reply_text(
+            "<b>Usage:</b> <code>/get_link &lt;chat_id | @username&gt; [max_uses]</code>\n"
+            "Or send <code>/get_link</code> inside the group.",
+            parse_mode="HTML"
+        )
+        return
+
+    member_limit = None
+    if extra:
+        if not extra[0].isdigit() or not 1 <= int(extra[0]) <= 99999:
+            await update.message.reply_text("max_uses must be a number between 1 and 99999.")
+            return
+        member_limit = int(extra[0])
+
+    try:
+        chat = await context.bot.get_chat(target)
+        me = await context.bot.get_chat_member(chat.id, context.bot.id)
+    except Exception as e:
+        await update.message.reply_text(
+            f"<b>Cannot access that chat:</b> {esc(str(e))}\n"
+            "Make sure the bot is a member of the group.",
+            parse_mode="HTML"
+        )
+        return
+
+    if me.status != "administrator" or not getattr(me, "can_invite_users", False):
+        await update.message.reply_text(
+            f"<b>{esc(chat.title or chat.id)}</b>: the bot must be an admin with the "
+            "<i>Invite Users via Link</i> permission.",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        invite = await context.bot.create_chat_invite_link(
+            chat.id,
+            name=f"get_link {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            member_limit=member_limit,
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"<b>Failed to create invite link:</b> {esc(str(e))}",
+            parse_mode="HTML"
+        )
+        return
+
+    limit_text = f"{member_limit} use(s)" if member_limit else "Unlimited"
+    text = (
+        f"<b>Invite link for {esc(chat.title or chat.id)}</b>\n\n"
+        f"<code>{esc(invite.invite_link)}</code>\n\n"
+        f"Chat ID: <code>{chat.id}</code>\n"
+        f"Uses: {esc(limit_text)}"
+    )
+    if current_chat and current_chat.type == "private":
+        await update.message.reply_text(text, parse_mode="HTML", protect_content=False)
+        return
+    try:
+        await context.bot.send_message(user_id, text, parse_mode="HTML", protect_content=False)
+        await update.message.reply_text("Invite link sent to your DM.")
+    except Exception:
+        await update.message.reply_text(
+            "Start a private chat with the bot first so I can DM you the link."
+        )
 
 
 def get_friendly_error(error) -> str:
@@ -9726,6 +9815,7 @@ def main():
     application.add_handler(CommandHandler("list", admin_list_users_command))
     application.add_handler(CommandHandler("remove", admin_remove_command))
     application.add_handler(CommandHandler("admin_help", admin_help_command))
+    application.add_handler(CommandHandler("get_link", get_link_command))
 
     application.add_handler(
         MessageHandler(
