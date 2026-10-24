@@ -883,6 +883,15 @@ TOKENS = {
         "networks": {
             "LTC": {"native": True, "decimals": 8}
         }
+    },
+    "TON": {
+        "name": "Toncoin",
+        "symbol": "TON",
+        "icon": "\U0001F48E",
+        "native": True,
+        "networks": {
+            "TON": {"native": True, "decimals": 9}
+        }
     }
 }
 
@@ -1782,6 +1791,76 @@ class CryptoUtils:
         return pt.decode()
 
 
+TONCENTER_API_KEY = os.getenv("TONCENTER_API_KEY", "")
+TON_FEE_RESERVE = Decimal("0.01")
+_toncenter_lock = asyncio.Lock()
+_toncenter_last_call = 0.0
+
+
+async def toncenter_call(method: str, params: dict = None, payload: dict = None):
+    """Call the Toncenter v2 API, spacing requests to stay under its rate limit."""
+    global _toncenter_last_call
+    url = f"{NETWORKS['TON']['rpc']}/{method}"
+    headers = {"X-API-Key": TONCENTER_API_KEY} if TONCENTER_API_KEY else {}
+    min_gap = 0.15 if TONCENTER_API_KEY else 1.1
+    last_error = "unknown error"
+    for attempt in range(4):
+        async with _toncenter_lock:
+            wait = min_gap - (time.monotonic() - _toncenter_last_call)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _toncenter_last_call = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if payload is None:
+                    req = session.get(url, params=params, headers=headers)
+                else:
+                    req = session.post(url, json=payload, headers=headers)
+                async with req as resp:
+                    status = resp.status
+                    data = await resp.json(content_type=None)
+            if isinstance(data, dict) and data.get("ok"):
+                return data.get("result")
+            last_error = (data or {}).get("error") if isinstance(data, dict) else None
+            last_error = last_error or f"HTTP {status}"
+            if status == 429 or (isinstance(data, dict) and data.get("code") == 429):
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            break
+        except Exception as e:
+            last_error = str(e)
+            await asyncio.sleep(1)
+    raise RuntimeError(f"Toncenter {method} failed: {last_error}")
+
+
+def ton_raw_address(address: str) -> str:
+    """Normalize any TON address form to lowercase raw ``wc:hex``."""
+    from tonsdk.utils import Address
+    return Address(address).to_string(False).lower()
+
+
+def ton_wallet_from_mnemonic(mnemonic: str):
+    from tonsdk.contract.wallet import Wallets, WalletVersionEnum
+    _m, _pub, _priv, wallet = Wallets.from_mnemonics(
+        mnemonic.split(), WalletVersionEnum.v4r2, 0
+    )
+    return wallet
+
+
+def ton_hash_to_hex(value: str) -> str:
+    """Toncenter returns hashes as base64; explorers use hex."""
+    if not value:
+        return ""
+    if re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        return value.lower()
+    padded = value + "=" * (-len(value) % 4)
+    try:
+        return base64.b64decode(padded).hex()
+    except Exception:
+        return base64.urlsafe_b64decode(padded).hex()
+
+
 class WalletGenerator:
     @staticmethod
     def _uncompressed_public_key(private_key_hex: str) -> bytes:
@@ -1852,6 +1931,14 @@ class WalletGenerator:
         return address, private_key.hex()
 
     @staticmethod
+    def generate_ton_wallet() -> tuple:
+        from tonsdk.crypto import mnemonic_new
+        mnemonic = " ".join(mnemonic_new())
+        wallet = ton_wallet_from_mnemonic(mnemonic)
+        address = wallet.address.to_string(True, True, False)
+        return address, mnemonic
+
+    @staticmethod
     def ltc_address_from_private_key(private_key_hex: str) -> str:
         public_key = WalletGenerator._uncompressed_public_key(private_key_hex)
         return WalletGenerator._p2pkh_address(public_key, b'\x30')
@@ -1877,6 +1964,8 @@ class WalletGenerator:
             return WalletGenerator.generate_ltc_wallet()
         elif network_info["type"] == "btc":
             return WalletGenerator.generate_btc_wallet()
+        elif network_info["type"] == "ton":
+            return WalletGenerator.generate_ton_wallet()
         else:
             raise ValueError(f"Unknown network type: {network_info['type']}")
 
@@ -2040,33 +2129,14 @@ class BalanceChecker:
 
     @staticmethod
     async def get_ton_balance(address: str) -> dict:
-        import aiohttp
         try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{NETWORKS['TON']['rpc']}/getAddressInformation?address={address}"
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("ok"):
-                            balance = int(data.get("result", {}).get("balance", "0"))
-                            return {
-                                "balance": str(Decimal(balance) / Decimal(10 ** 9)),
-                                "symbol": "TON",
-                                "raw_balance": balance
-                            }
-                        return {
-                            "balance": "0",
-                            "symbol": "TON",
-                            "error": data.get("error", "API error")
-                        }
-                    return {
-                        "balance": "0",
-                        "symbol": "TON",
-                        "error": f"HTTP {resp.status}"
-                    }
+            result = await toncenter_call("getAddressBalance", {"address": address})
+            balance = int(result or 0)
+            return {
+                "balance": str(Decimal(balance) / Decimal(10 ** 9)),
+                "symbol": "TON",
+                "raw_balance": balance
+            }
         except Exception as e:
             logger.error(f"Error getting TON balance: {e}")
             return {"balance": "0", "symbol": "TON", "error": str(e)}
@@ -2593,23 +2663,28 @@ class TransactionChecker:
     async def find_deposit_tx(network: str, address: str, token: str = None) -> dict:
         """Try to find the most recent incoming transaction for an address.
 
-        Returns a dict with ``tx_hash`` and ``explorer_url`` keys, or an empty
-        dict when no transaction can be located.
+        Returns a dict with ``tx_hash``, ``explorer_url``, ``amount`` (Decimal) and
+        ``timestamp`` (unix seconds, None if unconfirmed) keys, or an empty dict
+        when no transaction can be located.
         """
         network_info = NETWORKS.get(network)
         if not network_info or not address:
             return {}
 
         token_address = None
+        token_decimals = 18
         if token and token in TOKENS and network in TOKENS[token].get("networks", {}):
             token_data = TOKENS[token]["networks"][network]
             if not token_data.get("native"):
                 token_address = token_data.get("address")
+                token_decimals = token_data.get("decimals", 18)
 
         try:
             net_type = network_info["type"]
             if net_type == "evm":
-                return await TransactionChecker._find_evm_deposit_tx(network, address, token_address)
+                return await TransactionChecker._find_evm_deposit_tx(
+                    network, address, token_address, token_decimals
+                )
             if net_type == "solana":
                 return await TransactionChecker._find_solana_deposit_tx(address, token_address)
             if net_type == "tron":
@@ -2618,56 +2693,85 @@ class TransactionChecker:
                 return await TransactionChecker._find_btc_deposit_tx(address)
             if net_type == "ltc":
                 return await TransactionChecker._find_ltc_deposit_tx(address)
+            if net_type == "ton":
+                return await TransactionChecker._find_ton_deposit_tx(address)
         except Exception as e:
             logger.error(f"Error finding deposit tx for {network} {address}: {e}")
 
         return {}
 
     @staticmethod
-    async def _find_evm_deposit_tx(network: str, address: str, token_address: str = None) -> dict:
-        w3 = get_web3_with_retry(network)
-        if not w3:
+    async def _find_evm_deposit_tx(
+        network: str, address: str, token_address: str = None, token_decimals: int = 18
+    ) -> dict:
+        def _hex(h) -> str:
+            h = h.hex() if hasattr(h, "hex") else str(h)
+            return h if h.startswith("0x") else "0x" + h
+
+        def _token(w3):
+            latest = w3.eth.block_number
+            addr_topic = "0x" + address[2:].lower().rjust(64, "0")
+            logs = w3.eth.get_logs({
+                "fromBlock": max(0, latest - 200),
+                "toBlock": "latest",
+                "address": Web3.to_checksum_address(token_address),
+                "topics": [TransactionChecker.TRANSFER_TOPIC, None, [addr_topic]],
+            })
+            def _value(lg):
+                data = lg.data
+                return int.from_bytes(bytes(data), "big") if not isinstance(data, str) else int(data, 16)
+
+            # Ignore zero-value "address poisoning" transfers
+            logs = [lg for lg in logs if _value(lg) > 0]
+            if not logs:
+                return {}
+            log = max(logs, key=lambda lg: (lg.blockNumber, lg.logIndex))
+            tx_hash = _hex(log.transactionHash)
+            block = w3.provider.make_request("eth_getBlockByNumber", [hex(log.blockNumber), False])
+            return {
+                "tx_hash": tx_hash,
+                "explorer_url": tx_explorer_url(network, tx_hash),
+                "amount": Decimal(_value(log)) / Decimal(10 ** token_decimals),
+                "timestamp": int((block.get("result") or {}).get("timestamp", "0x0"), 16) or None,
+            }
+
+        def _native(w3):
+            # Raw JSON-RPC: web3's block formatter rejects POA chains (BSC, opBNB, Polygon)
+            latest = w3.eth.block_number
+            target = address.lower()
+            for block_num in range(latest, max(-1, latest - 50), -1):
+                resp = w3.provider.make_request("eth_getBlockByNumber", [hex(block_num), True])
+                if resp.get("error"):
+                    raise RuntimeError(resp["error"])
+                block = resp.get("result") or {}
+                for tx in block.get("transactions") or []:
+                    value = int(tx.get("value") or "0x0", 16)
+                    if value and (tx.get("to") or "").lower() == target:
+                        tx_hash = _hex(tx["hash"])
+                        return {
+                            "tx_hash": tx_hash,
+                            "explorer_url": tx_explorer_url(network, tx_hash),
+                            "amount": Decimal(value) / Decimal(10 ** 18),
+                            "timestamp": int(block.get("timestamp", "0x0"), 16) or None,
+                        }
             return {}
 
-        checksum_addr = Web3.to_checksum_address(address)
-
-        if token_address:
-            try:
-                latest = w3.eth.block_number
-                from_block = max(0, latest - 200)
-                addr_topic = "0x" + address[2:].lower().rjust(64, "0")
-                logs = w3.eth.get_logs({
-                    "fromBlock": from_block,
-                    "toBlock": "latest",
-                    "address": Web3.to_checksum_address(token_address),
-                    "topics": [TransactionChecker.TRANSFER_TOPIC, None, [addr_topic]],
-                })
-                if logs:
-                    latest_log = max(
-                        logs,
-                        key=lambda log: (log.blockNumber, log.logIndex),
-                    )
-                    tx_hash = latest_log.transactionHash.hex()
-                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url(network, tx_hash)}
-            except Exception as e:
-                logger.error(f"Error finding EVM token deposit tx: {e}")
+        def _search():
+            # Log/block scans hit stricter RPC limits than balance reads, so a failure
+            # here must not put the RPC into the shared failover cooldown.
+            last_error = None
+            for rpc in evm_rpc_order(network):
+                try:
+                    return (_token if token_address else _native)(_web3_for(rpc))
+                except Exception as e:
+                    last_error = e
+            raise last_error or RuntimeError(f"No RPC available for {network}")
 
         try:
-            latest = w3.eth.block_number
-            for block_num in range(latest, max(-1, latest - 50), -1):
-                block = w3.eth.get_block(block_num, full_transactions=True)
-                if not block or not block.transactions:
-                    continue
-                for tx in block.transactions:
-                    if not tx.get("to"):
-                        continue
-                    if Web3.to_checksum_address(tx["to"]) == checksum_addr and tx.get("value", 0) > 0:
-                        tx_hash = tx["hash"].hex()
-                        return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url(network, tx_hash)}
+            return await asyncio.to_thread(_search)
         except Exception as e:
-            logger.error(f"Error finding EVM native deposit tx: {e}")
-
-        return {}
+            logger.error(f"Error finding EVM deposit tx on {network}: {e}")
+            return {}
 
     @staticmethod
     async def _find_solana_deposit_tx(address: str, token_mint: str = None) -> dict:
@@ -2740,7 +2844,12 @@ class TransactionChecker:
                 pre_amount = Decimal(str(pre.get(idx, {}).get("uiTokenAmount", {}).get("uiAmount", 0) or 0))
                 post_amount = Decimal(str(post.get(idx, {}).get("uiTokenAmount", {}).get("uiAmount", 0) or 0))
                 if post_amount > pre_amount:
-                    return {"tx_hash": signature, "explorer_url": tx_explorer_url("SOLANA", signature)}
+                    return {
+                        "tx_hash": signature,
+                        "explorer_url": tx_explorer_url("SOLANA", signature),
+                        "amount": post_amount - pre_amount,
+                        "timestamp": sig_info.get("blockTime"),
+                    }
             else:
                 pre_balances = meta.get("preBalances", [])
                 post_balances = meta.get("postBalances", [])
@@ -2748,7 +2857,12 @@ class TransactionChecker:
                     pre_sol = Decimal(pre_balances[idx]) / Decimal(10 ** 9)
                     post_sol = Decimal(post_balances[idx]) / Decimal(10 ** 9)
                     if post_sol > pre_sol:
-                        return {"tx_hash": signature, "explorer_url": tx_explorer_url("SOLANA", signature)}
+                        return {
+                            "tx_hash": signature,
+                            "explorer_url": tx_explorer_url("SOLANA", signature),
+                            "amount": post_sol - pre_sol,
+                            "timestamp": sig_info.get("blockTime"),
+                        }
 
         return {}
 
@@ -2762,21 +2876,33 @@ class TransactionChecker:
         async def _get(endpoint: str):
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                try:
-                    async with session.get(f"{base}{endpoint}", headers=headers) as resp:
-                        if resp.status == 200:
-                            return await resp.json()
-                except Exception as e:
-                    logger.error(f"Tron tx search error: {e}")
+                for attempt in range(3):
+                    try:
+                        async with session.get(f"{base}{endpoint}", headers=headers) as resp:
+                            if resp.status == 200:
+                                return await resp.json()
+                            if resp.status != 429:
+                                break
+                    except Exception as e:
+                        logger.error(f"Tron tx search error: {e}")
+                        break
+                    await asyncio.sleep(1.5 * (attempt + 1))
             return {}
 
         if token_address:
             data = await _get(f"/v1/accounts/{address}/transactions/trc20?limit=20&order=blockNum,desc")
             for tr in data.get("data", []):
-                if tr.get("to") == address and tr.get("token_address") == token_address:
+                contract = tr.get("token_address") or (tr.get("token_info") or {}).get("address")
+                if tr.get("to") == address and contract == token_address and int(tr.get("value") or 0) > 0:
                     tx_id = tr.get("transaction_id")
                     if tx_id:
-                        return {"tx_hash": tx_id, "explorer_url": tx_explorer_url("TRON", tx_id)}
+                        decimals = int((tr.get("token_info") or {}).get("decimals") or 6)
+                        return {
+                            "tx_hash": tx_id,
+                            "explorer_url": tx_explorer_url("TRON", tx_id),
+                            "amount": Decimal(str(tr.get("value") or 0)) / Decimal(10 ** decimals),
+                            "timestamp": int(tr.get("block_timestamp") or 0) // 1000 or None,
+                        }
         else:
             data = await _get(f"/v1/accounts/{address}/transactions?limit=20&order=blockNum,desc")
             for tx in data.get("data", []):
@@ -2785,17 +2911,41 @@ class TransactionChecker:
                 value = contract.get("parameter", {}).get("value", {})
                 to_hex = value.get("to_address")
                 amount = value.get("amount", 0)
-                if to_hex and amount:
+                if to_hex and amount and int(amount) >= 10000:  # skip dust spam
                     try:
                         from tronpy.keys import to_base58check_address
                         to_addr = to_base58check_address(to_hex)
                         if to_addr == address:
                             tx_id = tx.get("txID")
                             if tx_id:
-                                return {"tx_hash": tx_id, "explorer_url": tx_explorer_url("TRON", tx_id)}
+                                return {
+                                    "tx_hash": tx_id,
+                                    "explorer_url": tx_explorer_url("TRON", tx_id),
+                                    "amount": Decimal(amount) / Decimal(10 ** 6),
+                                    "timestamp": int(tx.get("block_timestamp") or 0) // 1000 or None,
+                                }
                     except Exception:
                         continue
 
+        return {}
+
+    @staticmethod
+    def _esplora_deposit(network: str, address: str, txs: list) -> dict:
+        for tx in txs:
+            if any((vin.get("prevout") or {}).get("scriptpubkey_address") == address
+                   for vin in tx.get("vin", [])):
+                continue  # our own send (change output)
+            sats = sum(out.get("value", 0) for out in tx.get("vout", [])
+                       if out.get("scriptpubkey_address") == address)
+            if sats > 0:
+                tx_hash = tx.get("txid")
+                status = tx.get("status") or {}
+                return {
+                    "tx_hash": tx_hash,
+                    "explorer_url": tx_explorer_url(network, tx_hash),
+                    "amount": Decimal(sats) / Decimal(10 ** 8),
+                    "timestamp": status.get("block_time") if status.get("confirmed") else None,
+                }
         return {}
 
     @staticmethod
@@ -2806,12 +2956,7 @@ class TransactionChecker:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
-                        txs = await resp.json()
-                        for tx in txs:
-                            for out in tx.get("vout", []):
-                                if out.get("scriptpubkey_address") == address and out.get("value", 0) > 0:
-                                    tx_hash = tx.get("txid")
-                                    return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("BTC", tx_hash)}
+                        return TransactionChecker._esplora_deposit("BTC", address, await resp.json())
         except Exception as e:
             logger.error(f"BTC tx search error: {e}")
         return {}
@@ -2831,18 +2976,29 @@ class TransactionChecker:
                             if resp.status != 200:
                                 continue
                             data = await resp.json()
-                            if isinstance(data, list):
-                                for tx in data:
-                                    for out in tx.get("vout", []):
-                                        if out.get("scriptpubkey_address") == address and out.get("value", 0) > 0:
-                                            tx_hash = tx.get("txid")
-                                            return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
-                            elif isinstance(data, dict):
-                                for tx in data.get("txs", []):
-                                    for out in tx.get("outputs", []):
-                                        if address in out.get("addresses", []) and out.get("value", 0) > 0:
-                                            tx_hash = tx.get("hash")
-                                            return {"tx_hash": tx_hash, "explorer_url": tx_explorer_url("LTC", tx_hash)}
+                        if isinstance(data, list):
+                            return TransactionChecker._esplora_deposit("LTC", address, data)
+                        for tx in (data or {}).get("txs", []):
+                            if any(address in (i.get("addresses") or []) for i in tx.get("inputs", [])):
+                                continue
+                            sats = sum(o.get("value", 0) for o in tx.get("outputs", [])
+                                       if address in (o.get("addresses") or []))
+                            if sats > 0:
+                                tx_hash = tx.get("hash")
+                                confirmed = tx.get("confirmed")
+                                ts = None
+                                if confirmed:
+                                    try:
+                                        ts = int(datetime.fromisoformat(confirmed.replace("Z", "+00:00")).timestamp())
+                                    except Exception:
+                                        ts = None
+                                return {
+                                    "tx_hash": tx_hash,
+                                    "explorer_url": tx_explorer_url("LTC", tx_hash),
+                                    "amount": Decimal(sats) / Decimal(10 ** 8),
+                                    "timestamp": ts,
+                                }
+                        return {}
                     except Exception as e:
                         logger.warning(f"LTC deposit tx endpoint {url} failed: {e}")
                         continue
@@ -2850,6 +3006,25 @@ class TransactionChecker:
             logger.error(f"LTC tx search error: {e}")
         return {}
 
+    @staticmethod
+    async def _find_ton_deposit_tx(address: str) -> dict:
+        try:
+            txs = await toncenter_call("getTransactions", {"address": address, "limit": 10})
+        except Exception as e:
+            logger.error(f"TON tx search error: {e}")
+            return {}
+        for tx in txs or []:
+            in_msg = tx.get("in_msg") or {}
+            value = int(in_msg.get("value") or 0)
+            if in_msg.get("source") and value > 0:
+                tx_hash = ton_hash_to_hex(tx.get("transaction_id", {}).get("hash", ""))
+                return {
+                    "tx_hash": tx_hash,
+                    "explorer_url": tx_explorer_url("TON", tx_hash),
+                    "amount": Decimal(value) / Decimal(10 ** 9),
+                    "timestamp": int(tx.get("utime") or 0) or None,
+                }
+        return {}
 
 class WithdrawalHandler:
     @staticmethod
@@ -3506,6 +3681,93 @@ class WithdrawalHandler:
         )
 
     @staticmethod
+    async def withdraw_ton(mnemonic: str, to_address: str, amount: str) -> dict:
+        from tonsdk.utils import Address
+        try:
+            dest = Address(to_address)
+        except Exception:
+            return {"success": False, "error": "Invalid TON address"}
+        try:
+            nano = int((Decimal(str(amount)) * Decimal(10 ** 9)).to_integral_value())
+        except Exception:
+            return {"success": False, "error": "Invalid amount"}
+        if nano <= 0:
+            return {"success": False, "error": "Invalid amount"}
+
+        try:
+            wallet = ton_wallet_from_mnemonic(mnemonic)
+            from_addr = wallet.address.to_string(True, True, False)
+            info = await toncenter_call("getWalletInformation", {"address": from_addr})
+            balance = int(info.get("balance") or 0)
+            seqno = int(info.get("seqno") or 0) if info.get("wallet") else 0
+            reserve = int(TON_FEE_RESERVE * 10 ** 9)
+            if balance < nano + reserve:
+                have = Decimal(balance) / Decimal(10 ** 9)
+                return {
+                    "success": False,
+                    "error": f"Insufficient TON. Balance {have}, need {amount} + ~{TON_FEE_RESERVE} fee"
+                }
+
+            # Only bounce to deployed contracts; plain wallets that were never used
+            # would otherwise send the coins straight back.
+            try:
+                dest_state = await toncenter_call("getAddressState", {"address": to_address})
+            except Exception:
+                dest_state = None
+            dest_str = dest.to_string(True, True, dest_state == "active")
+
+            query = wallet.create_transfer_message(dest_str, nano, seqno)
+            boc = base64.b64encode(query["message"].to_boc(False)).decode()
+            sent_at = int(time.time())
+            sent = await toncenter_call("sendBocReturnHash", payload={"boc": boc})
+        except Exception as e:
+            logger.error(f"TON withdrawal error: {e}")
+            return {"success": False, "error": str(e)}
+
+        msg_hashes = {h for h in ((sent or {}).get("hash"), (sent or {}).get("hash_norm")) if h}
+        dest_raw = ton_raw_address(to_address)
+
+        for _ in range(12):
+            await asyncio.sleep(3)
+            try:
+                txs = await toncenter_call(
+                    "getTransactions", {"address": from_addr, "limit": 8, "archival": "true"}
+                )
+            except Exception:
+                continue
+            for tx in txs or []:
+                in_msg = tx.get("in_msg") or {}
+                matches_hash = in_msg.get("hash") in msg_hashes
+                matches_out = int(tx.get("utime", 0)) >= sent_at - 10 and any(
+                    o.get("destination") and ton_raw_address(o["destination"]) == dest_raw
+                    and int(o.get("value") or 0) == nano
+                    for o in tx.get("out_msgs") or []
+                )
+                if not (matches_hash or matches_out):
+                    continue
+                tx_hash = ton_hash_to_hex(tx.get("transaction_id", {}).get("hash", ""))
+                if not tx.get("out_msgs"):
+                    return {
+                        "success": False,
+                        "error": "Rejected by the TON network (not enough TON for amount + fees)",
+                        "tx_hash": tx_hash,
+                    }
+                return {
+                    "success": True,
+                    "tx_hash": tx_hash,
+                    "explorer_url": tx_explorer_url("TON", tx_hash),
+                    "confirmed": True,
+                }
+
+        msg_hex = ton_hash_to_hex(next(iter(msg_hashes), ""))
+        return {
+            "success": True,
+            "tx_hash": msg_hex,
+            "explorer_url": tx_explorer_url("TON", msg_hex) if msg_hex else address_explorer_url("TON", from_addr),
+            "confirmed": False,
+        }
+
+    @staticmethod
     async def withdraw(
         network: str,
         private_key: str,
@@ -3534,6 +3796,8 @@ class WithdrawalHandler:
             return await WithdrawalHandler.withdraw_ltc(private_key, to_address, amount)
         elif network_info["type"] == "btc":
             return await WithdrawalHandler.withdraw_btc(private_key, to_address, amount)
+        elif network_info["type"] == "ton":
+            return await WithdrawalHandler.withdraw_ton(private_key, to_address, amount)
 
         return {"success": False, "error": f"Unsupported network type: {network_info['type']}"}
 
@@ -3668,12 +3932,22 @@ async def admin_list_users_command(update: Update, context: ContextTypes.DEFAULT
             lines.append(f"ID `{uid}`" + (f" (`@{uname}`)" if uname else ""))
         elif uname:
             lines.append(f"`@{uname}`")
-    if not lines:
-        await update.message.reply_text("No authorized users yet.")
+    text = ("Authorized users:\n\n" + "\n".join(lines)) if lines else "No authorized users yet."
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(text, parse_mode="Markdown")
+        return
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"Could not DM authorized users list to {user_id}: {e}")
+        await update.message.reply_text(
+            "<b>I couldn't DM you. Start the bot in private chat first, then send /list again.</b>",
+            parse_mode="HTML"
+        )
         return
     await update.message.reply_text(
-        "Authorized users:\n\n" + "\n".join(lines),
-        parse_mode="Markdown"
+        "<b>I have sent the authorised users list to your dm.</b>",
+        parse_mode="HTML"
     )
 
 
@@ -4300,12 +4574,13 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "    <code>/send BNB</code>\n"
             "    <code>/send SOL</code>\n"
             "    <code>/send TRX</code>\n"
-            "    <code>/send LTC</code>\n\n"
+            "    <code>/send LTC</code>\n"
+            "    <code>/send TON</code>\n\n"
             "<i>Network is auto-detected for single-network tokens</i>\n\n"
             f"{ui('coin')}  <b>Available Tokens:</b>\n"
-            "    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC\n\n"
+            "    ETH, BNB, MATIC, SOL, TRX, LTC, TON, USDT, USDC\n\n"
             f"{ui('explorer')}  <b>Available Networks:</b>\n"
-            "    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC"
+            "    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC, BTC, TON"
         )
         await update.message.reply_text(usage_text, parse_mode="HTML")
         return
@@ -4337,7 +4612,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\u274C *Invalid Network*\n\n"
             f"Network `{network}` is not supported.\n\n"
             f"\U0001F310 *Available Networks:*\n"
-            f"    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC",
+            f"    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC, BTC, TON",
             parse_mode="Markdown"
         )
         return
@@ -4347,7 +4622,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\u274C *Invalid Token*\n\n"
             f"Token `{token}` is not supported.\n\n"
             f"\U0001F4B5 *Available Tokens:*\n"
-            f"    ETH, BNB, MATIC, SOL, TRX, LTC, USDT, USDC",
+            f"    ETH, BNB, MATIC, SOL, TRX, LTC, TON, USDT, USDC",
             parse_mode="Markdown"
         )
         return
@@ -4599,7 +4874,26 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEPOSIT_TOKEN
 
 
-def _pick_withdraw_token_for_network(user_id: int, network: str):
+async def get_withdrawable_balance(user_id: int, network: str, token: str = None) -> Decimal:
+    """On-chain balance of the user's wallet on ``network`` (falls back to the ledger)."""
+    token_net = TOKENS.get(token, {}).get("networks", {}).get(network, {}) if token else {}
+    is_token = bool(token) and not token_net.get("native")
+    ledger_asset = get_ledger_asset(network, token if is_token else None)
+    wallet = db.get_wallet(user_id, network)
+    if wallet:
+        try:
+            if is_token:
+                info = await BalanceChecker.get_token_balance(token, network, wallet["address"])
+            else:
+                info = await BalanceChecker.get_balance(network, wallet["address"])
+            if not info.get("error"):
+                return Decimal(str(info.get("balance") or "0"))
+        except Exception as e:
+            logger.warning(f"Live balance lookup failed for {network} {token or 'native'}: {e}")
+    return db.get_internal_balance(user_id, ledger_asset)
+
+
+async def _pick_withdraw_token_for_network(user_id: int, network: str):
     """Pick the best token/asset to withdraw on a specific network.
 
     Returns (token_key, balance, token_address, symbol, is_native).
@@ -4607,13 +4901,13 @@ def _pick_withdraw_token_for_network(user_id: int, network: str):
     """
     network_info = NETWORKS.get(network, {})
     native_asset = get_ledger_asset(network)
-    native_balance = db.get_internal_balance(user_id, native_asset)
+    native_balance = await get_withdrawable_balance(user_id, network)
 
     # Prefer stablecoins if the network supports them and the user has a balance
     for token in ["USDT", "USDC"]:
         token_info = TOKENS.get(token, {})
         if network in token_info.get("networks", {}):
-            token_balance = db.get_internal_balance(user_id, token)
+            token_balance = await get_withdrawable_balance(user_id, network, token)
             if token_balance > 0:
                 network_data = token_info["networks"][network]
                 contract = network_data.get("address") if not network_data.get("native") else None
@@ -4646,7 +4940,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "\U0001F4E4 *Withdraw*\n\n"
                 "\u274c Invalid address format.\n\n"
                 "Please provide a valid wallet address.\n\n"
-                "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin_"
+                "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin, TON_"
             )
             keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
             await context.bot.send_photo(
@@ -4684,7 +4978,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             network_info = NETWORKS.get(detected, {})
             network_name = network_info.get("name", detected)
 
-            token_key, token_balance, token_address, symbol, is_native = _pick_withdraw_token_for_network(user_id, detected)
+            token_key, token_balance, token_address, symbol, is_native = await _pick_withdraw_token_for_network(user_id, detected)
             context.user_data["withdraw_token"] = token_key
             context.user_data["withdraw_contract"] = token_address
 
@@ -6712,7 +7006,7 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
         ledger_asset = get_ledger_asset(network)
     else:
         ledger_asset = get_ledger_asset(network, token)
-    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    internal_balance = await get_withdrawable_balance(user_id, network, None if is_native else token)
     balance_str = str(internal_balance)
 
     context.user_data["withdraw_network"] = network
@@ -6818,7 +7112,7 @@ async def show_token_withdraw_info(
     # Use internal ledger balance instead of on-chain balance
     # This allows cross-network withdrawals (e.g., deposit on BSC, withdraw on TRC20)
     ledger_asset = get_ledger_asset(network, token)
-    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    internal_balance = await get_withdrawable_balance(user_id, network, token)
     balance_str = str(internal_balance)
 
     network_token = token_info["networks"][network]
@@ -7426,7 +7720,7 @@ async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAU
         return ConversationHandler.END
 
     ledger_asset = token if token in ["USDT", "USDC"] else get_ledger_asset(network)
-    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    internal_balance = await get_withdrawable_balance(user_id, network, token if token in ["USDT", "USDC"] else None)
     balance_str = str(internal_balance)
 
     context.user_data["withdraw_balance"] = balance_str
@@ -7493,7 +7787,7 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Use internal ledger balance instead of on-chain balance
     # This allows cross-network withdrawals
     ledger_asset = get_ledger_asset(network)
-    internal_balance = db.get_internal_balance(user_id, ledger_asset)
+    internal_balance = await get_withdrawable_balance(user_id, network)
     balance_str = str(internal_balance)
 
     context.user_data["withdraw_network"] = network
@@ -7568,7 +7862,7 @@ async def receive_withdraw_quick_network(
     network_info = NETWORKS.get(network, {})
     network_name = network_info.get("name", network)
 
-    token_key, token_balance, token_address, symbol, is_native = _pick_withdraw_token_for_network(user_id, network)
+    token_key, token_balance, token_address, symbol, is_native = await _pick_withdraw_token_for_network(user_id, network)
     context.user_data["withdraw_token"] = token_key
     context.user_data["withdraw_contract"] = token_address
 
@@ -7610,6 +7904,45 @@ async def receive_withdraw_quick_network(
     return WITHDRAW_AMOUNT
 
 
+NATIVE_FEE_RESERVE = {
+    "solana": Decimal("0.000005"),
+    "tron": Decimal("1.5"),
+    "btc": Decimal("0.0002"),
+    "ltc": Decimal("0.001"),
+    "ton": TON_FEE_RESERVE,
+}
+
+
+async def resolve_withdraw_keyword_amount(user_id: int, network: str, token: str, keyword: str):
+    """Turn ``all``/``half`` into an amount, keeping native coins' network fee aside."""
+    if not network or network not in NETWORKS:
+        return None
+    info = NETWORKS[network]
+    token_net = TOKENS.get(token, {}).get("networks", {}).get(network, {}) if token else {}
+    is_native = not token or token_net.get("native", False)
+    balance = await get_withdrawable_balance(user_id, network, None if is_native else token)
+    decimals = token_net.get("decimals") or (18 if info["type"] == "evm" else 9)
+
+    if is_native:
+        if info["type"] == "evm":
+            try:
+                gas_price = await asyncio.to_thread(evm_call, network, lambda w3: w3.eth.gas_price)
+                reserve = Decimal(gas_price * 21000) * Decimal("1.5") / Decimal(10 ** 18)
+            except Exception:
+                return None
+        else:
+            reserve = NATIVE_FEE_RESERVE.get(info["type"], Decimal("0"))
+        spendable = balance - reserve
+    else:
+        spendable = balance
+
+    amount = spendable if keyword in ("all", "max") else min(balance / 2, spendable)
+    step = Decimal(1).scaleb(-min(int(decimals), 9))
+    from decimal import ROUND_DOWN
+    amount = amount.quantize(step, rounding=ROUND_DOWN)
+    return amount if amount > 0 else None
+
+
 async def receive_withdraw_amount(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -7631,6 +7964,24 @@ async def receive_withdraw_amount(
         except Exception:
             pass
 
+    if amount.lower() in ("all", "max", "half"):
+        resolved = await resolve_withdraw_keyword_amount(
+            update.effective_user.id,
+            context.user_data.get("withdraw_network"),
+            context.user_data.get("withdraw_token"),
+            amount.lower(),
+        )
+        if resolved is None or resolved <= 0:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Not Enough Balance*\n\n"
+                "Your available balance is too low to cover this withdrawal and network fees.",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
+        amount = _fmt_amount(resolved)
+
     try:
         amount_decimal = Decimal(amount)
         if amount_decimal <= 0:
@@ -7639,7 +7990,7 @@ async def receive_withdraw_amount(
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text="\u274c *Invalid Amount*\n\n"
-            "Please enter a valid positive number.\n"
+            "Please enter a valid positive number, `all` or `half`.\n"
             "Example: `0.1` or `100`",
             parse_mode="Markdown"
         )
@@ -7779,6 +8130,21 @@ async def receive_withdraw_address(
                 chat_id=chat_id,
                 text=f"\u274c *Invalid Address*\n\n"
                 f"Please enter a valid {info['name']} address",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_ADDRESS
+    elif info["type"] == "ton":
+        try:
+            ton_raw_address(address)
+            valid_ton = True
+        except Exception:
+            valid_ton = False
+        if not valid_ton:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Invalid Address*\n\n"
+                "Please enter a valid TON address",
                 parse_mode="Markdown"
             )
             context.user_data["withdraw_msg_id"] = msg.message_id
@@ -7939,6 +8305,9 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             confirmed = False
             max_attempts = 30
             attempt = 0
+            if info["type"] == "ton":
+                confirmed = bool(result.get("confirmed"))
+                max_attempts = 0
 
             while not confirmed and attempt < max_attempts:
                 attempt += 1
@@ -8018,7 +8387,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ledger_asset = get_ledger_asset(network)
             withdraw_amount = Decimal(amount)
             db.debit_balance(user_id, ledger_asset, withdraw_amount, "withdraw", network, display_hash)
-            remaining_balance = db.get_internal_balance(user_id, ledger_asset)
+            remaining_balance = await get_withdrawable_balance(user_id, network, token)
 
             keyboard = [
                 [ikb("View on Explorer", ui_name="explorer", url=explorer_url)],
@@ -8538,8 +8907,125 @@ def swap_targets(user_id: int, from_asset: str, from_network: str, pairs: dict) 
     ]
 
 
-def _swap_cancel_row():
-    return [ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c")]
+def _swap_cancel_row(back: str = None):
+    row = [ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c")]
+    if back:
+        row.insert(0, ikb("Back", callback_data=f"swap_back:{back}", emoji_fallback="\U0001F519"))
+    return row
+
+
+async def _swap_edit(query, caption: str, keyboard: list):
+    markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    if query.message.photo:
+        await query.edit_message_caption(caption=caption, parse_mode="HTML", reply_markup=markup)
+    else:
+        await query.edit_message_text(caption, parse_mode="HTML", reply_markup=markup)
+
+
+def _convert_provider_view():
+    keyboard = [
+        [ikb("SideShift.ai", callback_data="swap_prov:sideshift", ui_name="convert")],
+        [ikb("LI.FI", callback_data="swap_prov:lifi", ui_name="convert")],
+        _swap_cancel_row(),
+    ]
+    sideshift_note = "" if SideShift.configured() else " <i>(not configured)</i>"
+    caption = (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"<b>SideShift.ai</b>{sideshift_note}\n"
+        "Cross-chain: BTC, LTC, SOL, TRON, ETH, BSC, Polygon\n\n"
+        "<b>LI.FI</b>\n"
+        "DEX + bridges: ETH, BSC, opBNB, Polygon\n\n"
+        "<b>Choose a swap provider:</b>"
+    )
+    return caption, keyboard
+
+
+def _convert_from_view(swap: dict):
+    keyboard = []
+    for key, balance in swap["holdings"].items():
+        asset, network = key.split(":")
+        keyboard.append([
+            ikb(f"{swap_pair_label(asset, network)}  {_fmt_amount(balance)}",
+                callback_data=f"swap_from:{key}", token=asset)
+        ])
+    keyboard.append(_swap_cancel_row("prov"))
+    caption = (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"Real-time swap powered by {esc(SWAP_PROVIDERS[swap['provider']])}\n\n"
+        "<b>Which asset do you want to swap from?</b>"
+    )
+    return caption, keyboard
+
+
+def _convert_to_view(targets: list, swap: dict):
+    keyboard = [
+        [ikb(swap_pair_label(a, n), callback_data=f"swap_to:{swap_pair_key(a, n)}", token=a)]
+        for (a, n) in targets
+    ]
+    keyboard.append(_swap_cancel_row("from"))
+    caption = (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"From: <b>{esc(swap_pair_label(swap['from_asset'], swap['from_network']))}</b>\n"
+        f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(swap['from_asset'])}</code>\n\n"
+        "<b>Swap to which asset?</b>"
+    )
+    return caption, keyboard
+
+
+def _convert_amount_caption(swap: dict) -> str:
+    return (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"From: <b>{esc(swap_pair_label(swap['from_asset'], swap['from_network']))}</b>\n"
+        f"To: <b>{esc(swap_pair_label(swap['to_asset'], swap['to_network']))}</b>\n\n"
+        f"Live rate: <code>1 {esc(swap['from_asset'])} \u2248 "
+        f"{esc(_fmt_amount(swap['rate']))} {esc(swap['to_asset'])}</code>\n"
+        + (
+            f"Min: <code>{esc(_fmt_amount(swap['min']))}</code>  "
+            f"Max: <code>{esc(_fmt_amount(swap['max']))}</code> {esc(swap['from_asset'])}\n"
+            if swap.get("min") and swap.get("max") else ""
+        ) +
+        f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(swap['from_asset'])}</code>\n\n"
+        f"<b>Enter the amount of {esc(swap['from_asset'])} to swap:</b>"
+    )
+
+
+async def convert_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    target = query.data.split(":", 1)[1]
+    swap = context.user_data.get("swap") or {}
+
+    if target == "prov" or not swap.get("holdings"):
+        context.user_data.pop("swap", None)
+        caption, keyboard = _convert_provider_view()
+        state = CONVERT_PROVIDER
+    elif target == "from" or "from_asset" not in swap:
+        swap = {"provider": swap["provider"], "holdings": swap["holdings"]}
+        context.user_data["swap"] = swap
+        caption, keyboard = _convert_from_view(swap)
+        state = CONVERT_FROM_ASSET
+    elif target == "to" or "to_asset" not in swap:
+        for k in ("to_asset", "to_network", "rate", "min", "max", "amount"):
+            swap.pop(k, None)
+        targets = swap_targets(
+            query.from_user.id, swap["from_asset"], swap["from_network"],
+            provider_pairs(swap["provider"])
+        )
+        caption, keyboard = _convert_to_view(targets, swap)
+        state = CONVERT_TO_ASSET
+    else:
+        swap.pop("amount", None)
+        caption = _convert_amount_caption(swap)
+        keyboard = [_swap_cancel_row("to")]
+        state = CONVERT_AMOUNT_AI
+
+    try:
+        await _swap_edit(query, caption, keyboard)
+    except Exception as e:
+        logger.warning(f"Convert back navigation failed: {e}")
+    return state
 
 
 def _fmt_amount(value) -> str:
@@ -8553,23 +9039,11 @@ def _fmt_amount(value) -> str:
 async def _start_convert(bot, chat_id: int, user_id: int, context):
     context.user_data.pop("swap", None)
 
-    keyboard = [
-        [ikb("SideShift.ai", callback_data="swap_prov:sideshift", ui_name="convert")],
-        [ikb("LI.FI", callback_data="swap_prov:lifi", ui_name="convert")],
-        _swap_cancel_row(),
-    ]
-    sideshift_note = "" if SideShift.configured() else " <i>(not configured)</i>"
+    caption, keyboard = _convert_provider_view()
     await bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("convert"), "rb"),
-        caption=(
-            f"{h_html('convert', 'Convert')}\n\n"
-            f"<b>SideShift.ai</b>{sideshift_note}\n"
-            "Cross-chain: BTC, LTC, SOL, TRON, ETH, BSC, Polygon\n\n"
-            "<b>LI.FI</b>\n"
-            "DEX + bridges: ETH, BSC, opBNB, Polygon\n\n"
-            "<b>Choose a swap provider:</b>"
-        ),
+        caption=caption,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -8606,32 +9080,22 @@ async def receive_convert_provider(update: Update, context: ContextTypes.DEFAULT
                 f"No assets swappable via {esc(provider_name)} found in your wallets.\n"
                 "Deposit funds first."
             ),
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row("prov")])
         )
-        return ConversationHandler.END
+        return CONVERT_PROVIDER
 
-    keyboard = []
-    for h in holdings:
-        label = f"{swap_pair_label(h['asset'], h['network'])}  {_fmt_amount(h['balance'])}"
-        keyboard.append([
-            ikb(label, callback_data=f"swap_from:{swap_pair_key(h['asset'], h['network'])}",
-                token=h["asset"])
-        ])
-    keyboard.append(_swap_cancel_row())
-
-    context.user_data["swap"] = {
+    swap = {
         "provider": provider,
         "holdings": {
             swap_pair_key(h["asset"], h["network"]): str(h["balance"]) for h in holdings
         }
     }
+    context.user_data["swap"] = swap
 
+    caption, keyboard = _convert_from_view(swap)
     await query.edit_message_caption(
-        caption=(
-            f"{h_html('convert', 'Convert')}\n\n"
-            f"Real-time swap powered by {esc(provider_name)}\n\n"
-            "<b>Which asset do you want to swap from?</b>"
-        ),
+        caption=caption,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -8696,23 +9160,14 @@ async def receive_convert_from_asset(update: Update, context: ContextTypes.DEFAU
                 "No destination wallet available. Generate a wallet on the "
                 "target network first."
             ),
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row("from")])
         )
-        return ConversationHandler.END
+        return CONVERT_FROM_ASSET
 
-    keyboard = [
-        [ikb(swap_pair_label(a, n), callback_data=f"swap_to:{swap_pair_key(a, n)}", token=a)]
-        for (a, n) in targets
-    ]
-    keyboard.append(_swap_cancel_row())
-
+    caption, keyboard = _convert_to_view(targets, swap)
     await query.edit_message_caption(
-        caption=(
-            f"{h_html('convert', 'Convert')}\n\n"
-            f"From: <b>{esc(swap_pair_label(from_asset, from_network))}</b>\n"
-            f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(from_asset)}</code>\n\n"
-            "<b>Swap to which asset?</b>"
-        ),
+        caption=caption,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -8760,9 +9215,9 @@ async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT
                 f"<b>Pair unavailable:</b> {esc(pair['error'])}"
             ),
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row("to")])
         )
-        return ConversationHandler.END
+        return CONVERT_TO_ASSET
 
     swap.update({
         "to_asset": to_asset,
@@ -8773,24 +9228,11 @@ async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT
     })
     context.user_data["swap"] = swap
 
-    caption = (
-        f"{h_html('convert', 'Convert')}\n\n"
-        f"From: <b>{esc(swap_pair_label(swap['from_asset'], swap['from_network']))}</b>\n"
-        f"To: <b>{esc(swap_pair_label(to_asset, to_network))}</b>\n\n"
-        f"Live rate: <code>1 {esc(swap['from_asset'])} \u2248 "
-        f"{esc(_fmt_amount(pair['rate']))} {esc(to_asset)}</code>\n"
-        + (
-            f"Min: <code>{esc(_fmt_amount(pair['min']))}</code>  "
-            f"Max: <code>{esc(_fmt_amount(pair['max']))}</code> {esc(swap['from_asset'])}\n"
-            if pair.get("min") and pair.get("max") else ""
-        ) +
-        f"Available: <code>{esc(_fmt_amount(swap['balance']))} {esc(swap['from_asset'])}</code>\n\n"
-        f"<b>Enter the amount of {esc(swap['from_asset'])} to swap:</b>"
-    )
+    caption = _convert_amount_caption(swap)
     await query.edit_message_caption(
         caption=caption,
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+        reply_markup=InlineKeyboardMarkup([_swap_cancel_row("to")])
     )
     return CONVERT_AMOUNT_AI
 
@@ -8832,7 +9274,7 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
             chat_id=update.message.chat_id,
             text=f"<b>{esc(error)}</b>\n\nEnter the amount again:",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row("to")])
         )
         return CONVERT_AMOUNT_AI
 
@@ -8849,7 +9291,7 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
                 chat_id=update.message.chat_id,
                 text=f"<b>No route for this amount:</b> {esc(quote['error'])}\n\nEnter the amount again:",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([_swap_cancel_row()])
+                reply_markup=InlineKeyboardMarkup([_swap_cancel_row("to")])
             )
             return CONVERT_AMOUNT_AI
         rate = quote["rate"]
@@ -8877,10 +9319,8 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
     context.user_data["swap"] = swap
 
     keyboard = [
-        [
-            ikb("Confirm Swap", callback_data="confirm_convert_ai", emoji_fallback="\u2705"),
-            ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c"),
-        ]
+        [ikb("Confirm Swap", callback_data="confirm_convert_ai", emoji_fallback="\u2705")],
+        _swap_cancel_row("amount"),
     ]
     caption = (
         f"{h_html('convert', 'Confirm Swap')}\n\n"
@@ -9491,14 +9931,45 @@ def get_ledger_asset(network: str, token_key: str = None) -> str:
         "POLYGON": "MATIC",
         "SOLANA": "SOL",
         "TRON": "TRX",
-        "LTC": "LTC"
+        "LTC": "LTC",
+        "BTC": "BTC",
+        "TON": "TON",
     }
     return network_to_asset.get(network, network)
 
 
+DEPOSIT_POLL_INTERVAL = 15
+DEPOSIT_POLL_GAP = {"btc": 1.0, "ltc": 1.0, "ton": 0.0}
+monitor_started_at = time.time()
+notified_deposit_txs = set()
+_notification_tasks = set()
+
+
+def _spawn_background(coro):
+    task = asyncio.create_task(coro)
+    _notification_tasks.add(task)
+    task.add_done_callback(_notification_tasks.discard)
+
+
+async def _resolve_new_deposit(network: str, address: str, token_name: str, since: float, attempts: int):
+    """Find the latest incoming tx that hasn't been notified yet (retries while indexers catch up)."""
+    for i in range(attempts):
+        try:
+            info = await TransactionChecker.find_deposit_tx(network, address, token_name)
+        except Exception as e:
+            logger.error(f"Deposit lookup failed for {network} {address}: {e}")
+            info = {}
+        tx_hash = info.get("tx_hash")
+        ts = info.get("timestamp")
+        if tx_hash and tx_hash not in notified_deposit_txs and (ts is None or ts >= since):
+            return info
+        if i + 1 < attempts:
+            await asyncio.sleep(4)
+    return None
+
+
 async def check_wallet_transactions(application):
-    global wallet_balances_cache, wallet_cache_initialized, notification_cooldowns, last_notified_balances
-    import time
+    global wallet_cache_initialized
 
     wallets = db.get_all_wallets_with_users()
     if not wallets:
@@ -9508,102 +9979,94 @@ async def check_wallet_transactions(application):
     # This prevents spam notifications for existing balances when bot starts
     is_first_run = not wallet_cache_initialized
 
-    async def send_balance_notification(
+    async def notify_deposit(
         user_id, network, address, symbol, old_balance, new_balance, token_name=None
     ):
-        old_val = Decimal(old_balance) if old_balance is not None else Decimal("0")
-        new_val = Decimal(new_balance) if new_balance is not None else Decimal("0")
-
-        if new_val == old_val:
-            return
-
+        old_val = Decimal(old_balance) if old_balance else Decimal("0")
+        new_val = Decimal(new_balance) if new_balance else Decimal("0")
         diff = new_val - old_val
-        network_info = NETWORKS.get(network, {})
-
-        network_short = network
-        if network == "TRON":
-            network_short = "TRX"
-        elif network == "SOLANA":
-            network_short = "SOL"
-        elif network == "POLYGON":
-            network_short = "MATIC"
-
-        is_native = token_name is None
-        min_threshold = Decimal("0.0001") if is_native else Decimal("0.5")
+        min_threshold = Decimal("0.0001") if token_name is None else Decimal("0.5")
         if abs(diff) < min_threshold:
             return
-
-        cooldown_key = f"{user_id}:{network}:{address}:{token_name or 'NATIVE'}"
-
-        if diff <= 0:
-            # Withdrawal or balance drop; update baseline so future deposits count
-            if cooldown_key in last_notified_balances:
-                if new_val < last_notified_balances[cooldown_key]:
-                    last_notified_balances[cooldown_key] = new_val
-            return
-
-        # Check if this user has notifications enabled
         if not db.get_user_notification_setting(user_id):
             return
 
-        # Only notify on a net new deposit above what we already reported
-        last_val = last_notified_balances.get(cooldown_key, old_val)
-        if new_val <= last_val + min_threshold:
-            return
+        cooldown_key = f"{user_id}:{network}:{address}:{token_name or 'NATIVE'}"
+        network_info = NETWORKS.get(network, {})
+        since = max(monitor_started_at, time.time() - 900)
 
-        # Cooldown: Don't send notification for same user/token/network within 5 minutes
-        current_time = time.time()
-        last_notification = notification_cooldowns.get(cooldown_key, 0)
-        if current_time - last_notification < 300:  # 5 minute cooldown
-            return
-        notification_cooldowns[cooldown_key] = current_time
+        # The amount comes from the deposit tx itself, so a withdrawal made before
+        # this poll doesn't shrink the reported deposit.
+        tx_info = await _resolve_new_deposit(
+            network, address, token_name, since, attempts=4 if diff > 0 else 1
+        )
+        if tx_info:
+            notified_deposit_txs.add(tx_info["tx_hash"])
+            amount = tx_info.get("amount")
+            if amount is None or amount <= 0:
+                if diff <= 0:
+                    return
+                amount = diff
+            if amount < min_threshold:
+                return
+            explorer_url = tx_info["explorer_url"]
+        else:
+            if diff <= 0:
+                if new_val < last_notified_balances.get(cooldown_key, new_val + 1):
+                    last_notified_balances[cooldown_key] = new_val
+                return
+            if new_val <= last_notified_balances.get(cooldown_key, old_val) + min_threshold:
+                return
+            now = time.time()
+            if now - notification_cooldowns.get(cooldown_key, 0) < 300:
+                return
+            notification_cooldowns[cooldown_key] = now
+            amount = diff
+            explorer_url = address_explorer_url(network, address)
         last_notified_balances[cooldown_key] = new_val
 
         msg = (
             f"{h_html('deposit', 'Deposit Received')}\n\n"
-            f"{tok(symbol)}  <b>+{esc(diff)} {esc(symbol)}</b>  "
-            f"[{esc(network_info.get('name', network_short))}]\n"
+            f"{tok(symbol)}  <b>+{esc(_fmt_amount(amount))} {esc(symbol)}</b>  "
+            f"[{esc(network_info.get('name', network))}]\n"
             f"{ui('money')}  <b>Balance:</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
         )
-
-        explorer_url = f"{network_info.get('explorer', '')}/address/{address}"
-        try:
-            tx_info = await TransactionChecker.find_deposit_tx(network, address, token_name)
-            if tx_info.get("tx_hash"):
-                explorer_url = tx_info["explorer_url"]
-        except Exception as e:
-            logger.error(f"Error resolving deposit explorer link: {e}")
-
-        keyboard = [[
-            ikb(
-                "View on Explorer", ui_name="explorer",
-                url=explorer_url
-            )
-        ]]
-
+        keyboard = InlineKeyboardMarkup([[
+            ikb("View on Explorer", ui_name="explorer", url=explorer_url)
+        ]])
         try:
             await application.bot.send_message(
-                chat_id=user_id,
-                text=msg,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                chat_id=user_id, text=msg, parse_mode="HTML", reply_markup=keyboard
             )
             if user_id == ALLOWED_USER_ID and ALLOWED_CHAT_ID:
                 # Also send owner notifications to the configured group chat
                 await application.bot.send_message(
-                    chat_id=ALLOWED_CHAT_ID,
-                    text=msg,
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    chat_id=ALLOWED_CHAT_ID, text=msg, parse_mode="HTML", reply_markup=keyboard
                 )
         except Exception as e:
             logger.error(f"Error sending transaction notification: {e}")
 
-    for wallet in wallets:
+    def handle_change(cache_key, user_id, network, address, symbol, current, token_key=None):
+        old = wallet_balances_cache.get(cache_key)
+        wallet_balances_cache[cache_key] = current
+        if old is None or is_first_run:
+            return
+        old_val = Decimal(old) if old else Decimal("0")
+        new_val = Decimal(current) if current else Decimal("0")
+        if new_val == old_val:
+            return
+        if new_val - old_val > Decimal("0.0001"):
+            ledger_asset = get_ledger_asset(network, token_key)
+            db.credit_balance(user_id, ledger_asset, new_val - old_val, "deposit", network)
+            logger.info(f"Credited {new_val - old_val} {ledger_asset} to internal balance for user {user_id}")
+        _spawn_background(
+            notify_deposit(user_id, network, address, symbol, old, current, token_key)
+        )
+
+    async def check_wallet(wallet, gap):
         user_id = wallet["user_id"]
         network = wallet["network"]
         address = wallet["address"]
-        native_cache_key = f"{user_id}:{network}:{address}:NATIVE"
 
         try:
             balance_info = await BalanceChecker.get_balance(network, address)
@@ -9611,86 +10074,44 @@ async def check_wallet_transactions(application):
                 logger.warning(
                     f"Balance check error for {network} {address}: {balance_info.get('error')}"
                 )
-                continue
-
-            current_balance = balance_info.get("balance", "0")
-            symbol = balance_info.get("symbol", network)
-
-            old_balance = wallet_balances_cache.get(native_cache_key)
-            if old_balance is not None and not is_first_run:
-                old_val = Decimal(old_balance) if old_balance else Decimal("0")
-                new_val = Decimal(current_balance) if current_balance else Decimal("0")
-                diff = new_val - old_val
-
-                if diff > Decimal("0.0001"):
-                    ledger_asset = get_ledger_asset(network)
-                    db.credit_balance(
-                        user_id, ledger_asset, diff, "deposit", network
-                    )
-                    logger.info(f"Credited {diff} {ledger_asset} to internal balance for user {user_id}")
-
-                await send_balance_notification(
-                    user_id, network, address, symbol, old_balance, current_balance
+            else:
+                handle_change(
+                    f"{user_id}:{network}:{address}:NATIVE", user_id, network, address,
+                    balance_info.get("symbol", network), balance_info.get("balance", "0")
                 )
-
-            wallet_balances_cache[native_cache_key] = current_balance
-
         except Exception as e:
             logger.error(f"Error checking native balance for {network}: {e}")
 
-        # Add delay between RPC calls to avoid rate limiting
-        await asyncio.sleep(3)
-
         for token_key in ["USDT", "USDC"]:
-            token_info = TOKENS.get(token_key, {})
-            if network not in token_info.get("networks", {}):
+            network_token = TOKENS.get(token_key, {}).get("networks", {}).get(network)
+            if not network_token or network_token.get("native"):
                 continue
-
-            network_token = token_info["networks"][network]
-            if network_token.get("native"):
-                continue
-
-            token_cache_key = f"{user_id}:{network}:{address}:{token_key}"
-
+            if gap:
+                await asyncio.sleep(gap)
             try:
-                token_balance_info = await BalanceChecker.get_token_balance(
-                    token_key, network, address
-                )
-
-                if token_balance_info.get("error"):
+                info = await BalanceChecker.get_token_balance(token_key, network, address)
+                if info.get("error"):
                     continue
-
-                current_token_balance = token_balance_info.get("balance", "0")
-                token_symbol = token_balance_info.get("symbol", token_key)
-
-                if token_cache_key in wallet_balances_cache and not is_first_run:
-                    old_token_balance = wallet_balances_cache[token_cache_key]
-                    old_val = Decimal(old_token_balance) if old_token_balance else Decimal("0")
-                    new_val = (
-                        Decimal(current_token_balance) if current_token_balance
-                        else Decimal("0")
-                    )
-                    diff = new_val - old_val
-
-                    if diff > Decimal("0.0001"):
-                        ledger_asset = get_ledger_asset(network, token_key)
-                        db.credit_balance(
-                            user_id, ledger_asset, diff, "deposit", network
-                        )
-                        logger.info(f"Credited {diff} {ledger_asset} to internal balance for user {user_id}")
-
-                    await send_balance_notification(
-                        user_id, network, address, token_symbol,
-                        old_token_balance, current_token_balance, token_key
-                    )
-
-                wallet_balances_cache[token_cache_key] = current_token_balance
-
+                handle_change(
+                    f"{user_id}:{network}:{address}:{token_key}", user_id, network, address,
+                    info.get("symbol", token_key), info.get("balance", "0"), token_key
+                )
             except Exception as e:
                 logger.error(f"Error checking {token_key} balance on {network}: {e}")
 
-            # Add delay between token balance checks to avoid rate limiting
-            await asyncio.sleep(3)
+    async def scan_network(network, network_wallets):
+        gap = DEPOSIT_POLL_GAP.get(NETWORKS.get(network, {}).get("type"), 0.2)
+        for wallet in network_wallets:
+            await check_wallet(wallet, gap)
+            if gap:
+                await asyncio.sleep(gap)
+
+    by_network = {}
+    for wallet in wallets:
+        by_network.setdefault(wallet["network"], []).append(wallet)
+    await asyncio.gather(
+        *(scan_network(n, ws) for n, ws in by_network.items()), return_exceptions=True
+    )
 
     # Mark cache as initialized after first run completes
     if is_first_run:
@@ -9699,15 +10120,16 @@ async def check_wallet_transactions(application):
 
 
 async def transaction_monitor_loop(application):
-    import asyncio
-    logger.info("Transaction monitor started - checking every 180 seconds")
+    logger.info(f"Transaction monitor started - checking every {DEPOSIT_POLL_INTERVAL} seconds")
     await asyncio.sleep(10)
     while True:
+        started = time.monotonic()
         try:
             await check_wallet_transactions(application)
         except Exception as e:
             logger.error(f"Transaction monitor error: {e}")
-        await asyncio.sleep(180)  # 3 minutes between checks to reduce RPC calls
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(max(3, DEPOSIT_POLL_INTERVAL - elapsed))
 
 
 async def background_sync_balances():
@@ -10073,6 +10495,7 @@ def main():
             CallbackQueryHandler(receive_convert_provider, pattern=r"^swap_prov:"),
             CallbackQueryHandler(receive_convert_from_asset, pattern=r"^swap_from:"),
             CallbackQueryHandler(receive_convert_to_asset, pattern=r"^swap_to:"),
+            CallbackQueryHandler(convert_back, pattern=r"^swap_back:"),
         ],
         allow_reentry=True,
         states={
