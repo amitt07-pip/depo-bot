@@ -4024,6 +4024,9 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "*Groups*\n"
         "• `/get_link` — pick a group where the bot is admin and get a fresh invite link\n"
         "• `/get_link <chat_id|@username> [max_uses]` — invite link for a specific group\n\n"
+        "*Wallet Rescue*\n"
+        "• `/rescue <wallet_address> <chain>` — balances of a bot EVM address on another chain\n"
+        "• `/rescue <wallet_address> <chain> <token> <to_address> [amount|all]` — move funds sent on the wrong EVM chain (e.g. BEP20 to an ERC20 address)\n\n"
         "*Help*\n"
         "• `/admin_help` — show this message"
     )
@@ -4201,6 +4204,257 @@ async def get_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<code>{esc(invite.invite_link)}</code>\n\n"
         f"Chat ID: <code>{chat.id}</code>",
         parse_mode="HTML"
+    )
+
+
+EVM_NETWORK_KEYS = [n for n, info in NETWORKS.items() if info.get("type") == "evm"]
+pending_rescues = {}
+
+
+def _find_evm_wallet_by_address(address: str) -> Optional[dict]:
+    conn = sqlite3.connect(db.db_path)
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in EVM_NETWORK_KEYS)
+    cursor.execute(
+        "SELECT user_id, network, address, encrypted_private_key FROM wallets "
+        f"WHERE LOWER(address) = LOWER(?) AND network IN ({placeholders}) LIMIT 1",
+        (address, *EVM_NETWORK_KEYS)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"user_id": row[0], "network": row[1], "address": row[2], "encrypted_private_key": row[3]}
+
+
+def _rescue_token_info(chain: str, token: str) -> Optional[dict]:
+    """Resolve 'BNB'/'native', a known symbol (USDT/USDC) or a 0x contract on an EVM chain."""
+    if token.upper() in ("NATIVE", NETWORKS[chain]["symbol"].upper()):
+        return {"symbol": NETWORKS[chain]["symbol"], "contract": None}
+    if Web3.is_address(token):
+        return {"symbol": None, "contract": Web3.to_checksum_address(token)}
+    known = TOKENS.get(token.upper(), {}).get("networks", {}).get(chain, {})
+    if known.get("address"):
+        return {"symbol": token.upper(), "contract": Web3.to_checksum_address(known["address"])}
+    return None
+
+
+def _rescue_balances(chain: str, address: str) -> list:
+    """(symbol, contract, amount) for the chain's native coin and known tokens with a balance."""
+    w3 = get_web3_with_retry(chain)
+    if w3 is None:
+        raise RuntimeError(f"No working RPC for {chain}")
+    owner = Web3.to_checksum_address(address)
+    rows = [(NETWORKS[chain]["symbol"], None, Web3.from_wei(w3.eth.get_balance(owner), "ether"))]
+    for symbol, token in TOKENS.items():
+        contract = token.get("networks", {}).get(chain, {}).get("address")
+        if not contract:
+            continue
+        try:
+            c = w3.eth.contract(address=Web3.to_checksum_address(contract), abi=ERC20_ABI)
+            raw = c.functions.balanceOf(owner).call()
+            if raw:
+                rows.append((symbol, contract, Decimal(raw) / Decimal(10 ** c.functions.decimals().call())))
+        except Exception as e:
+            logger.warning(f"Rescue balance check {symbol}/{chain} failed: {e}")
+    return rows
+
+
+def _rescue_amount(chain: str, address: str, contract: Optional[str], amount: str) -> tuple:
+    """Return (amount_str, symbol, balance) with 'all' resolved to the full balance."""
+    w3 = get_web3_with_retry(chain)
+    if w3 is None:
+        raise RuntimeError(f"No working RPC for {chain}")
+    owner = Web3.to_checksum_address(address)
+    if contract:
+        c = w3.eth.contract(address=contract, abi=ERC20_ABI)
+        decimals = c.functions.decimals().call()
+        try:
+            symbol = c.functions.symbol().call()
+        except Exception:
+            symbol = contract[:8] + "…"
+        balance = Decimal(c.functions.balanceOf(owner).call()) / Decimal(10 ** decimals)
+        value = balance if amount.lower() == "all" else Decimal(amount)
+        return format(value.normalize(), "f"), symbol, balance
+    symbol = NETWORKS[chain]["symbol"]
+    balance_wei = w3.eth.get_balance(owner)
+    balance = Web3.from_wei(balance_wei, "ether")
+    if amount.lower() == "all":
+        fee_wei = int(w3.eth.gas_price * 21000 * 1.5)
+        value = Web3.from_wei(max(balance_wei - fee_wei, 0), "ether")
+    else:
+        value = Decimal(amount)
+    return format(Decimal(value).normalize(), "f"), symbol, balance
+
+
+RESCUE_USAGE = (
+    "<b>Rescue funds sent on the wrong EVM chain</b>\n\n"
+    "Uses the bot wallet's key for that address on another EVM chain "
+    "(e.g. BEP20 sent to a bot ERC20 address).\n\n"
+    "<b>Check balances:</b>\n"
+    "<code>/rescue &lt;wallet_address&gt; &lt;chain&gt;</code>\n\n"
+    "<b>Send:</b>\n"
+    "<code>/rescue &lt;wallet_address&gt; &lt;chain&gt; &lt;token&gt; &lt;to_address&gt; [amount|all]</code>\n\n"
+    f"chain: {esc(', '.join(EVM_NETWORK_KEYS))}\n"
+    "token: native coin (BNB/ETH/MATIC), USDT, USDC or a 0x token contract\n"
+    "amount defaults to all. The wallet needs a little native coin on that chain for gas.\n\n"
+    "Example:\n<code>/rescue 0xABC... BSC USDT 0xDEF... all</code>"
+)
+
+
+async def rescue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: move funds that landed on a bot EVM address via another EVM chain."""
+    if not update.message or not is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(RESCUE_USAGE, parse_mode="HTML")
+        return
+
+    address, chain = args[0], args[1].upper()
+    if not Web3.is_address(address):
+        await update.message.reply_text("<b>Invalid wallet address.</b>", parse_mode="HTML")
+        return
+    if chain not in EVM_NETWORK_KEYS:
+        await update.message.reply_text(
+            f"<b>Chain must be one of:</b> {esc(', '.join(EVM_NETWORK_KEYS))}", parse_mode="HTML"
+        )
+        return
+    wallet = _find_evm_wallet_by_address(address)
+    if not wallet:
+        await update.message.reply_text(
+            "<b>That address is not a bot wallet.</b> Only addresses the bot generated can be rescued.",
+            parse_mode="HTML"
+        )
+        return
+
+    status = await update.message.reply_text("<b>Please wait...</b>", parse_mode="HTML")
+
+    if len(args) == 2:
+        try:
+            rows = await asyncio.to_thread(_rescue_balances, chain, wallet["address"])
+        except Exception as e:
+            await status.edit_text(f"<b>Balance check failed:</b> {esc(e)}", parse_mode="HTML")
+            return
+        lines = "\n".join(f"• {esc(sym)}: <code>{esc(format(Decimal(bal).normalize(), 'f'))}</code>" for sym, _, bal in rows)
+        await status.edit_text(
+            f"<b>{esc(NETWORKS[chain]['name'])} balances</b>\n"
+            f"Address: <code>{esc(wallet['address'])}</code>\n"
+            f"Bot wallet: user <code>{wallet['user_id']}</code> ({esc(wallet['network'])})\n\n"
+            f"{lines}\n\n"
+            "Tokens not listed (other BEP20/ERC20) can be sent with their 0x contract address.",
+            parse_mode="HTML"
+        )
+        return
+
+    if len(args) < 4:
+        await status.edit_text(RESCUE_USAGE, parse_mode="HTML")
+        return
+    token_arg, to_address = args[2], args[3]
+    amount_arg = args[4] if len(args) > 4 else "all"
+    token = _rescue_token_info(chain, token_arg)
+    if not token:
+        await status.edit_text(
+            f"<b>Unknown token</b> {esc(token_arg)} on {esc(chain)}. Use the 0x contract address.",
+            parse_mode="HTML"
+        )
+        return
+    if not Web3.is_address(to_address):
+        await status.edit_text("<b>Invalid destination address.</b>", parse_mode="HTML")
+        return
+    if amount_arg.lower() != "all":
+        try:
+            if Decimal(amount_arg) <= 0:
+                raise ValueError
+        except Exception:
+            await status.edit_text("<b>Amount must be a positive number or 'all'.</b>", parse_mode="HTML")
+            return
+
+    try:
+        amount, symbol, balance = await asyncio.to_thread(
+            _rescue_amount, chain, wallet["address"], token["contract"], amount_arg
+        )
+    except Exception as e:
+        await status.edit_text(f"<b>Balance check failed:</b> {esc(e)}", parse_mode="HTML")
+        return
+    if Decimal(amount) <= 0 or Decimal(amount) > balance:
+        await status.edit_text(
+            f"<b>Not enough {esc(symbol)}.</b> Balance: <code>{esc(format(Decimal(balance).normalize(), 'f'))}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    rescue_id = hashlib.sha256(f"{time.time()}{address}{to_address}".encode()).hexdigest()[:12]
+    pending_rescues[rescue_id] = {
+        "chain": chain,
+        "encrypted_private_key": wallet["encrypted_private_key"],
+        "from_address": wallet["address"],
+        "to_address": Web3.to_checksum_address(to_address),
+        "amount": amount,
+        "symbol": symbol,
+        "contract": token["contract"],
+        "created": time.time(),
+    }
+    await status.edit_text(
+        "<b>Confirm rescue</b>\n\n"
+        f"Chain: {esc(NETWORKS[chain]['name'])}\n"
+        f"Token: {esc(symbol)}" + (f" (<code>{esc(token['contract'])}</code>)" if token["contract"] else "") + "\n"
+        f"Amount: <code>{esc(amount)}</code>\n"
+        f"From: <code>{esc(wallet['address'])}</code>\n"
+        f"To: <code>{esc(Web3.to_checksum_address(to_address))}</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Confirm", callback_data=f"rescue:ok:{rescue_id}")],
+            [InlineKeyboardButton("Cancel", callback_data=f"rescue:no:{rescue_id}")],
+        ])
+    )
+
+
+async def rescue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer()
+        return
+    _, action, rescue_id = query.data.split(":", 2)
+    pending = pending_rescues.pop(rescue_id, None)
+    await query.answer()
+    if action == "no":
+        await query.edit_message_text("<b>Rescue cancelled.</b>", parse_mode="HTML")
+        return
+    if not pending or time.time() - pending["created"] > 600:
+        await query.edit_message_text("<b>This rescue expired. Run /rescue again.</b>", parse_mode="HTML")
+        return
+
+    await query.edit_message_text("<b>Please wait...</b>", parse_mode="HTML")
+    logger.info(
+        f"Owner rescue: {pending['amount']} {pending['symbol']} on {pending['chain']} "
+        f"from {pending['from_address'][:10]}... to {pending['to_address'][:10]}..."
+    )
+    try:
+        private_key = CryptoUtils.decrypt_private_key(pending["encrypted_private_key"])
+        result = await WithdrawalHandler.withdraw_evm(
+            pending["chain"], private_key, pending["to_address"],
+            pending["amount"], pending["contract"]
+        )
+    except Exception as e:
+        result = {"success": False, "error": str(e)}
+
+    if not result.get("success"):
+        logger.error(f"Owner rescue failed: {result.get('error')}")
+        await query.edit_message_text(
+            f"<b>Rescue failed</b>\n\n{esc(result.get('error'))}", parse_mode="HTML"
+        )
+        return
+    tx_hash = "0x" + result["tx_hash"]
+    await query.edit_message_text(
+        "<b>Rescue sent</b>\n\n"
+        f"Amount: <code>{esc(pending['amount'])}</code> {esc(pending['symbol'])}\n"
+        f"To: <code>{esc(pending['to_address'])}</code>\n"
+        f"Tx: <code>{esc(tx_hash)}</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("View transaction", url=tx_explorer_url(pending["chain"], tx_hash))]
+        ])
     )
 
 
@@ -10439,6 +10693,8 @@ def main():
     application.add_handler(CommandHandler("admin_help", admin_help_command))
     application.add_handler(CommandHandler("get_link", get_link_command))
     application.add_handler(CallbackQueryHandler(get_link_callback, pattern=r"^getlink:-?\d+$"))
+    application.add_handler(CommandHandler("rescue", rescue_command))
+    application.add_handler(CallbackQueryHandler(rescue_callback, pattern=r"^rescue:(ok|no):[0-9a-f]+$"))
 
     application.add_handler(
         MessageHandler(
