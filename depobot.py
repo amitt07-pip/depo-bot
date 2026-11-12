@@ -9367,10 +9367,27 @@ class SideShift:
 async def get_swap_holdings(user_id: int, pairs: dict) -> list:
     """On-chain balances for every (asset, network) pair the provider can swap."""
     wallets = {w["network"]: w["address"] for w in db.get_all_wallets(user_id)}
+    solana_accounts = None
+
+    async def solana_spl_balance(asset, address):
+        # One token-account listing for all SPL pairs; parallel per-mint calls get rate-limited.
+        nonlocal solana_accounts
+        if solana_accounts is None:
+            solana_accounts = asyncio.ensure_future(solana_token_accounts(address))
+        held = await solana_accounts
+        if "error" in held:
+            return await BalanceChecker.get_token_balance(asset, "SOLANA", address)
+        mint = TOKENS[asset]["networks"]["SOLANA"]["address"]
+        accounts = [a for a in held["accounts"] if a["mint"] == mint]
+        raw = sum(a["amount"] for a in accounts)
+        decimals = accounts[0]["decimals"] if accounts else TOKENS[asset]["networks"]["SOLANA"]["decimals"]
+        return {"balance": str(Decimal(raw) / Decimal(10 ** decimals))}
 
     async def fetch(asset, network, address):
         if asset == NETWORKS[network]["symbol"]:
             result = await BalanceChecker.get_balance(network, address)
+        elif network == "SOLANA" and TOKENS.get(asset, {}).get("networks", {}).get("SOLANA"):
+            result = await solana_spl_balance(asset, address)
         else:
             result = await BalanceChecker.get_token_balance(asset, network, address)
         try:
@@ -9396,11 +9413,10 @@ async def get_swap_holdings(user_id: int, pairs: dict) -> list:
 
 
 def swap_targets(user_id: int, from_asset: str, from_network: str, pairs: dict) -> list:
-    """Destination pairs the user has a wallet for (settlement address)."""
-    wallets = {w["network"] for w in db.get_all_wallets(user_id)}
+    """Destination pairs; without a bot wallet there the user enters their own address."""
     return [
         (asset, network) for (asset, network) in pairs
-        if network in wallets and (asset, network) != (from_asset, from_network)
+        if (asset, network) != (from_asset, from_network)
     ]
 
 
@@ -9429,7 +9445,7 @@ def _convert_provider_view():
     caption = (
         f"{h_html('convert', 'Convert')}\n\n"
         f"<b>SideShift.ai</b>{sideshift_note}\n"
-        "Cross-chain: BTC, LTC, SOL, TRON, ETH, BSC, Polygon\n\n"
+        "Cross-chain: BTC, LTC, SOL, USDT/USDC on Solana, TRON, ETH, BSC, Polygon\n\n"
         "<b>LI.FI</b>\n"
         "DEX + bridges: ETH, BSC, opBNB, Polygon\n\n"
         "<b>Choose a swap provider:</b>"
@@ -9703,7 +9719,8 @@ async def receive_convert_to_asset(update: Update, context: ContextTypes.DEFAULT
         dest_wallet = db.get_wallet(user_id, to_network)
         quote = await LiFi.get_quote(
             (swap["from_asset"], swap["from_network"]), (to_asset, to_network),
-            Decimal(swap["balance"]), source_wallet["address"], dest_wallet["address"]
+            Decimal(swap["balance"]), source_wallet["address"],
+            (dest_wallet or source_wallet)["address"]
         )
         pair = quote if "error" in quote else {"rate": quote["rate"], "min": None, "max": None}
     else:
