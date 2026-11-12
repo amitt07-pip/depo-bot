@@ -936,6 +936,7 @@ BALANCE_NETWORK = 11
 CONVERT_FROM_ASSET, CONVERT_TO_ASSET, CONVERT_AMOUNT_AI = range(12, 15)
 WITHDRAW_QUICK_NETWORK = 15
 CONVERT_PROVIDER = 16
+CONVERT_DEST, CONVERT_DEST_ADDRESS = range(17, 19)
 
 pending_withdrawals = {}
 
@@ -9261,7 +9262,7 @@ async def convert_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption, keyboard = _convert_from_view(swap)
         state = CONVERT_FROM_ASSET
     elif target == "to" or "to_asset" not in swap:
-        for k in ("to_asset", "to_network", "rate", "min", "max", "amount"):
+        for k in ("to_asset", "to_network", "rate", "min", "max", "amount", "dest_address"):
             swap.pop(k, None)
         targets = swap_targets(
             query.from_user.id, swap["from_asset"], swap["from_network"],
@@ -9269,8 +9270,13 @@ async def convert_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         caption, keyboard = _convert_to_view(targets, swap)
         state = CONVERT_TO_ASSET
+    elif target == "dest" and "amount" in swap:
+        swap.pop("dest_address", None)
+        caption, keyboard = _convert_dest_view(query.from_user.id, swap)
+        state = CONVERT_DEST
     else:
         swap.pop("amount", None)
+        swap.pop("dest_address", None)
         caption = _convert_amount_caption(swap)
         keyboard = [_swap_cancel_row("to")]
         state = CONVERT_AMOUNT_AI
@@ -9532,20 +9538,149 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
         )
         return CONVERT_AMOUNT_AI
 
+    swap["amount"] = str(amount)
+    swap.pop("dest_address", None)
+    context.user_data["swap"] = swap
+
+    caption, keyboard = _convert_dest_view(user_id, swap)
+    await context.bot.send_photo(
+        chat_id=update.message.chat_id,
+        photo=open(get_banner_path("convert"), "rb"),
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CONVERT_DEST
+
+
+def _convert_dest_view(user_id: int, swap: dict):
+    to_asset, to_network = swap["to_asset"], swap["to_network"]
+    keyboard = []
+    bot_wallet = db.get_wallet(user_id, to_network)
+    if bot_wallet:
+        keyboard.append([ikb(
+            f"My bot wallet ({format_address(bot_wallet['address'])})",
+            callback_data="swap_dest:bot", ui_name="wallets"
+        )])
+    keyboard.append([ikb("Another address", callback_data="swap_dest:custom", emoji_fallback="\u270f\ufe0f")])
+    keyboard.append(_swap_cancel_row("amount"))
+    caption = (
+        f"{h_html('convert', 'Convert')}\n\n"
+        f"You send: <code>{esc(_fmt_amount(swap['amount']))} {esc(swap['from_asset'])}</code> "
+        f"({esc(NETWORKS[swap['from_network']]['name'])})\n"
+        f"You receive: <b>{esc(to_asset)}</b> ({esc(NETWORKS[to_network]['name'])})\n\n"
+        f"<b>Where do you want to receive the {esc(to_asset)}?</b>"
+    )
+    return caption, keyboard
+
+
+def _convert_dest_address_caption(swap: dict, error: str = None) -> str:
+    network_name = NETWORKS[swap["to_network"]]["name"]
+    return (
+        f"{h_html('convert', 'Convert')}\n\n"
+        + (f"<b>{esc(error)}</b>\n\n" if error else "")
+        + f"<b>Send the {esc(swap['to_asset'])} address on {esc(network_name)} "
+        f"where you want to receive the swapped funds:</b>\n\n"
+        f"<i>Double-check the address and network. Funds sent to a wrong address cannot be recovered.</i>"
+    )
+
+
+def _is_valid_swap_dest(address: str, network: str) -> bool:
+    if NETWORKS.get(network, {}).get("type") == "evm":
+        return Web3.is_address(address)
+    return bool(is_valid_address(address, network))
+
+
+async def receive_convert_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    swap = context.user_data.get("swap") or {}
+    if "amount" not in swap:
+        await _swap_edit(query, "<b>This swap has expired. Run /convert again.</b>", None)
+        return ConversationHandler.END
+
+    if query.data.split(":", 1)[1] == "custom":
+        swap.pop("dest_address", None)
+        await _swap_edit(query, _convert_dest_address_caption(swap), [_swap_cancel_row("dest")])
+        return CONVERT_DEST_ADDRESS
+
+    bot_wallet = db.get_wallet(user_id, swap["to_network"])
+    if not bot_wallet:
+        await query.answer("You don't have a bot wallet on this network.", show_alert=True)
+        return CONVERT_DEST
+    swap["dest_address"] = bot_wallet["address"]
+    swap["dest_custom"] = False
+    return await _show_convert_confirm(context, query.message.chat_id, user_id, swap, query=query)
+
+
+async def receive_convert_dest_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return ConversationHandler.END
+    swap = context.user_data.get("swap") or {}
+    if "amount" not in swap:
+        return ConversationHandler.END
+
+    address = (update.message.text or "").strip()
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not _is_valid_swap_dest(address, swap["to_network"]):
+        await context.bot.send_message(
+            chat_id=update.message.chat_id,
+            text=_convert_dest_address_caption(
+                swap, f"That is not a valid {NETWORKS[swap['to_network']]['name']} address."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([_swap_cancel_row("dest")])
+        )
+        return CONVERT_DEST_ADDRESS
+
+    if NETWORKS[swap["to_network"]]["type"] == "evm":
+        address = Web3.to_checksum_address(address)
+    bot_wallet = db.get_wallet(user_id, swap["to_network"])
+    swap["dest_address"] = address
+    swap["dest_custom"] = not (bot_wallet and bot_wallet["address"].lower() == address.lower())
+    return await _show_convert_confirm(context, update.message.chat_id, user_id, swap)
+
+
+async def _show_convert_confirm(context, chat_id: int, user_id: int, swap: dict, query=None):
+    """Quote the swap to the chosen destination and show the Confirm Swap screen."""
+    from_asset = swap["from_asset"]
+    amount = Decimal(swap["amount"])
+    dest_address = swap["dest_address"]
+
+    async def show(caption, keyboard):
+        if query:
+            await _swap_edit(query, caption, keyboard)
+        else:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=open(get_banner_path("convert"), "rb"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
     provider = swap.get("provider", "sideshift")
     if provider == "lifi":
         source_wallet = db.get_wallet(user_id, swap["from_network"])
-        dest_wallet = db.get_wallet(user_id, swap["to_network"])
         quote = await LiFi.get_quote(
             (from_asset, swap["from_network"]), (swap["to_asset"], swap["to_network"]),
-            amount, source_wallet["address"], dest_wallet["address"]
+            amount, source_wallet["address"], dest_address
         )
         if "error" in quote:
-            await context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=f"<b>No route for this amount:</b> {esc(quote['error'])}\n\nEnter the amount again:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([_swap_cancel_row("to")])
+            swap.pop("amount", None)
+            swap.pop("dest_address", None)
+            context.user_data["swap"] = swap
+            await show(
+                f"<b>No route for this amount:</b> {esc(quote['error'])}\n\nEnter the amount again:",
+                [_swap_cancel_row("to")]
             )
             return CONVERT_AMOUNT_AI
         rate = quote["rate"]
@@ -9568,13 +9703,13 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
             "Network fees are deducted from your source wallet.</i>"
         )
 
-    swap["amount"] = str(amount)
     swap["rate"] = str(rate)
     context.user_data["swap"] = swap
 
+    dest_label = "your address" if swap.get("dest_custom") else "your bot wallet"
     keyboard = [
         [ikb("Confirm Swap", callback_data="confirm_convert_ai", emoji_fallback="\u2705")],
-        _swap_cancel_row("amount"),
+        _swap_cancel_row("dest"),
     ]
     caption = (
         f"{h_html('convert', 'Confirm Swap')}\n\n"
@@ -9583,17 +9718,11 @@ async def receive_convert_amount_ai(update: Update, context: ContextTypes.DEFAUL
         f"You receive: <code>\u2248 {esc(_fmt_amount(estimated.quantize(Decimal('0.00000001'))))} "
         f"{esc(swap['to_asset'])}</code> ({esc(NETWORKS[swap['to_network']]['name'])})\n"
         f"Live rate: <code>1 {esc(from_asset)} \u2248 {esc(_fmt_amount(rate))} {esc(swap['to_asset'])}</code>\n\n"
+        f"Receive at ({dest_label}):\n<code>{esc(dest_address)}</code>\n\n"
         f"{footer}"
     )
-    await context.bot.send_photo(
-        chat_id=update.message.chat_id,
-        photo=open(get_banner_path("convert"), "rb"),
-        caption=caption,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await show(caption, keyboard)
     return ConversationHandler.END
-
 
 def _swap_status_text(shift: dict, swap_row: dict = None) -> str:
     status = shift.get("status", "unknown")
@@ -9697,8 +9826,8 @@ async def _confirm_lifi_swap(query, swap: dict, user_id: int):
     amount = swap["amount"]
 
     source_wallet = db.get_wallet(user_id, from_network)
-    dest_wallet = db.get_wallet(user_id, to_network)
-    if not source_wallet or not dest_wallet:
+    dest_address = swap.get("dest_address") or (db.get_wallet(user_id, to_network) or {}).get("address")
+    if not source_wallet or not dest_address:
         await query.edit_message_caption(caption="<b>Wallet not found.</b>", parse_mode="HTML")
         return
 
@@ -9708,7 +9837,7 @@ async def _confirm_lifi_swap(query, swap: dict, user_id: int):
     )
     quote = await LiFi.get_quote(
         (from_asset, from_network), (to_asset, to_network),
-        Decimal(amount), source_wallet["address"], dest_wallet["address"]
+        Decimal(amount), source_wallet["address"], dest_address
     )
     if "error" in quote:
         await query.edit_message_caption(
@@ -9757,7 +9886,7 @@ async def _confirm_lifi_swap(query, swap: dict, user_id: int):
             f"{h_html('convert', 'Swap Submitted')}\n\n"
             f"Sent <code>{esc(_fmt_amount(amount))} {esc(from_asset)}</code> via {esc(quote['tool'])}.\n"
             f"You will receive \u2248 <b>{esc(_fmt_amount(quote['to_amount'].quantize(Decimal('0.00000001'))))} "
-            f"{esc(to_asset)}</b> at <code>{esc(format_address(dest_wallet['address']))}</code>.\n\n"
+            f"{esc(to_asset)}</b> at <code>{esc(dest_address)}</code>.\n\n"
             f"TX: <code>{esc(tx_hash)}</code>\n\n"
             "Tap <b>Refresh Status</b> to track progress."
         ),
@@ -9798,8 +9927,8 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     source_wallet = db.get_wallet(user_id, from_network)
-    dest_wallet = db.get_wallet(user_id, to_network)
-    if not source_wallet or not dest_wallet:
+    dest_address = swap.get("dest_address") or (db.get_wallet(user_id, to_network) or {}).get("address")
+    if not source_wallet or not dest_address:
         await query.edit_message_caption(
             caption="<b>Wallet not found.</b>", parse_mode="HTML"
         )
@@ -9814,7 +9943,7 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
     shift = await SideShift.create_variable_shift(
         SIDESHIFT_PAIRS[(from_asset, from_network)],
         SIDESHIFT_PAIRS[(to_asset, to_network)],
-        settle_address=dest_wallet["address"],
+        settle_address=dest_address,
         refund_address=source_wallet["address"],
     )
     if "error" in shift:
@@ -9904,7 +10033,7 @@ async def confirm_convert_ai(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{h_html('convert', 'Swap Submitted')}\n\n"
         f"Sent <code>{esc(_fmt_amount(amount))} {esc(from_asset)}</code> to the exchange.\n"
         f"You will receive <b>{esc(to_asset)}</b> at "
-        f"<code>{esc(format_address(dest_wallet['address']))}</code> once the deposit confirms.\n\n"
+        f"<code>{esc(dest_address)}</code> once the deposit confirms.\n\n"
         f"Shift ID: <code>{esc(shift_id)}</code>\n"
         f"Deposit TX: <code>{esc(tx_hash)}</code>\n\n"
         "Tap <b>Refresh Status</b> to track progress."
@@ -10752,6 +10881,7 @@ def main():
             CallbackQueryHandler(receive_convert_from_asset, pattern=r"^swap_from:"),
             CallbackQueryHandler(receive_convert_to_asset, pattern=r"^swap_to:"),
             CallbackQueryHandler(convert_back, pattern=r"^swap_back:"),
+            CallbackQueryHandler(receive_convert_dest, pattern=r"^swap_dest:(bot|custom)$"),
         ],
         allow_reentry=True,
         states={
@@ -10774,6 +10904,15 @@ def main():
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     receive_convert_amount_ai
+                )
+            ],
+            CONVERT_DEST: [
+                CallbackQueryHandler(receive_convert_dest, pattern=r"^swap_dest:(bot|custom)$")
+            ],
+            CONVERT_DEST_ADDRESS: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_convert_dest_address
                 )
             ]
         },
