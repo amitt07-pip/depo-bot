@@ -639,8 +639,9 @@ NETWORKS = {
         "name": "Solana",
         "rpc": "https://api.mainnet-beta.solana.com",
         "rpc_fallbacks": [
-            "https://solana.publicnode.com",
-            "https://solana-mainnet.rpc.extrnode.com"
+            "https://api.mainnet.solana.com",
+            "https://solana-rpc.publicnode.com",
+            "https://solana.publicnode.com"
         ],
         "symbol": "SOL",
         "explorer": "https://solscan.io",
@@ -1974,6 +1975,232 @@ class WalletGenerator:
 _TOKEN_META_CACHE = {}
 
 
+SOL_TX_FEE_LAMPORTS = 5000
+SOL_RENT_EXEMPT_LAMPORTS = 890880
+SOL_TOKEN_ACCOUNT_RENT_LAMPORTS = 2039280
+SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+SPL_TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+SPL_ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+_SOL_TOKEN_META_CACHE = {}
+
+
+def _solana_rpcs() -> list:
+    rpcs = [os.getenv("SOLANA_RPC_URL", ""), NETWORKS["SOLANA"]["rpc"]]
+    rpcs += NETWORKS["SOLANA"].get("rpc_fallbacks", [])
+    seen = []
+    for rpc in rpcs:
+        if rpc and rpc not in seen:
+            seen.append(rpc)
+    return seen
+
+
+async def solana_rpc(method: str, params: list) -> dict:
+    """Call Solana JSON-RPC, retrying rate limits and failing over to the next RPC.
+
+    Returns the raw JSON-RPC response (with "result" or "error").
+    """
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    first_rpc_error = None
+    transport_error = None
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for rpc in _solana_rpcs():
+            for attempt in range(3):
+                try:
+                    async with session.post(rpc, json=payload) as resp:
+                        status = resp.status
+                        try:
+                            data = await resp.json(content_type=None)
+                        except Exception:
+                            data = None
+                except Exception as e:
+                    transport_error = {"error": {"message": f"{type(e).__name__} from {rpc}: {e}"}}
+                    break
+                err = data.get("error") if isinstance(data, dict) else None
+                code = err.get("code") if isinstance(err, dict) else None
+                if status == 429 or code == 429:
+                    transport_error = {"error": {"message": f"Rate limited by {rpc}"}}
+                    await asyncio.sleep(0.7 * (attempt + 1))
+                    continue
+                if not isinstance(data, dict) or status >= 500:
+                    transport_error = {"error": {"message": f"HTTP {status} from {rpc}"}}
+                    break
+                if "result" in data:
+                    return data
+                # Simulation/preflight errors are deterministic; other RPCs would say the same.
+                if code == -32002:
+                    return data
+                if first_rpc_error is None and status < 400:
+                    first_rpc_error = data
+                break
+    return first_rpc_error or transport_error or {"error": {"message": "No Solana RPC available"}}
+
+
+def solana_error_text(data) -> str:
+    """Turn a Solana RPC error (including simulation logs) into a readable message."""
+    err = data.get("error") if isinstance(data, dict) else data
+    if not isinstance(err, dict):
+        return str(err)
+    msg = str(err.get("message", err))
+    details = err.get("data") or {}
+    logs = details.get("logs") or [] if isinstance(details, dict) else []
+    inner = details.get("err") if isinstance(details, dict) else None
+    haystack = (msg + " " + json.dumps(inner) + " " + " ".join(logs)).lower()
+    if "insufficientfundsforrent" in haystack or "insufficient funds for rent" in haystack:
+        return (
+            "Not enough SOL left for Solana's rent minimum. A Solana wallet must keep at "
+            f"least {Decimal(SOL_RENT_EXEMPT_LAMPORTS) / Decimal(10 ** 9)} SOL, or be emptied fully. "
+            "Send a smaller amount, or use 'all'."
+        )
+    if "accountnotfound" in haystack or "no record of a prior credit" in haystack:
+        return "This wallet has no SOL to pay the network fee. Deposit a little SOL first."
+    if "insufficient lamports" in haystack:
+        return "Not enough SOL to cover the amount plus network fee / token account rent."
+    if "insufficient funds" in haystack:
+        return "Not enough token balance for this amount."
+    if "blockhash not found" in haystack:
+        return "Solana network is busy (blockhash expired). Please try again."
+    tail = next((l for l in reversed(logs) if "failed" in l.lower() or "error" in l.lower()), "")
+    return f"{msg}\n{tail}".strip() if tail else msg
+
+
+async def solana_token_accounts(owner: str, mint: str = None) -> dict:
+    """List SPL token accounts (Token and Token-2022) owned by ``owner``.
+
+    Returns {"accounts": [...]} or {"error": str}. Each account has
+    pubkey, mint, amount (raw int), decimals and program.
+    """
+    filters = [{"mint": mint}] if mint else [
+        {"programId": SPL_TOKEN_PROGRAM_ID},
+        {"programId": SPL_TOKEN_2022_PROGRAM_ID},
+    ]
+    accounts = []
+    for flt in filters:
+        data = await solana_rpc(
+            "getTokenAccountsByOwner",
+            [owner, flt, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
+        if "result" not in data:
+            return {"error": solana_error_text(data)}
+        for item in data["result"].get("value", []):
+            try:
+                info = item["account"]["data"]["parsed"]["info"]
+                accounts.append({
+                    "pubkey": item["pubkey"],
+                    "mint": info["mint"],
+                    "amount": int(info["tokenAmount"]["amount"]),
+                    "decimals": int(info["tokenAmount"]["decimals"]),
+                    "program": item["account"].get("owner", SPL_TOKEN_PROGRAM_ID),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+    return {"accounts": accounts}
+
+
+def solana_known_symbol(mint: str) -> Optional[str]:
+    for symbol, info in TOKENS.items():
+        if info.get("networks", {}).get("SOLANA", {}).get("address") == mint:
+            return symbol
+    return None
+
+
+async def solana_tokens_meta(mints: list) -> dict:
+    """Symbol and USD price for SPL mints (one batched Jupiter call, cached 10 min)."""
+    now = time.time()
+    result = {}
+    missing = []
+    for mint in mints:
+        cached = _SOL_TOKEN_META_CACHE.get(mint)
+        if cached and now - cached["ts"] < 600:
+            result[mint] = cached
+        else:
+            result[mint] = {
+                "symbol": solana_known_symbol(mint) or f"{mint[:4]}…{mint[-4:]}",
+                "price": None, "ts": now,
+            }
+            missing.append(mint)
+    if missing:
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    "https://lite-api.jup.ag/tokens/v2/search", params={"query": ",".join(missing)}
+                ) as resp:
+                    data = await resp.json(content_type=None)
+            for item in data if isinstance(data, list) else []:
+                meta = result.get(item.get("id"))
+                if not meta:
+                    continue
+                if not solana_known_symbol(item["id"]) and item.get("symbol"):
+                    meta["symbol"] = item["symbol"]
+                if item.get("usdPrice") is not None:
+                    meta["price"] = Decimal(str(item["usdPrice"]))
+            for mint in missing:
+                _SOL_TOKEN_META_CACHE[mint] = result[mint]
+        except Exception as e:
+            logger.debug(f"Jupiter token lookup failed: {e}")
+    return result
+
+def _lamports_to_sol(lamports: int) -> str:
+    return f"{(Decimal(lamports) / Decimal(10 ** 9)).normalize():f}"
+
+
+async def solana_send_transaction(tx) -> dict:
+    tx_base64 = base64.b64encode(bytes(tx)).decode()
+    data = await solana_rpc(
+        "sendTransaction",
+        [tx_base64, {"encoding": "base64", "preflightCommitment": "confirmed", "maxRetries": 5}],
+    )
+    if "result" in data:
+        return {
+            "success": True,
+            "tx_hash": data["result"],
+            "explorer_url": f"{NETWORKS['SOLANA']['explorer']}/tx/{data['result']}",
+        }
+    logger.error(f"Solana sendTransaction failed: {json.dumps(data.get('error', data), default=str)[:3000]}")
+    return {"success": False, "error": f"Solana: {solana_error_text(data)}"}
+
+
+async def solana_extra_holdings(address: str) -> list:
+    """Non-zero SPL holdings other than the bot's built-in tokens (USDT/USDC)."""
+    held = await solana_token_accounts(address)
+    if "error" in held:
+        return []
+    totals = {}
+    for acct in held["accounts"]:
+        if acct["amount"] <= 0 or solana_known_symbol(acct["mint"]):
+            continue
+        raw, dec = totals.get(acct["mint"], (0, acct["decimals"]))
+        totals[acct["mint"]] = (raw + acct["amount"], dec)
+    # Cap lookups so wallets holding thousands of spam tokens stay fast.
+    mints = list(totals.items())[:25]
+    metas = await solana_tokens_meta([mint for mint, _ in mints])
+    holdings = []
+    for mint, (raw, dec) in mints:
+        meta = metas[mint]
+        balance = Decimal(raw) / Decimal(10 ** dec)
+        holdings.append({
+            "mint": mint,
+            "symbol": meta["symbol"],
+            "balance": balance,
+            "usd_value": balance * meta["price"] if meta["price"] is not None else Decimal("0"),
+        })
+    holdings.sort(key=lambda h: h["usd_value"], reverse=True)
+    return holdings
+
+
+async def solana_extra_tokens_md(address: str) -> str:
+    try:
+        holdings = await solana_extra_holdings(address)
+    except Exception as e:
+        logger.warning(f"Solana token list failed for {address}: {e}")
+        return ""
+    symbol_safe = lambda v: re.sub(r"[`*_\[\]]", "", str(v))
+    return "".join(
+        f"\U0001FA99 {symbol_safe(h['symbol'])}: `{h['balance'].normalize():f}`\n" for h in holdings
+    )
+
+
 class BalanceChecker:
     @staticmethod
     async def get_evm_balance(
@@ -2026,27 +2253,16 @@ class BalanceChecker:
 
     @staticmethod
     async def get_solana_balance(address: str) -> dict:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getBalance",
-                "params": [address]
+        data = await solana_rpc("getBalance", [address, {"commitment": "confirmed"}])
+        if "result" in data:
+            lamports = data["result"]["value"]
+            return {
+                "balance": str(Decimal(lamports) / Decimal(10 ** 9)),
+                "symbol": "SOL",
+                "raw_balance": lamports
             }
-            async with session.post(
-                NETWORKS["SOLANA"]["rpc"],
-                json=payload
-            ) as resp:
-                data = await resp.json()
-                if "result" in data:
-                    lamports = data["result"]["value"]
-                    return {
-                        "balance": str(Decimal(lamports) / Decimal(10 ** 9)),
-                        "symbol": "SOL",
-                        "raw_balance": lamports
-                    }
-                return {"balance": "0", "symbol": "SOL", "error": data}
+        logger.warning(f"Solana balance lookup failed for {address}: {solana_error_text(data)}")
+        return {"balance": "0", "symbol": "SOL", "error": solana_error_text(data)}
 
     @staticmethod
     async def get_tron_balance(address: str) -> dict:
@@ -2144,37 +2360,25 @@ class BalanceChecker:
 
     @staticmethod
     async def get_solana_token_balance(address: str, token_mint: str) -> dict:
-        import aiohttp
+        symbol = solana_known_symbol(token_mint) or "TOKEN"
         try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getTokenAccountsByOwner",
-                    "params": [
-                        address,
-                        {"mint": token_mint},
-                        {"encoding": "jsonParsed"}
-                    ]
-                }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=payload
-                ) as resp:
-                    data = await resp.json()
-                    if "result" in data and data["result"]["value"]:
-                        account = data["result"]["value"][0]
-                        token_amount = account["account"]["data"]["parsed"]["info"]
-                        amount = token_amount["tokenAmount"]["uiAmount"]
-                        return {
-                            "balance": str(amount) if amount else "0",
-                            "symbol": "USDC",
-                            "raw_balance": int(token_amount["tokenAmount"]["amount"])
-                        }
-                    return {"balance": "0", "symbol": "USDC", "raw_balance": 0}
+            result = await solana_token_accounts(address, token_mint)
+            if "error" in result:
+                logger.warning(f"Solana {symbol} balance lookup failed for {address}: {result['error']}")
+                return {"balance": "0", "symbol": symbol, "error": result["error"]}
+            accounts = result["accounts"]
+            raw = sum(a["amount"] for a in accounts)
+            decimals = accounts[0]["decimals"] if accounts else (
+                TOKENS.get(symbol, {}).get("networks", {}).get("SOLANA", {}).get("decimals", 6)
+            )
+            return {
+                "balance": str(Decimal(raw) / Decimal(10 ** decimals)),
+                "symbol": symbol,
+                "raw_balance": raw
+            }
         except Exception as e:
             logger.error(f"Error getting Solana token balance: {e}")
-            return {"balance": "0", "symbol": "USDC", "error": str(e)}
+            return {"balance": "0", "symbol": symbol, "error": str(e)}
 
     @staticmethod
     async def get_tron_token_balance(address: str, token_address: str) -> dict:
@@ -2512,9 +2716,7 @@ class TransactionChecker:
                 },
             ],
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(NETWORKS["SOLANA"]["rpc"], json=payload) as resp:
-                data = await resp.json()
+        data = await solana_rpc(payload["method"], payload["params"])
 
         result = data.get("result")
         if not result:
@@ -2544,17 +2746,30 @@ class TransactionChecker:
                 amount = str(Decimal(lamports) / Decimal(10 ** 9))
                 asset = "SOL"
                 break
-            if program == "spl-token" and itype in ("transfer", "transferChecked"):
-                sender = info.get("source") or info.get("authority")
+            if program in ("spl-token", "spl-token-2022") and itype in ("transfer", "transferChecked"):
+                sender = info.get("authority") or info.get("source")
                 receiver = info.get("destination")
+                dest_owner = next(
+                    (b.get("owner") for b in result.get("meta", {}).get("postTokenBalances", [])
+                     if b.get("owner") and message.get("accountKeys", [{}])[b.get("accountIndex", 0)].get("pubkey") == receiver),
+                    None
+                ) if isinstance(message.get("accountKeys", [None])[0], dict) else None
+                receiver = dest_owner or receiver
+                mint = info.get("mint") or next(
+                    (b.get("mint") for b in result.get("meta", {}).get("postTokenBalances", [])), None
+                )
                 token_amount = info.get("tokenAmount")
                 if token_amount:
                     amount = token_amount.get("uiAmountString") or str(
                         token_amount.get("uiAmount", "")
                     )
                 elif "amount" in info:
-                    amount = str(Decimal(info["amount"]) / Decimal(10 ** 6))
-                asset = "SPL Token"
+                    decimals = next(
+                        (b.get("uiTokenAmount", {}).get("decimals") for b in result.get("meta", {}).get("postTokenBalances", [])
+                         if b.get("mint") == mint), 6
+                    )
+                    amount = str(Decimal(info["amount"]) / Decimal(10 ** int(decimals)))
+                asset = (solana_known_symbol(mint) if mint else None) or "SPL Token"
                 break
 
         return {
@@ -2776,40 +2991,78 @@ class TransactionChecker:
 
     @staticmethod
     async def _find_solana_deposit_tx(address: str, token_mint: str = None) -> dict:
-        rpcs = [NETWORKS["SOLANA"]["rpc"]] + NETWORKS["SOLANA"].get("rpc_fallbacks", [])
-
         async def _rpc(method: str, params: list):
-            payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                for rpc in rpcs:
-                    if not rpc:
-                        continue
-                    try:
-                        async with session.post(rpc, json=payload) as resp:
-                            data = await resp.json()
-                            if "result" in data:
-                                return data["result"]
-                    except Exception:
-                        continue
-            return None
+            return (await solana_rpc(method, params)).get("result")
 
-        account_pubkey = None
+        search_addresses = [address]
         if token_mint:
-            token_accounts = await _rpc(
-                "getTokenAccountsByOwner",
-                [address, {"mint": token_mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}],
-            )
-            if token_accounts and token_accounts.get("value"):
-                account_pubkey = token_accounts["value"][0].get("pubkey")
+            held = await solana_token_accounts(address, token_mint)
+            if held.get("accounts"):
+                search_addresses = [a["pubkey"] for a in held["accounts"]]
 
-        search_address = account_pubkey or address
-        signatures = await _rpc(
-            "getSignaturesForAddress",
-            [search_address, {"limit": 10, "commitment": "confirmed"}],
-        )
-        if not signatures:
-            return {}
+        candidates = []
+        for search_address in search_addresses[:3]:
+            sigs = await _rpc(
+                "getSignaturesForAddress",
+                [search_address, {"limit": 10, "commitment": "confirmed"}],
+            ) or []
+            candidates.extend(sigs)
+        candidates.sort(key=lambda x: x.get("blockTime") or 0, reverse=True)
+
+        seen = set()
+        for sig_info in candidates:
+            signature = sig_info.get("signature")
+            if not signature or signature in seen or sig_info.get("err"):
+                continue
+            seen.add(signature)
+            tx_result = await _rpc(
+                "getTransaction",
+                [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+            )
+            if not tx_result:
+                continue
+
+            meta = tx_result.get("meta") or {}
+            message = tx_result.get("transaction", {}).get("message", {})
+            account_keys = [
+                k.get("pubkey") if isinstance(k, dict) else k
+                for k in message.get("accountKeys", [])
+            ]
+
+            if token_mint:
+                def _owned(balances):
+                    total = Decimal("0")
+                    for b in balances or []:
+                        if b.get("mint") == token_mint and b.get("owner") == address:
+                            total += Decimal(str(b.get("uiTokenAmount", {}).get("uiAmountString") or "0"))
+                    return total
+                pre_amount = _owned(meta.get("preTokenBalances"))
+                post_amount = _owned(meta.get("postTokenBalances"))
+                if post_amount > pre_amount:
+                    return {
+                        "tx_hash": signature,
+                        "explorer_url": tx_explorer_url("SOLANA", signature),
+                        "amount": post_amount - pre_amount,
+                        "timestamp": sig_info.get("blockTime"),
+                    }
+            else:
+                if address not in account_keys:
+                    continue
+                idx = account_keys.index(address)
+                pre_balances = meta.get("preBalances", [])
+                post_balances = meta.get("postBalances", [])
+                if idx < len(pre_balances) and idx < len(post_balances):
+                    pre_sol = Decimal(pre_balances[idx]) / Decimal(10 ** 9)
+                    post_sol = Decimal(post_balances[idx]) / Decimal(10 ** 9)
+                    if post_sol > pre_sol:
+                        return {
+                            "tx_hash": signature,
+                            "explorer_url": tx_explorer_url("SOLANA", signature),
+                            "amount": post_sol - pre_sol,
+                            "timestamp": sig_info.get("blockTime"),
+                        }
+
+        return {}
 
         for sig_info in signatures:
             signature = sig_info.get("signature")
@@ -3162,98 +3415,70 @@ class WithdrawalHandler:
             from solders.transaction import Transaction
             from solders.message import Message
             from solders.hash import Hash
-            import aiohttp
 
             keypair = Keypair.from_bytes(base64.b64decode(private_key))
             to_pubkey = Pubkey.from_string(to_address)
             lamports = int(Decimal(amount) * Decimal(10 ** 9))
-            
-            # Check balance before attempting withdrawal
-            async with aiohttp.ClientSession() as session:
-                balance_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getBalance",
-                    "params": [str(keypair.pubkey())]
-                }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=balance_payload
-                ) as resp:
-                    balance_data = await resp.json()
-                    current_balance = balance_data.get("result", {}).get("value", 0)
-                    
-                # Solana transaction fee is typically ~5000 lamports (0.000005 SOL)
-                estimated_fee_lamports = 5000
-                total_needed = lamports + estimated_fee_lamports
-                
-                if current_balance < total_needed:
-                    balance_sol = Decimal(current_balance) / Decimal(10 ** 9)
-                    needed_sol = Decimal(total_needed) / Decimal(10 ** 9)
-                    fee_sol = Decimal(estimated_fee_lamports) / Decimal(10 ** 9)
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Insufficient SOL for transaction.\n\n"
-                            f"Your balance: {float(balance_sol):.6f} SOL\n"
-                            f"Required: {float(needed_sol):.6f} SOL\n"
-                            f"(Amount: {amount} SOL + Fee: ~{float(fee_sol):.6f} SOL)\n\n"
-                            f"Please deposit more SOL to cover the transaction."
-                        )
-                    }
+            if lamports <= 0:
+                return {"success": False, "error": "Amount must be greater than 0 SOL."}
 
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getLatestBlockhash",
-                    "params": []
-                }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=payload
-                ) as resp:
-                    data = await resp.json()
-                    blockhash = Hash.from_string(
-                        data["result"]["value"]["blockhash"]
+            bal = await solana_rpc("getBalance", [str(keypair.pubkey()), {"commitment": "confirmed"}])
+            if "result" not in bal:
+                return {"success": False, "error": f"Could not read SOL balance: {solana_error_text(bal)}"}
+            current = bal["result"]["value"]
+            total_needed = lamports + SOL_TX_FEE_LAMPORTS
+            if current < total_needed:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient SOL for transaction.\n\n"
+                        f"Your balance: {_lamports_to_sol(current)} SOL\n"
+                        f"Required: {_lamports_to_sol(total_needed)} SOL\n"
+                        f"(Amount: {amount} SOL + Fee: ~{_lamports_to_sol(SOL_TX_FEE_LAMPORTS)} SOL)\n\n"
+                        f"Please deposit more SOL to cover the transaction."
                     )
-
-                ix = transfer(TransferParams(
-                    from_pubkey=keypair.pubkey(),
-                    to_pubkey=to_pubkey,
-                    lamports=lamports
-                ))
-                msg = Message.new_with_blockhash([ix], keypair.pubkey(), blockhash)
-                tx = Transaction.new_unsigned(msg)
-                tx.sign([keypair], blockhash)
-
-                tx_bytes = bytes(tx)
-                tx_base64 = base64.b64encode(tx_bytes).decode()
-
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "sendTransaction",
-                    "params": [tx_base64, {"encoding": "base64"}]
                 }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=payload
-                ) as resp:
-                    data = await resp.json()
-                    if "result" in data:
-                        return {
-                            "success": True,
-                            "tx_hash": data["result"],
-                            "explorer_url": (
-                                f"{NETWORKS['SOLANA']['explorer']}"
-                                f"/tx/{data['result']}"
-                            )
-                        }
-                    return {"success": False, "error": data.get("error", data)}
+            leftover = current - total_needed
+            if 0 < leftover < SOL_RENT_EXEMPT_LAMPORTS:
+                max_partial = max(current - SOL_TX_FEE_LAMPORTS - SOL_RENT_EXEMPT_LAMPORTS, 0)
+                return {
+                    "success": False,
+                    "error": (
+                        "Solana requires a wallet to keep at least "
+                        f"{_lamports_to_sol(SOL_RENT_EXEMPT_LAMPORTS)} SOL or be emptied completely.\n\n"
+                        f"Your balance: {_lamports_to_sol(current)} SOL\n"
+                        f"Required: send at most {_lamports_to_sol(max_partial)} SOL, "
+                        f"or send all ({_lamports_to_sol(current - SOL_TX_FEE_LAMPORTS)} SOL)."
+                    )
+                }
+
+            dest = await solana_rpc("getAccountInfo", [to_address, {"encoding": "base64", "commitment": "confirmed"}])
+            if "result" in dest and dest["result"].get("value") is None and lamports < SOL_RENT_EXEMPT_LAMPORTS:
+                return {
+                    "success": False,
+                    "error": (
+                        "This Solana address has never been used, so the first SOL sent to it must be at least "
+                        f"{_lamports_to_sol(SOL_RENT_EXEMPT_LAMPORTS)} SOL."
+                    )
+                }
+
+            bh = await solana_rpc("getLatestBlockhash", [{"commitment": "confirmed"}])
+            if "result" not in bh:
+                return {"success": False, "error": f"Could not reach Solana: {solana_error_text(bh)}"}
+            blockhash = Hash.from_string(bh["result"]["value"]["blockhash"])
+
+            ix = transfer(TransferParams(
+                from_pubkey=keypair.pubkey(),
+                to_pubkey=to_pubkey,
+                lamports=lamports
+            ))
+            msg = Message.new_with_blockhash([ix], keypair.pubkey(), blockhash)
+            tx = Transaction.new_unsigned(msg)
+            tx.sign([keypair], blockhash)
+            return await solana_send_transaction(tx)
         except Exception as e:
             logger.error(f"Solana withdrawal error: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": f"Solana error: {e}"}
 
     @staticmethod
     async def withdraw_solana_token(
@@ -3263,7 +3488,7 @@ class WithdrawalHandler:
         token_mint: str,
         decimals: int = 6
     ) -> dict:
-        """Withdraw SPL tokens (USDT/USDC) on Solana."""
+        """Withdraw SPL tokens (USDT/USDC/any mint, Token or Token-2022) on Solana."""
         try:
             from solders.keypair import Keypair
             from solders.pubkey import Pubkey
@@ -3271,157 +3496,141 @@ class WithdrawalHandler:
             from solders.message import Message
             from solders.hash import Hash
             from solders.instruction import Instruction, AccountMeta
-            import aiohttp
             import struct
 
             keypair = Keypair.from_bytes(base64.b64decode(private_key))
+            owner = str(keypair.pubkey())
             to_pubkey = Pubkey.from_string(to_address)
             mint_pubkey = Pubkey.from_string(token_mint)
-            
-            # SPL Token Program ID
-            TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-            ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-            
-            # Calculate token amount with decimals
-            token_amount = int(Decimal(amount) * Decimal(10 ** decimals))
-            
-            async with aiohttp.ClientSession() as session:
-                # Check SOL balance for gas fees
-                balance_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getBalance",
-                    "params": [str(keypair.pubkey())]
+            symbol = solana_known_symbol(token_mint) or "token"
+
+            held = await solana_token_accounts(owner, token_mint)
+            if "error" in held:
+                return {"success": False, "error": f"Could not read Solana {symbol} balance: {held['error']}"}
+            accounts = held["accounts"]
+            if not accounts:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient {symbol} on Solana.\n\n"
+                        f"Your balance: 0 {symbol}\nRequired: {amount} {symbol}"
+                    )
                 }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=balance_payload
-                ) as resp:
-                    balance_data = await resp.json()
-                    sol_balance = balance_data.get("result", {}).get("value", 0)
-                
-                # SPL token transfer needs ~5000 lamports for fee
-                estimated_fee_lamports = 10000  # Slightly higher for token transfers
-                
-                if sol_balance < estimated_fee_lamports:
-                    balance_sol = Decimal(sol_balance) / Decimal(10 ** 9)
-                    fee_sol = Decimal(estimated_fee_lamports) / Decimal(10 ** 9)
+            source = max(accounts, key=lambda a: a["amount"])
+            decimals = source["decimals"]
+            token_program = Pubkey.from_string(source["program"])
+            token_amount = int(Decimal(amount) * Decimal(10 ** decimals))
+            if token_amount <= 0:
+                return {"success": False, "error": f"Amount must be greater than 0 {symbol} (Solana)."}
+            if source["amount"] < token_amount:
+                total_raw = sum(a["amount"] for a in accounts)
+                largest = Decimal(source["amount"]) / Decimal(10 ** decimals)
+                if total_raw >= token_amount:
                     return {
                         "success": False,
                         "error": (
-                            f"Insufficient SOL for gas fees.\n\n"
-                            f"Your SOL balance: {float(balance_sol):.6f} SOL\n"
-                            f"Required fee: ~{float(fee_sol):.6f} SOL\n\n"
-                            f"Please deposit some SOL to cover the transaction fee."
+                            f"Your Solana {symbol} is split across several token accounts; the largest holds "
+                            f"{largest:f} {symbol}. Send at most that amount at a time."
                         )
                     }
-                
-                # Get or derive Associated Token Accounts (ATAs)
-                def get_associated_token_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
-                    seeds = [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)]
-                    program_address, _ = Pubkey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
-                    return program_address
-                
-                from_ata = get_associated_token_address(keypair.pubkey(), mint_pubkey)
-                to_ata = get_associated_token_address(to_pubkey, mint_pubkey)
-                
-                # Check if destination ATA exists
-                ata_check_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getAccountInfo",
-                    "params": [str(to_ata), {"encoding": "base64"}]
-                }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=ata_check_payload
-                ) as resp:
-                    ata_data = await resp.json()
-                    to_ata_exists = ata_data.get("result", {}).get("value") is not None
-                
-                # Get latest blockhash
-                blockhash_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getLatestBlockhash",
-                    "params": []
-                }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=blockhash_payload
-                ) as resp:
-                    data = await resp.json()
-                    blockhash = Hash.from_string(data["result"]["value"]["blockhash"])
-                
-                # Build instructions list
-                instructions = []
-                
-                # If destination ATA doesn't exist, create it first
-                if not to_ata_exists:
-                    SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
-                    SYSVAR_RENT_ID = Pubkey.from_string("SysvarRent111111111111111111111111111111111")
-                    
-                    create_ata_ix = Instruction(
-                        program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
-                        accounts=[
-                            AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=True),
-                            AccountMeta(pubkey=to_ata, is_signer=False, is_writable=True),
-                            AccountMeta(pubkey=to_pubkey, is_signer=False, is_writable=False),
-                            AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
-                            AccountMeta(pubkey=SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
-                            AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
-                        ],
-                        data=bytes()
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient {symbol} on Solana.\n\n"
+                        f"Your balance: {Decimal(total_raw) / Decimal(10 ** decimals):f} {symbol}\n"
+                        f"Required: {amount} {symbol}"
                     )
-                    instructions.append(create_ata_ix)
-                
-                # Build SPL Token transfer instruction
-                # Instruction data: [3] (transfer instruction) + [amount as u64 little-endian]
-                transfer_data = bytes([3]) + struct.pack('<Q', token_amount)
-                
-                transfer_ix = Instruction(
-                    program_id=TOKEN_PROGRAM_ID,
-                    accounts=[
-                        AccountMeta(pubkey=from_ata, is_signer=False, is_writable=True),
-                        AccountMeta(pubkey=to_ata, is_signer=False, is_writable=True),
-                        AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=False),
-                    ],
-                    data=transfer_data
-                )
-                instructions.append(transfer_ix)
-                
-                msg = Message.new_with_blockhash(instructions, keypair.pubkey(), blockhash)
-                tx = Transaction.new_unsigned(msg)
-                tx.sign([keypair], blockhash)
-                
-                tx_bytes = bytes(tx)
-                tx_base64 = base64.b64encode(tx_bytes).decode()
-                
-                # Send transaction
-                send_payload = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "sendTransaction",
-                    "params": [tx_base64, {"encoding": "base64"}]
                 }
-                async with session.post(
-                    NETWORKS["SOLANA"]["rpc"],
-                    json=send_payload
-                ) as resp:
-                    data = await resp.json()
-                    if "result" in data:
-                        return {
-                            "success": True,
-                            "tx_hash": data["result"],
-                            "explorer_url": f"{NETWORKS['SOLANA']['explorer']}/tx/{data['result']}"
-                        }
-                    error_msg = data.get("error", {})
-                    if isinstance(error_msg, dict):
-                        error_msg = error_msg.get("message", str(error_msg))
-                    return {"success": False, "error": str(error_msg)}
+
+            # The receiver may be a wallet (we send to its associated token account)
+            # or already a token account for this mint.
+            dest_info = await solana_rpc(
+                "getAccountInfo", [to_address, {"encoding": "jsonParsed", "commitment": "confirmed"}]
+            )
+            if "result" not in dest_info:
+                return {"success": False, "error": f"Could not check Solana receiver: {solana_error_text(dest_info)}"}
+            dest_value = dest_info["result"].get("value") or {}
+            dest_parsed = (dest_value.get("data") or {}) if isinstance(dest_value.get("data"), dict) else {}
+            need_ata = False
+            if dest_value.get("owner") in (SPL_TOKEN_PROGRAM_ID, SPL_TOKEN_2022_PROGRAM_ID) and \
+                    dest_parsed.get("parsed", {}).get("type") == "account":
+                if dest_parsed["parsed"]["info"].get("mint") != token_mint:
+                    return {"success": False, "error": f"That Solana address is a token account for a different token, not {symbol}."}
+                to_token_account = to_pubkey
+            else:
+                to_token_account, _ = Pubkey.find_program_address(
+                    [bytes(to_pubkey), bytes(token_program), bytes(mint_pubkey)],
+                    Pubkey.from_string(SPL_ASSOCIATED_TOKEN_PROGRAM_ID),
+                )
+                ata_info = await solana_rpc(
+                    "getAccountInfo", [str(to_token_account), {"encoding": "base64", "commitment": "confirmed"}]
+                )
+                if "result" not in ata_info:
+                    return {"success": False, "error": f"Could not check Solana receiver: {solana_error_text(ata_info)}"}
+                need_ata = ata_info["result"].get("value") is None
+
+            bal = await solana_rpc("getBalance", [owner, {"commitment": "confirmed"}])
+            if "result" not in bal:
+                return {"success": False, "error": f"Could not read SOL balance: {solana_error_text(bal)}"}
+            sol_balance = bal["result"]["value"]
+            needed = SOL_TX_FEE_LAMPORTS + (SOL_TOKEN_ACCOUNT_RENT_LAMPORTS if need_ata else 0)
+            # The fee payer must end at 0 or stay above the rent-exempt minimum.
+            if sol_balance != needed and sol_balance < needed + SOL_RENT_EXEMPT_LAMPORTS:
+                required = needed if sol_balance < needed else needed + SOL_RENT_EXEMPT_LAMPORTS
+                reason = (
+                    f"\n\nThe receiving address has never held {symbol}, so Solana charges "
+                    f"~{_lamports_to_sol(SOL_TOKEN_ACCOUNT_RENT_LAMPORTS)} SOL once to open its {symbol} account."
+                    if need_ata else ""
+                )
+                return {
+                    "success": False,
+                    "error": (
+                        f"Insufficient SOL for gas fees.\n\n"
+                        f"Your balance: {_lamports_to_sol(sol_balance)} SOL\n"
+                        f"Required: {_lamports_to_sol(required)} SOL{reason}\n\n"
+                        f"Please deposit some SOL and try again."
+                    )
+                }
+
+            instructions = []
+            if need_ata:
+                instructions.append(Instruction(
+                    program_id=Pubkey.from_string(SPL_ASSOCIATED_TOKEN_PROGRAM_ID),
+                    accounts=[
+                        AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=True),
+                        AccountMeta(pubkey=to_token_account, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=to_pubkey, is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
+                        AccountMeta(
+                            pubkey=Pubkey.from_string("11111111111111111111111111111111"),
+                            is_signer=False, is_writable=False
+                        ),
+                        AccountMeta(pubkey=token_program, is_signer=False, is_writable=False),
+                    ],
+                    data=bytes([1])  # CreateIdempotent
+                ))
+            instructions.append(Instruction(
+                program_id=token_program,
+                accounts=[
+                    AccountMeta(pubkey=Pubkey.from_string(source["pubkey"]), is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=to_token_account, is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=keypair.pubkey(), is_signer=True, is_writable=False),
+                ],
+                data=bytes([12]) + struct.pack('<Q', token_amount) + bytes([decimals])  # TransferChecked
+            ))
+
+            bh = await solana_rpc("getLatestBlockhash", [{"commitment": "confirmed"}])
+            if "result" not in bh:
+                return {"success": False, "error": f"Could not reach Solana: {solana_error_text(bh)}"}
+            blockhash = Hash.from_string(bh["result"]["value"]["blockhash"])
+            msg = Message.new_with_blockhash(instructions, keypair.pubkey(), blockhash)
+            tx = Transaction.new_unsigned(msg)
+            tx.sign([keypair], blockhash)
+            return await solana_send_transaction(tx)
         except Exception as e:
             logger.error(f"Solana token withdrawal error: {e}")
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": f"Solana error: {e}"}
 
     @staticmethod
     async def withdraw_tron(
@@ -4462,6 +4671,10 @@ async def rescue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def get_friendly_error(error) -> str:
     error_str = str(error) if error else ""
     error_str_lower = error_str.lower()
+
+    # Solana errors are already turned into readable text by solana_error_text
+    if "solana" in error_str_lower or re.search(r"\bsol\b", error_str_lower):
+        return error_str
 
     # If the error already contains detailed balance/fee info, return it as-is
     if "your balance:" in error_str_lower and "required" in error_str_lower:
@@ -5518,6 +5731,21 @@ async def _gather_address_balances(address: str, detected):
         if NETWORKS.get(network, {}).get("type", "") not in ("btc", "ltc"):
             jobs.extend(fetch_entry(network, token) for token in stablecoins)
 
+    async def fetch_solana_extras():
+        try:
+            holdings = await solana_extra_holdings(address)
+        except Exception as e:
+            logger.error(f"Error listing Solana tokens: {e}")
+            return []
+        return [{
+            "network": "SOLANA",
+            "network_name": NETWORKS["SOLANA"]["name"],
+            "token": h["symbol"],
+            "balance": h["balance"],
+            "usd_value": h["usd_value"],
+            "explorer_url": address_explorer_url("SOLANA", address),
+        } for h in holdings]
+
     balances = []
     errors = []
     total_usd = Decimal("0")
@@ -5527,6 +5755,10 @@ async def _gather_address_balances(address: str, detected):
             total_usd += entry["usd_value"]
         if error:
             errors.append(error)
+    if "SOLANA" in networks:
+        for entry in await fetch_solana_extras():
+            balances.append(entry)
+            total_usd += entry["usd_value"]
 
     return balances, total_usd, errors
 
@@ -6268,11 +6500,19 @@ async def refresh_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance_info = await BalanceChecker.get_balance(network, wallet["address"])
     balance_str = balance_info.get("balance", "Error")
     symbol = balance_info.get("symbol", info["symbol"])
+    token_lines = ""
+    if network == "SOLANA":
+        for token_key in ("USDT", "USDC"):
+            t = await BalanceChecker.get_token_balance(token_key, network, wallet["address"])
+            if not t.get("error"):
+                token_lines += f"{TOKENS[token_key]['icon']} {token_key}: `{t.get('balance', '0')}`\n"
+        token_lines += await solana_extra_tokens_md(wallet["address"])
 
     text = (
         f"*{info['name']} Wallet*\n\n"
         f"*Address:*\n`{wallet['address']}`\n\n"
-        f"*Balance:* `{balance_str} {symbol}`\n\n"
+        f"*Balance:* `{balance_str} {symbol}`\n"
+        f"{token_lines}\n"
         f"*Network:* {info['name']}"
     )
     await edit_message_with_banner(
@@ -7522,6 +7762,8 @@ async def do_check_balance_all(update, context, chat_id: int, user_id: int):
                         text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
                 except Exception:
                     pass
+        if net == "SOLANA":
+            text += await solana_extra_tokens_md(wallet["address"])
 
     keyboard = [
         [InlineKeyboardButton("Check Another", callback_data="menu_balance")],
@@ -7588,6 +7830,8 @@ async def do_check_balance_network(update, context, chat_id: int, user_id: int, 
                     text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
             except Exception:
                 pass
+    if network == "SOLANA":
+        text += await solana_extra_tokens_md(wallet["address"])
 
 
 
@@ -7657,6 +7901,8 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
                     except Exception:
                         pass
+            if net == "SOLANA":
+                text += await solana_extra_tokens_md(wallet["address"])
 
         keyboard = [
             [InlineKeyboardButton("Refresh", callback_data="balance_all")],
@@ -7713,6 +7959,8 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
                 except Exception:
                     pass
+        if network == "SOLANA":
+            text += await solana_extra_tokens_md(wallet["address"])
 
 
 
@@ -8588,20 +8836,14 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 )
                                 return ConversationHandler.END
                     elif info["type"] == "solana":
-                        import aiohttp
-                        async with aiohttp.ClientSession() as session:
-                            payload = {
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "getSignatureStatuses",
-                                "params": [[display_hash], {"searchTransactionHistory": True}]
-                            }
-                            async with session.post(NETWORKS["SOLANA"]["rpc"][0], json=payload) as resp:
-                                data = await resp.json()
-                                if data.get("result", {}).get("value", [None])[0]:
-                                    status = data["result"]["value"][0]
-                                    if status.get("confirmationStatus") in ["confirmed", "finalized"]:
-                                        confirmed = True
+                        data = await solana_rpc(
+                            "getSignatureStatuses",
+                            [[display_hash], {"searchTransactionHistory": True}]
+                        )
+                        status = ((data.get("result") or {}).get("value") or [None])[0]
+                        if status and not status.get("err") and \
+                                status.get("confirmationStatus") in ["confirmed", "finalized"]:
+                            confirmed = True
                     elif info["type"] == "tron":
                         from tronpy import Tron
                         client = Tron(network="mainnet")
