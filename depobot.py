@@ -570,7 +570,7 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
     use_banner = bool(banner_path and os.path.exists(banner_path))
     qr_png = None
     if qr:
-        buf = generate_qr_code(qr)
+        buf = generate_qr_code(qr, box_size=QR_RICH_BOX_SIZE, strip=False)
         qr_png = buf.getvalue() if buf else None
     body = build_rich_html(caption_html, keyboard, banner=use_banner, qr=bool(qr_png))
     if body is None:
@@ -777,9 +777,10 @@ def get_banner_path(name: str) -> str:
 
 
 QR_STRIP_COLOR = (23, 33, 43)  # Telegram dark theme background
+QR_RICH_BOX_SIZE = int(os.getenv("QR_RICH_BOX_SIZE", "7"))  # px per QR square in rich messages
 
 
-def generate_qr_code(data: str) -> io.BytesIO:
+def generate_qr_code(data: str, box_size: int = 10, strip: bool = True) -> io.BytesIO:
     """Generate a QR code image for the given data and return as BytesIO."""
     if not QR_AVAILABLE:
         return None
@@ -787,19 +788,20 @@ def generate_qr_code(data: str) -> io.BytesIO:
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
+            box_size=box_size,
             border=1,  # thinnest edge that still scans on Telegram's dark theme
         )
         qr.add_data(data)
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        # Telegram stretches photos to the bubble width: centre the QR on a wide
-        # dark strip so it renders small.
-        from PIL import Image
-        pad = img.height // 12
-        strip = Image.new("RGB", (int(img.width * 2.6), img.height + 2 * pad), QR_STRIP_COLOR)
-        strip.paste(img, ((strip.width - img.width) // 2, pad))
-        img = strip
+        if strip:
+            # Photo messages are stretched to the bubble width: centre the QR on a
+            # wide dark strip so it renders small.
+            from PIL import Image
+            pad = img.height // 12
+            canvas = Image.new("RGB", (int(img.width * 2.6), img.height + 2 * pad), QR_STRIP_COLOR)
+            canvas.paste(img, ((canvas.width - img.width) // 2, pad))
+            img = canvas
         bio = io.BytesIO()
         img.save(bio, format="PNG")
         bio.seek(0)
