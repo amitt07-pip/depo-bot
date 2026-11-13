@@ -537,7 +537,7 @@ def build_rich_html(caption_html: str, keyboard, banner: bool = False, qr: bool 
     parts.append(_rich_paragraphs(caption_html))
     if qr:
         parts.append(
-            '<details><summary>\U0001F533 View QR code</summary>'
+            '<details><summary>View QR code</summary>'
             '<img src="tg://photo?id=qr"/></details>'
         )
     for row in rows:
