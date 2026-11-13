@@ -4,7 +4,21 @@ import os
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
-_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+_FONT_DIR = os.path.join(_ASSETS, "fonts")
+_TOKEN_DIR = os.path.join(_ASSETS, "tokens")
+_LOGO_ALIASES = {"POL": "matic", "TONCOIN": "ton"}
+
+
+def _token_logo(symbol: str, size: int):
+    name = _LOGO_ALIASES.get(symbol, symbol.lower())
+    path = os.path.join(_TOKEN_DIR, f"{name}.png")
+    if not os.path.exists(path):
+        return None
+    try:
+        return Image.open(path).convert("RGBA").resize((size, size), Image.LANCZOS)
+    except Exception:
+        return None
 
 TOKEN_COLORS = {
     "USDT": (38, 161, 123), "USDC": (39, 117, 202), "ETH": (98, 126, 234),
@@ -84,12 +98,16 @@ def render_address_card(symbol: str, network_name: str, address: str,
         d.line([(cx + sx * 34, cy), (cx + sx * b, cy)], fill=TEXT, width=t)
         d.line([(cx, cy + sy * 34), (cx, cy + sy * b)], fill=TEXT, width=t)
 
-    # Coin
+    # Coin: real token logo, text badge if no logo is bundled
     cx0, cy0, r = 96, 96, 78
-    d.ellipse([cx0, cy0, cx0 + 2 * r, cy0 + 2 * r], fill=accent)
-    d.ellipse([cx0 + 8, cy0 + 8, cx0 + 2 * r - 8, cy0 + 2 * r - 8], outline=(255, 255, 255), width=3)
-    coin_font = _fit(d, symbol, "SpaceGrotesk.ttf", b"Bold", 2 * r - 40, 54, 22)
-    d.text((cx0 + r, cy0 + r), symbol, font=coin_font, fill=(255, 255, 255), anchor="mm")
+    logo = _token_logo(symbol, 2 * r)
+    if logo is not None:
+        img.paste(logo, (cx0, cy0), logo)
+    else:
+        d.ellipse([cx0, cy0, cx0 + 2 * r, cy0 + 2 * r], fill=accent)
+        d.ellipse([cx0 + 8, cy0 + 8, cx0 + 2 * r - 8, cy0 + 2 * r - 8], outline=(255, 255, 255), width=3)
+        coin_font = _fit(d, symbol, "SpaceGrotesk.ttf", b"Bold", 2 * r - 40, 54, 22)
+        d.text((cx0 + r, cy0 + r), symbol, font=coin_font, fill=(255, 255, 255), anchor="mm")
 
     # Title block
     x0 = cx0 + 2 * r + 34
