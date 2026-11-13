@@ -426,22 +426,28 @@ _install_safe_callback_answer()
 _IKB_SUPPORTS_STYLE = "style" in inspect.signature(InlineKeyboardButton.__init__).parameters
 _BASE_MARKUP = InlineKeyboardMarkup.__mro__[1]  # telegram.InlineKeyboardMarkup
 
-_DANGER_RE = re.compile(r"\b(cancel|delete|remove|revoke|reject|stop)\b", re.I)
-_SUCCESS_RE = re.compile(r"\b(confirm|yes|approve|resume)\b", re.I)
-_PRIMARY_RE = re.compile(
-    r"\b(deposit|withdraw|convert|swap|generate|create wallet|add wallet|copy)\b", re.I
-)
+_STOP_RE = re.compile(r"\b(cancel|delete|remove|revoke|reject|stop)\b", re.I)
+_CONFIRM_RE = re.compile(r"\b(confirm|yes|approve|resume)\b", re.I)
+_OUT_RE = re.compile(r"\b(withdraw|send|rescue)\b", re.I)
+_IN_RE = re.compile(r"\b(deposit|refresh|generate|create|add wallet|copy)\b", re.I)
+_PRIMARY_RE = re.compile(r"\b(convert|swap|explorer|balance|wallets?|tokens|portfolio)\b", re.I)
 
 
 def auto_button_style(text: str, data=None):
-    """Colour a button by what it does: red cancels, green confirms, blue main actions."""
+    """Colour a button by what it does. Red: cancel/stop and money out (withdraw,
+    send). Green: confirm and money in / positive (deposit, refresh, create, copy).
+    Blue: convert, explorer, balance, wallets."""
     label = text or ""
     data = data if isinstance(data, str) else ""
-    if data.startswith(("cancel", "rescue:no:", "notif_stop")) or _DANGER_RE.search(label):
+    if data.startswith(("cancel", "rescue:no:", "notif_stop")) or _STOP_RE.search(label):
         return "danger"
-    if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "notif_resume")) or _SUCCESS_RE.search(label):
+    if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "notif_resume")) or _CONFIRM_RE.search(label):
         return "success"
-    if data.startswith(("menu_deposit", "menu_withdraw", "menu_convert", "menu_generate", "gen_")) \
+    if data.startswith(("menu_withdraw", "withdraw_")) or _OUT_RE.search(label):
+        return "danger"
+    if data.startswith(("menu_deposit", "menu_generate", "gen_", "refresh_")) or _IN_RE.search(label):
+        return "success"
+    if data.startswith(("menu_convert", "menu_balance", "menu_wallets", "menu_tokens")) \
             or _PRIMARY_RE.search(label):
         return "primary"
     return None
@@ -466,7 +472,7 @@ def style_keyboard(markup):
 
 
 def copy_address_button(address: str):
-    return ikb("Copy Address", ui_name="copy", copy_text=CopyTextButton(address), style="primary")
+    return ikb("Copy Address", ui_name="copy", copy_text=CopyTextButton(address), style="success")
 
 
 def _install_button_styles():
