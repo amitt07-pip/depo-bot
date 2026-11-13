@@ -24,7 +24,10 @@ try:
 except ImportError:
     QR_AVAILABLE = False
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity,
+    CopyTextButton, Message
+)
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -157,6 +160,8 @@ UI_EMOJI = {
     "gem": ("5963312935148195483", "\U0001F48E"),        # 💎
     "bell": ("5909201569898827582", "\U0001F514"),       # 🔔
     "idea": (None, "\U0001F4A1"),                          # 💡 (no custom icon)
+    # No clipboard icon in the pack; reuses the note icon. Override with COPY_EMOJI_ID.
+    "copy": (os.getenv("COPY_EMOJI_ID") or "5886330010054168711", "\U0001F4CB"),  # 📋
 }
 
 TOKEN_EMOJI = {
@@ -414,6 +419,314 @@ def _install_safe_callback_answer():
 _install_safe_callback_answer()
 
 
+# ---------------------------------------------------------------------------
+# Coloured buttons (InlineKeyboardButton.style) and rich messages
+# (sendRichMessage: buttons inside the text, collapsible blocks).
+# ---------------------------------------------------------------------------
+_IKB_SUPPORTS_STYLE = "style" in inspect.signature(InlineKeyboardButton.__init__).parameters
+_BASE_MARKUP = InlineKeyboardMarkup.__mro__[1]  # telegram.InlineKeyboardMarkup
+
+_DANGER_RE = re.compile(r"\b(cancel|delete|remove|revoke|reject|stop)\b", re.I)
+_SUCCESS_RE = re.compile(r"\b(confirm|yes|approve|resume)\b", re.I)
+_PRIMARY_RE = re.compile(
+    r"\b(deposit|withdraw|convert|swap|generate|create wallet|add wallet|copy)\b", re.I
+)
+
+
+def auto_button_style(text: str, data=None):
+    """Colour a button by what it does: red cancels, green confirms, blue main actions."""
+    label = text or ""
+    data = data if isinstance(data, str) else ""
+    if data.startswith(("cancel", "rescue:no:", "notif_stop")) or _DANGER_RE.search(label):
+        return "danger"
+    if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "notif_resume")) or _SUCCESS_RE.search(label):
+        return "success"
+    if data.startswith(("menu_deposit", "menu_withdraw", "menu_convert", "menu_generate", "gen_")) \
+            or _PRIMARY_RE.search(label):
+        return "primary"
+    return None
+
+
+def style_keyboard(markup):
+    if not _IKB_SUPPORTS_STYLE or not isinstance(markup, _BASE_MARKUP):
+        return markup
+    rows, changed = [], False
+    for row in markup.inline_keyboard:
+        new_row = []
+        for btn in row:
+            style = None if btn.style else auto_button_style(btn.text, btn.callback_data)
+            if style:
+                data = btn.to_dict()
+                data["style"] = style
+                btn = InlineKeyboardButton.de_json(data, None)
+                changed = True
+            new_row.append(btn)
+        rows.append(new_row)
+    return InlineKeyboardMarkup(rows) if changed else markup
+
+
+def copy_address_button(address: str):
+    return ikb("Copy Address", ui_name="copy", copy_text=CopyTextButton(address), style="primary")
+
+
+def _install_button_styles():
+    from telegram import Bot
+
+    def _wrap(method_name):
+        orig = getattr(Bot, method_name)
+
+        async def wrapper(self, *args, **kwargs):
+            if "reply_markup" in kwargs:
+                kwargs["reply_markup"] = style_keyboard(kwargs["reply_markup"])
+            return await orig(self, *args, **kwargs)
+
+        wrapper.__name__ = getattr(orig, "__name__", method_name)
+        wrapper.__doc__ = getattr(orig, "__doc__", None)
+        setattr(Bot, method_name, wrapper)
+
+    for name in ("send_message", "send_photo", "send_document", "send_animation",
+                 "edit_message_text", "edit_message_caption", "edit_message_media",
+                 "edit_message_reply_markup"):
+        _wrap(name)
+
+
+_install_button_styles()
+
+
+RICH_MESSAGES_ENABLED = os.getenv("RICH_MESSAGES", "1") != "0"
+_RICH_STATE = {"retry_after": 0.0}
+RICH_MESSAGE_IDS = set()     # (chat_id, message_id) sent via sendRichMessage
+RICH_TEXT_TARGETS = set()    # captionless messages: caption edits become text edits
+RICH_REPLACED = {}           # rich message that had to be re-sent -> replacement id
+_RICH_BANNER_FILE_IDS = {}
+_EMOJI_ID_FALLBACK = {eid: fb for eid, fb in UI_EMOJI.values() if eid}
+
+
+def _rich_attr(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _rich_button(btn):
+    label = html.escape(btn.text, quote=False)
+    if getattr(btn, "icon_custom_emoji_id", None):
+        fallback = _EMOJI_ID_FALLBACK.get(btn.icon_custom_emoji_id, "\U0001FA99")
+        label = f"{ce(btn.icon_custom_emoji_id, fallback)} {label}"
+    style = getattr(btn, "style", None) or auto_button_style(btn.text, btn.callback_data)
+    style_attr = f' style="{style}"' if style else ""
+    if btn.copy_text:
+        return f'<tg-button type="copy_text" text="{_rich_attr(btn.copy_text.text)}"{style_attr}>{label}</tg-button>'
+    if btn.url:
+        style_attr = "" if style == "link" else style_attr
+        return f'<tg-button type="url" url="{_rich_attr(btn.url)}"{style_attr}>{label}</tg-button>'
+    if isinstance(btn.callback_data, str):
+        return f'<tg-button type="callback_data" data="{_rich_attr(btn.callback_data)}"{style_attr}>{label}</tg-button>'
+    return None
+
+
+def _rich_paragraphs(caption_html: str) -> str:
+    if re.search(r"<(blockquote|pre)\b", caption_html):
+        return f"<p>{caption_html.strip().replace(chr(10), '<br>')}</p>"
+    paras = [p.strip("\n") for p in re.split(r"\n{2,}", caption_html.strip()) if p.strip()]
+    return "".join(f"<p>{p.replace(chr(10), '<br>')}</p>" for p in paras)
+
+
+def build_rich_html(caption_html: str, keyboard, banner: bool = False, qr: bool = False):
+    """Rich HTML: optional banner, text, optional collapsible QR, then in-text button rows."""
+    rows = keyboard.inline_keyboard if isinstance(keyboard, _BASE_MARKUP) else (keyboard or [])
+    parts = ['<img src="tg://photo?id=banner"/>'] if banner else []
+    parts.append(_rich_paragraphs(caption_html))
+    if qr:
+        parts.append(
+            '<details><summary>\U0001F533 View QR code</summary>'
+            '<img src="tg://photo?id=qr"/></details>'
+        )
+    for row in rows:
+        buttons = [_rich_button(b) for b in row]
+        if any(b is None for b in buttons):
+            return None
+        parts.append(f"<tg-button-row>{' '.join(buttons)}</tg-button-row>")
+    return "".join(parts)
+
+
+def _photo_file_ids(obj, found):
+    if isinstance(obj, dict):
+        if "file_id" in obj and "width" in obj:
+            found.append(obj)
+        for v in obj.values():
+            _photo_file_ids(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            _photo_file_ids(v, found)
+
+
+async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
+                           parse_mode: str = "HTML", qr: str = None):
+    """Send a screen as a rich message. Returns the Message, or None so the
+    caller falls back to the classic photo + inline keyboard."""
+    if not RICH_MESSAGES_ENABLED or time.time() < _RICH_STATE["retry_after"]:
+        return None
+    caption_html = tg_html(caption) if parse_mode == "Markdown" else caption
+    banner_path = get_banner_path(banner_name) if banner_name else None
+    use_banner = bool(banner_path and os.path.exists(banner_path))
+    qr_png = None
+    if qr:
+        buf = generate_qr_code(qr)
+        qr_png = buf.getvalue() if buf else None
+    body = build_rich_html(caption_html, keyboard, banner=use_banner, qr=bool(qr_png))
+    if body is None:
+        return None
+
+    form = aiohttp.FormData()
+    media = []
+    if use_banner:
+        cached = _RICH_BANNER_FILE_IDS.get(banner_name)
+        media.append({"id": "banner", "media": {"type": "photo", "media": cached or "attach://banner"}})
+        if not cached:
+            with open(banner_path, "rb") as f:
+                form.add_field("banner", f.read(), filename=f"{banner_name}.png", content_type="image/png")
+    if qr_png:
+        media.append({"id": "qr", "media": {"type": "photo", "media": "attach://qr"}})
+        form.add_field("qr", qr_png, filename="deposit_qr.png", content_type="image/png")
+    rich = {"html": body}
+    if media:
+        rich["media"] = media
+    form.add_field("chat_id", str(chat_id))
+    form.add_field("rich_message", json.dumps(rich))
+    form.add_field("protect_content", "true")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{bot.base_url}/sendRichMessage", data=form, timeout=30) as resp:
+                data = await resp.json(content_type=None)
+    except Exception as e:
+        logger.warning(f"sendRichMessage failed, using classic layout: {e}")
+        return None
+    if not data.get("ok"):
+        desc = str(data.get("description", data))
+        logger.warning(f"sendRichMessage rejected, using classic layout: {desc}")
+        if data.get("error_code") == 404 or "not found" in desc.lower():
+            _RICH_STATE["retry_after"] = time.time() + 600
+        return None
+
+    result = data["result"]
+    if use_banner and not qr_png and banner_name not in _RICH_BANNER_FILE_IDS:
+        photos = []
+        _photo_file_ids(result, photos)
+        if photos:
+            _RICH_BANNER_FILE_IDS[banner_name] = max(photos, key=lambda p: p.get("width", 0))["file_id"]
+    msg = Message.de_json(result, bot)
+    key = (msg.chat_id, msg.message_id)
+    RICH_MESSAGE_IDS.add(key)
+    RICH_TEXT_TARGETS.add(key)
+    _remember_owner(msg, CURRENT_USER_ID.get())
+    return msg
+
+
+async def replace_with_rich(query, banner_name, caption, keyboard,
+                            parse_mode: str = "HTML", qr: str = None):
+    """Send the screen as a new rich message, then remove the old one."""
+    msg = await send_rich_screen(
+        query.get_bot(), query.message.chat_id, banner_name, caption, keyboard, parse_mode, qr
+    )
+    if msg:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+    return msg
+
+
+def _install_rich_edit_redirects():
+    """Rich messages have no caption and may not accept every edit: route caption
+    edits to text edits and re-send the message when Telegram refuses an edit."""
+    from telegram import Bot
+    from telegram.error import BadRequest
+
+    orig_text = Bot.edit_message_text
+    orig_caption = Bot.edit_message_caption
+    orig_markup = Bot.edit_message_reply_markup
+    orig_media = Bot.edit_message_media
+    orig_delete = Bot.delete_message
+
+    def _remap(kwargs):
+        key = (kwargs.get("chat_id"), kwargs.get("message_id"))
+        seen = 0
+        while key in RICH_REPLACED and seen < 10:
+            key = (key[0], RICH_REPLACED[key])
+            seen += 1
+        if seen:
+            kwargs["message_id"] = key[1]
+        return key
+
+    async def _replace(self, key, send):
+        try:
+            await orig_delete(self, key[0], key[1])
+        except Exception:
+            pass
+        new = await send()
+        RICH_REPLACED[key] = new.message_id
+        RICH_TEXT_TARGETS.add((new.chat_id, new.message_id))
+        return new
+
+    async def edit_message_text(self, *args, **kwargs):
+        key = _remap(kwargs)
+        if key not in RICH_MESSAGE_IDS:
+            return await orig_text(self, *args, **kwargs)
+        try:
+            return await orig_text(self, *args, **kwargs)
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                raise
+            text = kwargs.get("text", args[0] if args else "")
+            return await _replace(self, key, lambda: self.send_message(
+                chat_id=key[0], text=text, parse_mode=kwargs.get("parse_mode"),
+                reply_markup=kwargs.get("reply_markup")
+            ))
+
+    async def edit_message_caption(self, *args, **kwargs):
+        key = _remap(kwargs)
+        if key in RICH_TEXT_TARGETS:
+            return await self.edit_message_text(
+                text=kwargs.get("caption") or "\u200b", chat_id=key[0], message_id=key[1],
+                parse_mode=kwargs.get("parse_mode"), reply_markup=kwargs.get("reply_markup")
+            )
+        return await orig_caption(self, *args, **kwargs)
+
+    async def edit_message_reply_markup(self, *args, **kwargs):
+        _remap(kwargs)
+        return await orig_markup(self, *args, **kwargs)
+
+    async def edit_message_media(self, *args, **kwargs):
+        key = _remap(kwargs)
+        if key not in RICH_TEXT_TARGETS:
+            return await orig_media(self, *args, **kwargs)
+        try:
+            return await orig_media(self, *args, **kwargs)
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                raise
+            media = kwargs.get("media")
+            return await _replace(self, key, lambda: self.send_photo(
+                chat_id=key[0], photo=media.media, caption=media.caption,
+                parse_mode=media.parse_mode, reply_markup=kwargs.get("reply_markup")
+            ))
+
+    async def delete_message(self, chat_id, message_id, *args, **kwargs):
+        key = (chat_id, message_id)
+        while key in RICH_REPLACED:
+            key = (chat_id, RICH_REPLACED[key])
+        return await orig_delete(self, key[0], key[1], *args, **kwargs)
+
+    for fn in (edit_message_text, edit_message_caption, edit_message_reply_markup,
+               edit_message_media, delete_message):
+        orig = getattr(Bot, fn.__name__)
+        fn.__doc__ = orig.__doc__
+        setattr(Bot, fn.__name__, fn)
+
+
+_install_rich_edit_redirects()
+
+
 _KNOWN_BOT_CHATS = {}
 
 
@@ -505,8 +818,11 @@ async def edit_message_caption(query, caption: str, reply_markup):
         pass
 
 
-async def send_new_message_with_banner(query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown"):
+async def send_new_message_with_banner(query, banner_name: str, caption: str, reply_markup,
+                                       parse_mode: str = "Markdown", rich: bool = False):
     """Delete current message and send new one with banner image. For changing sections or returning to main menu."""
+    if rich and await replace_with_rich(query, banner_name, caption, reply_markup, parse_mode):
+        return
     chat_id = query.message.chat_id
     try:
         await query.message.delete()
@@ -533,9 +849,12 @@ async def send_new_message_with_banner(query, banner_name: str, caption: str, re
 
 
 async def edit_message_with_banner(
-    query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown"
+    query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown",
+    rich: bool = False
 ):
     """Edit the message caption and keyboard. Falls back to delete/send if needed."""
+    if rich and await replace_with_rich(query, banner_name, caption, reply_markup, parse_mode):
+        return
     try:
         if query.message.photo:
             await query.message.edit_caption(
@@ -4925,7 +5244,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         load_authorized_users()
 
     menu_text = build_main_menu_text(user_id)
-    
+
+    if await send_rich_screen(
+        context.bot, update.effective_chat.id, "welcome", menu_text, get_main_menu_keyboard()
+    ):
+        return
+
     banner_path = get_banner_path("welcome")
     if os.path.exists(banner_path):
         with open(banner_path, "rb") as photo:
@@ -5139,6 +5463,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
+        [copy_address_button(address)],
         [InlineKeyboardButton(
             "Refresh Balance",
             callback_data=f"refresh_send_{token}_{network}"
@@ -5149,6 +5474,12 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )],
         [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
+
+    if await send_rich_screen(
+        context.bot, update.effective_chat.id, None, response_text,
+        InlineKeyboardMarkup(keyboard), qr=address
+    ):
+        return
 
     banner_path = get_banner_path("deposit")
     if os.path.exists(banner_path):
@@ -5214,7 +5545,12 @@ async def handle_owner_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Failed to forward reply to owner {owner_id}: {e}")
 
 
-async def send_photo_with_banner(message, banner_name, text, reply_markup=None, parse_mode: str = "Markdown"):
+async def send_photo_with_banner(message, banner_name, text, reply_markup=None,
+                                 parse_mode: str = "Markdown", rich: bool = False):
+    if rich and await send_rich_screen(
+        message.get_bot(), message.chat_id, banner_name, text, reply_markup, parse_mode
+    ):
+        return
     banner_path = get_banner_path(banner_name)
     if os.path.exists(banner_path):
         with open(banner_path, "rb") as photo:
@@ -5255,7 +5591,9 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "balance", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("balance"), "rb"),
         caption=text,
@@ -5285,7 +5623,7 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
         await send_photo_with_banner(
-            update.message, "wallets", text, InlineKeyboardMarkup(keyboard)
+            update.message, "wallets", text, InlineKeyboardMarkup(keyboard), rich=True
         )
         return
 
@@ -5303,7 +5641,7 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await send_photo_with_banner(
-        update.message, "wallets", text, InlineKeyboardMarkup(keyboard)
+        update.message, "wallets", text, InlineKeyboardMarkup(keyboard), rich=True
     )
 
 
@@ -5330,7 +5668,9 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("deposit"), "rb"),
         caption=text,
@@ -5499,7 +5839,9 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "withdraw", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("withdraw"), "rb"),
         caption=text,
@@ -6360,6 +6702,7 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     keyboard = [
+        [copy_address_button(address)],
         [InlineKeyboardButton(
             "Refresh Balance",
             callback_data=f"refresh_send_{token}_{network}"
@@ -6371,6 +6714,10 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
 
+    if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
+        query, None, response_text, InlineKeyboardMarkup(keyboard), qr=address
+    ):
+        return
     await edit_message_with_banner(
         query, "deposit", response_text, InlineKeyboardMarkup(keyboard), parse_mode="HTML"
     )
@@ -6391,7 +6738,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = build_main_menu_text(user_id)
 
     await send_new_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(), parse_mode="HTML"
+        query, "welcome", menu_text, get_main_menu_keyboard(), parse_mode="HTML", rich=True
     )
     
     return ConversationHandler.END
@@ -6413,7 +6760,7 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Home", callback_data="main_menu")]
         ]
         await edit_message_with_banner(
-            query, "wallets", text, InlineKeyboardMarkup(keyboard)
+            query, "wallets", text, InlineKeyboardMarkup(keyboard), rich=True
         )
         return
 
@@ -6434,7 +6781,7 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await edit_message_with_banner(
-        query, "wallets", text, InlineKeyboardMarkup(keyboard)
+        query, "wallets", text, InlineKeyboardMarkup(keyboard), rich=True
     )
 
 
@@ -6813,7 +7160,9 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("deposit"), "rb"),
         caption=text,
@@ -7024,6 +7373,7 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
             balance_display = f"`{balance_result}` {token}"
 
     keyboard = [
+        [copy_address_button(address)],
         [InlineKeyboardButton("\U0001F504 Refresh Balance", callback_data=f"refresh_dep_{token}_{network}")],
         [InlineKeyboardButton("\U0001F3E0 Main Menu", callback_data="main_menu")]
     ]
@@ -7036,6 +7386,11 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
         f"\U0001F4B0 *Current Balance:* {balance_display}\n\n"
         f"\u26a0\ufe0f _Only send {token} on {network_info.get('name', network)} network!_"
     )
+
+    if await send_rich_screen(
+        context.bot, chat_id, None, caption_text, InlineKeyboardMarkup(keyboard), "Markdown", qr=address
+    ):
+        return ConversationHandler.END
 
     if qr_buffer:
         await context.bot.send_photo(
@@ -7095,6 +7450,7 @@ async def show_deposit_address(
         explorer_url = f"{info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
+        [copy_address_button(wallet["address"])],
         [InlineKeyboardButton(
             "\U0001F310 View on Explorer",
             url=explorer_url
@@ -7126,6 +7482,11 @@ async def show_deposit_address(
         f"Tap the address to copy it.\n\n"
         f"*Important:* Only send {info['symbol']} and {info['name']} tokens to this address!"
     )
+
+    if await replace_with_rich(
+        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+    ):
+        return
 
     # Try to edit the message first, fall back to delete/send for QR code
     try:
@@ -7242,6 +7603,7 @@ async def show_token_deposit_address(
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
+        [copy_address_button(wallet["address"])],
         [InlineKeyboardButton(
             "\U0001F310 View on Explorer",
             url=explorer_url
@@ -7264,6 +7626,11 @@ async def show_token_deposit_address(
         f"*Important:* Only send {token_info['symbol']} ({network_info['name']} network) "
         f"to this address!"
     )
+
+    if await replace_with_rich(
+        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+    ):
+        return
 
     # Try to edit the message first, fall back to delete/send for QR code
     try:
@@ -7353,6 +7720,7 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
+        [copy_address_button(wallet["address"])],
         [InlineKeyboardButton("Refresh", callback_data=f"refresh_dep_{token}_{network}")],
         [InlineKeyboardButton("Explorer", url=explorer_url)],
         [InlineKeyboardButton("Back", callback_data="menu_deposit")],
@@ -7364,6 +7732,11 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n`{wallet['address']}`"
     )
+
+    if await replace_with_rich(
+        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+    ):
+        return
 
     # Try to edit the message first, fall back to delete/send for QR code
     try:
@@ -7441,6 +7814,7 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         explorer_url = f"{network_info['explorer']}/address/{wallet['address']}"
 
     keyboard = [
+        [copy_address_button(wallet["address"])],
         [InlineKeyboardButton("Refresh", callback_data=f"refresh_dep_{token}_{network}")],
         [InlineKeyboardButton("Explorer", url=explorer_url)],
         [InlineKeyboardButton("Back", callback_data="menu_deposit")],
@@ -7452,6 +7826,10 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n`{wallet['address']}`"
     )
+    if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
+        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+    ):
+        return
     await edit_message_with_banner(
         query, "deposit", text, InlineKeyboardMarkup(keyboard)
     )
@@ -7659,7 +8037,9 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "balance", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("balance"), "rb"),
         caption=text,
@@ -8009,7 +8389,9 @@ async def show_withdraw_menu(
         [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
     ]
 
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "withdraw", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("withdraw"), "rb"),
         caption=text,
@@ -8396,7 +8778,9 @@ async def receive_withdraw_quick_network(
         return ConversationHandler.END
 
     keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
-    msg = await context.bot.send_photo(
+    msg = await send_rich_screen(
+        context.bot, chat_id, "withdraw", text, InlineKeyboardMarkup(keyboard), "Markdown"
+    ) or await context.bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("withdraw"), "rb"),
         caption=text,
@@ -9558,6 +9942,8 @@ async def _start_convert(bot, chat_id: int, user_id: int, context):
     context.user_data.pop("swap", None)
 
     caption, keyboard = _convert_provider_view()
+    if await send_rich_screen(bot, chat_id, "convert", caption, InlineKeyboardMarkup(keyboard)):
+        return CONVERT_PROVIDER
     await bot.send_photo(
         chat_id=chat_id,
         photo=open(get_banner_path("convert"), "rb"),
