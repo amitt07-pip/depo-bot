@@ -5476,7 +5476,7 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     if await send_rich_screen(
-        context.bot, update.effective_chat.id, None, response_text,
+        context.bot, update.effective_chat.id, "deposit", response_text,
         InlineKeyboardMarkup(keyboard), qr=address
     ):
         return
@@ -6715,7 +6715,7 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
 
     if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
-        query, None, response_text, InlineKeyboardMarkup(keyboard), qr=address
+        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address
     ):
         return
     await edit_message_with_banner(
@@ -7388,7 +7388,7 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
     )
 
     if await send_rich_screen(
-        context.bot, chat_id, None, caption_text, InlineKeyboardMarkup(keyboard), "Markdown", qr=address
+        context.bot, chat_id, "deposit", caption_text, InlineKeyboardMarkup(keyboard), "Markdown", qr=address
     ):
         return ConversationHandler.END
 
@@ -7484,7 +7484,7 @@ async def show_deposit_address(
     )
 
     if await replace_with_rich(
-        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
     ):
         return
 
@@ -7628,7 +7628,7 @@ async def show_token_deposit_address(
     )
 
     if await replace_with_rich(
-        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
     ):
         return
 
@@ -7734,7 +7734,7 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     if await replace_with_rich(
-        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
     ):
         return
 
@@ -7827,7 +7827,7 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         f"*Address:*\n`{wallet['address']}`"
     )
     if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
-        query, None, text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
     ):
         return
     await edit_message_with_banner(
