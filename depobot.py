@@ -776,6 +776,9 @@ def get_banner_path(name: str) -> str:
     return os.path.join(ASSETS_DIR, f"{name}.png")
 
 
+QR_STRIP_COLOR = (23, 33, 43)  # Telegram dark theme background
+
+
 def generate_qr_code(data: str) -> io.BytesIO:
     """Generate a QR code image for the given data and return as BytesIO."""
     if not QR_AVAILABLE:
@@ -789,7 +792,14 @@ def generate_qr_code(data: str) -> io.BytesIO:
         )
         qr.add_data(data)
         qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        # Telegram stretches photos to the bubble width: centre the QR on a wide
+        # dark strip so it renders small.
+        from PIL import Image
+        pad = img.height // 12
+        strip = Image.new("RGB", (int(img.width * 2.6), img.height + 2 * pad), QR_STRIP_COLOR)
+        strip.paste(img, ((strip.width - img.width) // 2, pad))
+        img = strip
         bio = io.BytesIO()
         img.save(bio, format="PNG")
         bio.seek(0)
