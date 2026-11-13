@@ -80,6 +80,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
+from address_card import render_address_card
+
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -565,15 +567,38 @@ def _photo_file_ids(obj, found):
             _photo_file_ids(v, found)
 
 
+def address_card_spec(symbol, network_name, address, balance=None, title="DEPOSIT"):
+    """Card image that replaces the banner and the address details on rich screens."""
+    if balance is not None:
+        balance = (str(balance).replace("`", "").split() or ["0"])[0]
+    return {"symbol": symbol, "network": network_name, "address": address,
+            "balance": balance, "title": title,
+            "caption": f"{ui('deposit')}  <b>{esc(title.title())} {esc(symbol)}</b> \u00b7 {esc(network_name)}"}
+
+
 async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
-                           parse_mode: str = "HTML", qr: str = None):
+                           parse_mode: str = "HTML", qr: str = None, card: dict = None):
     """Send a screen as a rich message. Returns the Message, or None so the
     caller falls back to the classic photo + inline keyboard."""
     if not RICH_MESSAGES_ENABLED or time.time() < _RICH_STATE["retry_after"]:
         return None
     caption_html = tg_html(caption) if parse_mode == "Markdown" else caption
     banner_path = get_banner_path(banner_name) if banner_name else None
-    use_banner = bool(banner_path and os.path.exists(banner_path))
+    card_png = None
+    if card:
+        try:
+            brand = f"@{bot.username}" if getattr(bot, "username", None) else None
+        except Exception:
+            brand = None
+        try:
+            card_png = await asyncio.to_thread(
+                render_address_card, card["symbol"], card["network"], card["address"],
+                card.get("balance"), brand, card.get("title", "DEPOSIT")
+            )
+            caption_html = card["caption"]
+        except Exception as e:
+            logger.warning(f"Address card render failed: {e}")
+    use_banner = bool(card_png) or bool(banner_path and os.path.exists(banner_path))
     qr_png = None
     if qr:
         buf = generate_qr_code(qr, box_size=QR_RICH_BOX_SIZE, strip=False)
@@ -584,7 +609,10 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
 
     form = aiohttp.FormData()
     media = []
-    if use_banner:
+    if card_png:
+        media.append({"id": "banner", "media": {"type": "photo", "media": "attach://banner"}})
+        form.add_field("banner", card_png, filename="address_card.png", content_type="image/png")
+    elif use_banner:
         cached = _RICH_BANNER_FILE_IDS.get(banner_name)
         media.append({"id": "banner", "media": {"type": "photo", "media": cached or "attach://banner"}})
         if not cached:
@@ -615,7 +643,7 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
         return None
 
     result = data["result"]
-    if use_banner and not qr_png and banner_name not in _RICH_BANNER_FILE_IDS:
+    if use_banner and not card_png and not qr_png and banner_name not in _RICH_BANNER_FILE_IDS:
         photos = []
         _photo_file_ids(result, photos)
         if photos:
@@ -629,10 +657,10 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
 
 
 async def replace_with_rich(query, banner_name, caption, keyboard,
-                            parse_mode: str = "HTML", qr: str = None):
+                            parse_mode: str = "HTML", qr: str = None, card: dict = None):
     """Send the screen as a new rich message, then remove the old one."""
     msg = await send_rich_screen(
-        query.get_bot(), query.message.chat_id, banner_name, caption, keyboard, parse_mode, qr
+        query.get_bot(), query.message.chat_id, banner_name, caption, keyboard, parse_mode, qr, card
     )
     if msg:
         try:
@@ -5495,7 +5523,8 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if await send_rich_screen(
         context.bot, update.effective_chat.id, "deposit", response_text,
-        InlineKeyboardMarkup(keyboard), qr=address
+        InlineKeyboardMarkup(keyboard), qr=address,
+        card=address_card_spec(token, network_info["name"], address, balance_str)
     ):
         return
 
@@ -6733,7 +6762,8 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
 
     if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
-        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address
+        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address,
+        card=address_card_spec(token, network_info["name"], address, balance_str)
     ):
         return
     await edit_message_with_banner(
@@ -7406,7 +7436,8 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
     )
 
     if await send_rich_screen(
-        context.bot, chat_id, "deposit", caption_text, InlineKeyboardMarkup(keyboard), "Markdown", qr=address
+        context.bot, chat_id, "deposit", caption_text, InlineKeyboardMarkup(keyboard), "Markdown", qr=address,
+        card=address_card_spec(token, network_info.get("name", network), address, balance_display)
     ):
         return ConversationHandler.END
 
@@ -7502,7 +7533,8 @@ async def show_deposit_address(
     )
 
     if await replace_with_rich(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
+        card=address_card_spec(info["symbol"], info["name"], wallet["address"])
     ):
         return
 
@@ -7646,7 +7678,8 @@ async def show_token_deposit_address(
     )
 
     if await replace_with_rich(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
+        card=address_card_spec(token_info["symbol"], network_info["name"], wallet["address"])
     ):
         return
 
@@ -7752,7 +7785,8 @@ async def show_combo_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     if await replace_with_rich(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
+        card=address_card_spec(token, network_info["name"], wallet["address"], balance_str)
     ):
         return
 
@@ -7845,7 +7879,8 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         f"*Address:*\n`{wallet['address']}`"
     )
     if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"]
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
+        card=address_card_spec(token, network_info["name"], wallet["address"], balance_str)
     ):
         return
     await edit_message_with_banner(
