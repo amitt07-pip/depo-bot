@@ -1740,6 +1740,11 @@ def lookup_token_by_address(network: str, token_address: str):
     return None
 
 
+def ist_clock() -> str:
+    """Current time in IST for the "Updated" footer on cards, e.g. 09:51 PM IST."""
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%I:%M %p IST")
+
+
 def format_ist(ts) -> str:
     """Format a unix timestamp (seconds) as Indian Standard Time."""
     if not ts:
@@ -5757,7 +5762,7 @@ async def build_balance_screen(wallets: list, bot=None):
     try:
         png = await asyncio.to_thread(
             render_portfolio_card, heading, total, holdings, chips, brand,
-            time.strftime("%H:%M UTC", time.gmtime()), accent, "Deposit to see it here"
+            ist_clock(), accent, "Deposit to see it here"
         )
     except Exception as e:
         logger.warning(f"Balance card render failed: {e}")
@@ -5842,7 +5847,7 @@ async def build_dashboard(user_id: int, name: str, bot=None):
     try:
         png = await asyncio.to_thread(
             render_dashboard_card, name, total, holdings, len(wallets), brand,
-            time.strftime("%H:%M UTC", time.gmtime()), avatar
+            ist_clock(), avatar
         )
     except Exception as e:
         logger.warning(f"Dashboard render failed: {e}")
@@ -6957,7 +6962,7 @@ async def _check_address(update: Update, address: str, detected, message=None, b
             seen_networks = set()
             for entry in balances:
                 network = entry["network"]
-                if network not in seen_networks:
+                if entry["balance"] > 0 and network not in seen_networks:
                     seen_networks.add(network)
                     explorer_buttons.append(InlineKeyboardButton(
                         f"\U0001F310 {esc(entry['network_name'])}",
@@ -6985,7 +6990,7 @@ async def _check_address(update: Update, address: str, detected, message=None, b
         chips = [NETWORKS.get(nets[0], {}).get("name", nets[0]) if len(nets) == 1 else f"{len(nets)} networks",
                  f"{len(holdings)} asset{'s' if len(holdings) != 1 else ''}"]
         brand = _bot_brand(update.get_bot())
-        updated = time.strftime("%H:%M UTC", time.gmtime())
+        updated = ist_clock()
         try:
             if breakdown:
                 png = await asyncio.to_thread(
