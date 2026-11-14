@@ -312,29 +312,115 @@ BANNER_ACCENTS = {
 }
 
 
-def _emblem(img, x, y, size, accent):
-    """Rounded-square Vex mark: accent gradient tile with a white V."""
-    tile = Image.new("RGB", (size, size), accent)
+def _glyph_tile(name, size, accent):
+    """Accent gradient rounded tile with a white feature glyph (drawn at 3x, downsampled)."""
+    k = 3
+    S = size * k
     top = tuple(min(255, int(c + (255 - c) * 0.35)) for c in accent)
-    td = ImageDraw.Draw(tile)
-    for i in range(size):
-        t = i / size
-        td.line([(0, i), (size, i)], fill=tuple(int(top[k] * (1 - t) + accent[k] * t) for k in range(3)))
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 4, fill=255)
+    tile = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    grad = Image.new("RGB", (S, S))
+    gd = ImageDraw.Draw(grad)
+    for i in range(S):
+        t = i / S
+        gd.line([(0, i), (S, i)], fill=tuple(int(top[j] * (1 - t) + accent[j] * t) for j in range(3)))
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=S // 4, fill=255)
+    tile.paste(grad, (0, 0), mask)
+    d = ImageDraw.Draw(tile)
+    Wt = (255, 255, 255, 255)
+    w = int(S * 0.075)
+
+    def P(x, y):
+        return (S * x, S * y)
+
+    def line(*pts):
+        d.line([P(*q) for q in pts], fill=Wt, width=w, joint="curve")
+        for q in (pts[0], pts[-1]):
+            x, y = P(*q)
+            d.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill=Wt)
+
+    if name == "deposit":
+        line((0.5, 0.22), (0.5, 0.56)); line((0.36, 0.43), (0.5, 0.57), (0.64, 0.43))
+        line((0.24, 0.58), (0.24, 0.76), (0.76, 0.76), (0.76, 0.58))
+    elif name == "withdraw":
+        line((0.5, 0.58), (0.5, 0.22)); line((0.36, 0.36), (0.5, 0.22), (0.64, 0.36))
+        line((0.24, 0.58), (0.24, 0.76), (0.76, 0.76), (0.76, 0.58))
+    elif name == "convert":
+        line((0.26, 0.38), (0.72, 0.38)); line((0.6, 0.27), (0.73, 0.38), (0.6, 0.49))
+        line((0.74, 0.62), (0.28, 0.62)); line((0.4, 0.51), (0.27, 0.62), (0.4, 0.73))
+    elif name == "balance":
+        for x0, h in ((0.26, 0.22), (0.44, 0.38), (0.62, 0.5)):
+            d.rounded_rectangle([*P(x0, 0.74 - h), *P(x0 + 0.12, 0.74)], radius=S * 0.03, fill=Wt)
+        line((0.22, 0.79), (0.78, 0.79))
+    elif name == "wallets":
+        d.rounded_rectangle([*P(0.2, 0.3), *P(0.8, 0.74)], radius=S * 0.07, outline=Wt, width=w)
+        d.rounded_rectangle([*P(0.56, 0.44), *P(0.84, 0.6)], radius=S * 0.05, fill=Wt)
+        d.ellipse([*P(0.62, 0.48), *P(0.70, 0.56)], fill=accent + (255,))
+        line((0.3, 0.3), (0.62, 0.2), (0.68, 0.3))
+    elif name == "generate":
+        d.ellipse([*P(0.2, 0.3), *P(0.48, 0.58)], outline=Wt, width=w)
+        line((0.48, 0.44), (0.8, 0.44)); line((0.7, 0.44), (0.7, 0.58)); line((0.8, 0.44), (0.8, 0.54))
+        line((0.62, 0.18), (0.62, 0.3)); line((0.56, 0.24), (0.68, 0.24))
+    elif name == "help":
+        d.text(P(0.5, 0.52), "?", font=_font("SpaceGrotesk.ttf", int(S * 0.62), b"Bold"), fill=Wt, anchor="mm")
+    elif name == "profile":
+        d.ellipse([*P(0.37, 0.2), *P(0.63, 0.46)], fill=Wt)
+        d.pieslice([*P(0.22, 0.52), *P(0.78, 1.04)], 180, 360, fill=Wt)
+    elif name == "transaction":
+        pts = [P(0.28, 0.2), P(0.72, 0.2), P(0.72, 0.8)]
+        for i in range(6):
+            pts.append(P(0.72 - (i + 0.5) * 0.44 / 6, 0.75 if i % 2 == 0 else 0.8))
+        pts.append(P(0.28, 0.8))
+        d.polygon(pts, fill=Wt)
+        for y, x1 in ((0.33, 0.62), (0.45, 0.62), (0.57, 0.5)):
+            d.rounded_rectangle([*P(0.38, y), *P(x1, y + 0.05)], radius=S * 0.02, fill=accent + (255,))
+    else:
+        line((0.28, 0.30), (0.50, 0.72), (0.72, 0.30))
+    return tile.resize((size, size), Image.LANCZOS)
+
+
+def _paste_shadowed(img, tile, x, y, accent, alpha=60):
     shadow = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(shadow).rounded_rectangle([x + 6, y + 14, x + size + 6, y + size + 14], radius=size // 4, fill=60)
+    r = tile.width // 4
+    ImageDraw.Draw(shadow).rounded_rectangle([x + 6, y + 14, x + tile.width + 6, y + tile.height + 14],
+                                             radius=r, fill=alpha)
     img.paste(Image.composite(Image.new("RGB", (W, H), accent), img, shadow.filter(ImageFilter.GaussianBlur(18))))
-    img.paste(tile, (x, y), mask)
-    d = ImageDraw.Draw(img)
-    s = size
-    d.line([(x + s * 0.28, y + s * 0.30), (x + s * 0.50, y + s * 0.72), (x + s * 0.72, y + s * 0.30)],
-           fill=(255, 255, 255), width=max(6, s // 11), joint="curve")
-    return d
+    img.paste(tile, (x, y), tile)
+
+
+def _ring_logo(img, symbol, x, y, size):
+    ring = Image.new("RGBA", (size + 12, size + 12), (0, 0, 0, 0))
+    ImageDraw.Draw(ring).ellipse([0, 0, size + 11, size + 11], fill=(255, 255, 255, 255))
+    img.paste(ring, (x - 6, y - 6), ring)
+    logo = _token_logo(symbol, size)
+    if logo is not None:
+        img.paste(logo, (x, y), logo)
+
+
+def _feature_art(img, name, box, accent):
+    px0, py0, px1, py1 = box
+    cx, cy = (px0 + px1) // 2, (py0 + py1) // 2 - 6
+    if name == "tokens":
+        syms = ["BTC", "ETH", "USDT", "SOL", "BNB", "TON"]
+        size, gap = 86, 22
+        gx = cx - (3 * size + 2 * gap) // 2
+        gy = cy - (2 * size + gap) // 2
+        for i, sym in enumerate(syms):
+            _ring_logo(img, sym, gx + (i % 3) * (size + gap), gy + (i // 3) * (size + gap), size)
+        return ImageDraw.Draw(img)
+    size = 190
+    _paste_shadowed(img, _glyph_tile(name, size, accent), cx - size // 2, cy - size // 2, accent)
+    badges = {"convert": (("USDT", -1, 1), ("ETH", 1, -1)), "deposit": (("USDT", 1, 1),),
+              "withdraw": (("ETH", 1, 1),), "balance": (("BTC", 1, 1),)}
+    for sym, sx, sy in badges.get(name, ()):
+        bs = 64
+        _ring_logo(img, sym, cx + sx * (size // 2) - bs // 2, cy + sy * (size // 2) - bs // 2, bs)
+    return ImageDraw.Draw(img)
 
 
 def render_banner(title: str, subtitle: str, accent=None, brand: str = "@UseVexBot",
-                  tagline: str = "Secure Multi-Chain Wallet", kicker: str = "VEX") -> bytes:
+                  tagline: str = "Secure Multi-Chain Wallet", kicker: str = "VEX",
+                  art: str = None) -> bytes:
     """Section banner in the card style: kicker, big title, subtitle, emblem panel, footer."""
     accent = accent or (88, 101, 242)
     img, d = _canvas(accent, glow_box=(-60, -40, 560, 480))
@@ -347,14 +433,32 @@ def render_banner(title: str, subtitle: str, accent=None, brand: str = "@UseVexB
 
     px0, py0, px1, py1 = 760, 96, W - 96, 452
     d.rounded_rectangle([px0, py0, px1, py1], radius=28, fill=PANEL, outline=PANEL_EDGE, width=2)
-    size = 190
-    d = _emblem(img, (px0 + px1) // 2 - size // 2, (py0 + py1) // 2 - size // 2 - 6, size, accent)
+    d = _feature_art(img, art or "welcome", (px0, py0, px1, py1), accent)
 
     fy = 510
     d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=accent)
     d.text((x0 + 26, fy), tagline, font=_font("Inter.ttf", 21, b"Medium"), fill=SOFT, anchor="lm")
     if brand:
         d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def render_profile_picture(size: int = 640) -> bytes:
+    """Square bot avatar: light grid backdrop with the Vex mark centred (safe for circle crop)."""
+    accent = BANNER_ACCENTS["welcome"]
+    img = Image.new("RGB", (size, size), BG)
+    d = ImageDraw.Draw(img)
+    for x in range(0, size, 32):
+        d.line([(x, 0), (x, size)], fill=GRID)
+        d.line([(0, x), (size, x)], fill=GRID)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse([size * 0.1, size * 0.1, size * 0.9, size * 0.9], fill=90)
+    img = Image.composite(Image.new("RGB", (size, size), accent), img, mask.filter(ImageFilter.GaussianBlur(size // 8)))
+    t = int(size * 0.5)
+    tile = _glyph_tile("welcome", t, accent)
+    img.paste(tile, ((size - t) // 2, (size - t) // 2), tile)
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()

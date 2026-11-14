@@ -26,9 +26,9 @@ BANNERS = {
 
 if __name__ == "__main__":
     for name, (title, subtitle, kicker) in BANNERS.items():
-        tagline = ("ETH \u00b7 BSC \u00b7 Solana \u00b7 Tron \u00b7 TON \u00b7 BTC \u00b7 LTC"
-                   if name.startswith("welcome") else "Secure Multi-Chain Wallet")
-        png = render_banner(title, subtitle, BANNER_ACCENTS.get(name), HANDLE, tagline, kicker)
+        tagline = "Deposit \u00b7 Withdraw \u00b7 Swap" if name.startswith("welcome") else "Secure Multi-Chain Wallet"
+        art = "welcome" if name.startswith("welcome") else name
+        png = render_banner(title, subtitle, BANNER_ACCENTS.get(name), HANDLE, tagline, kicker, art)
         out = os.path.join(ASSETS, f"{name}.png")
         with open(out, "wb") as f:
             f.write(png)
