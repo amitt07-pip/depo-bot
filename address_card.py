@@ -29,13 +29,17 @@ TOKEN_COLORS = {
 _DEFAULT_COLOR = (120, 120, 140)
 
 W, H = 1200, 600
-BG = (10, 10, 12)
-GRID = (20, 20, 24)
-PANEL = (19, 19, 23)
-PANEL_EDGE = (46, 46, 54)
-MUTED = (140, 140, 152)
-TEXT = (236, 236, 240)
-AMBER = (255, 184, 0)
+BG = (246, 247, 250)
+GRID = (234, 236, 241)
+PANEL = (255, 255, 255)
+PANEL_EDGE = (224, 227, 234)
+MUTED = (112, 117, 132)
+TEXT = (22, 24, 33)
+SOFT = (74, 79, 94)
+CHIP = (255, 255, 255)
+TRACK = (229, 231, 237)
+FRAME = (214, 217, 226)
+AMBER = (240, 160, 0)
 
 
 def _font(name: str, size: int, weight: str):
@@ -82,13 +86,13 @@ def _canvas(accent, glow_box=(30, 20, 430, 420)):
     for y in range(0, H, 40):
         d.line([(0, y), (W, y)], fill=GRID)
 
-    glow = Image.new("RGB", (W, H), (0, 0, 0))
-    ImageDraw.Draw(glow).ellipse(glow_box, fill=tuple(int(c * 0.45) for c in accent))
-    img = ImageChops.add(img, glow.filter(ImageFilter.GaussianBlur(110)))
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).ellipse(glow_box, fill=70)
+    img = Image.composite(Image.new("RGB", (W, H), accent), img, mask.filter(ImageFilter.GaussianBlur(110)))
     d = ImageDraw.Draw(img)
 
     m = 36
-    d.rounded_rectangle([m, m, W - m, H - m], radius=34, outline=(64, 64, 72), width=2)
+    d.rounded_rectangle([m, m, W - m, H - m], radius=34, outline=FRAME, width=2)
     b, t = 70, 5
     for cx, cy, sx, sy in ((m, m, 1, 1), (W - m, m, -1, 1), (m, H - m, 1, -1), (W - m, H - m, -1, -1)):
         d.line([(cx + sx * 34, cy), (cx + sx * b, cy)], fill=TEXT, width=t)
@@ -131,7 +135,7 @@ def render_address_card(symbol: str, network_name: str, address: str,
     d.text((x0 - 3, 130), symbol, font=sym_font, fill=TEXT)
     pill_font = _font("Inter.ttf", 24, b"Medium")
     pw = d.textlength(network_name, font=pill_font) + 52
-    d.rounded_rectangle([x0, 222, x0 + pw, 262], radius=20, fill=(26, 26, 32), outline=accent, width=2)
+    d.rounded_rectangle([x0, 222, x0 + pw, 262], radius=20, fill=CHIP, outline=accent, width=2)
     d.ellipse([x0 + 16, 236, x0 + 28, 248], fill=accent)
     d.text((x0 + 38, 242), network_name, font=pill_font, fill=TEXT, anchor="lm")
 
@@ -170,11 +174,11 @@ def render_address_card(symbol: str, network_name: str, address: str,
     # Footer: warning + brand
     fy = 500
     d.polygon([(110, fy + 22), (124, fy - 2), (138, fy + 22)], fill=AMBER)
-    d.text((124, fy + 14), "!", font=_font("Inter.ttf", 16, b"Bold"), fill=BG, anchor="mm")
+    d.text((124, fy + 14), "!", font=_font("Inter.ttf", 16, b"Bold"), fill=(255, 255, 255), anchor="mm")
     warn = f"Only send {symbol} on {network_name} to this address"
-    d.text((152, fy + 10), warn, font=_font("Inter.ttf", 22, b"Medium"), fill=(200, 200, 208), anchor="lm")
+    d.text((152, fy + 10), warn, font=_font("Inter.ttf", 22, b"Medium"), fill=SOFT, anchor="lm")
     if brand:
-        d.text((W - 96, fy + 10), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=(210, 210, 218), anchor="rm")
+        d.text((W - 96, fy + 10), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
 
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
@@ -233,7 +237,7 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
         w = d.textlength(label, font=chip_font) + 50
         if cx + w > 640:
             break
-        d.rounded_rectangle([cx, 316, cx + w, 354], radius=19, fill=(26, 26, 32), outline=(58, 58, 66), width=2)
+        d.rounded_rectangle([cx, 316, cx + w, 354], radius=19, fill=CHIP, outline=PANEL_EDGE, width=2)
         d.ellipse([cx + 16, 329, cx + 28, 341], fill=accent)
         d.text((cx + 36, 335), label, font=chip_font, fill=TEXT, anchor="lm")
         cx += w + 14
@@ -241,9 +245,9 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
     # Allocation bar
     bx0, bx1, by = x0, 620, 412
     _spaced(d, (bx0, by - 30), "ALLOCATION", _font("Inter.ttf", 18, b"SemiBold"), MUTED, 4)
-    d.rounded_rectangle([bx0, by, bx1, by + 16], radius=8, fill=(34, 34, 40))
+    d.rounded_rectangle([bx0, by, bx1, by + 16], radius=8, fill=TRACK)
     if total > 0:
-        bar = Image.new("RGB", (bx1 - bx0, 16), (34, 34, 40))
+        bar = Image.new("RGB", (bx1 - bx0, 16), TRACK)
         bd = ImageDraw.Draw(bar)
         pos = 0.0
         for sym, _, usd in holdings:
@@ -273,7 +277,7 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
                font=sub_font, fill=MUTED, anchor="mm")
     for sym, amt, usd in rows:
         if sym == "OTHER":
-            d.ellipse([px0 + 24, y + 6, px0 + 68, y + 50], fill=(48, 48, 56))
+            d.ellipse([px0 + 24, y + 6, px0 + 68, y + 50], fill=TRACK)
             d.text((px0 + 46, y + 28), "+", font=_font("Inter.ttf", 26, b"Bold"), fill=TEXT, anchor="mm")
             d.text((px0 + 84, y + 4), "Others", font=sym_font, fill=TEXT)
             d.text((px0 + 84, y + 34), f"{len(holdings) - 3} more", font=sub_font, fill=MUTED)
@@ -290,10 +294,67 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
     fy = 510
     d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=accent)
     foot = "Total value in USD" + (f"  \u00b7  Updated {updated}" if updated else "")
-    d.text((x0 + 26, fy), foot, font=_font("Inter.ttf", 21, b"Medium"), fill=(200, 200, 208), anchor="lm")
+    d.text((x0 + 26, fy), foot, font=_font("Inter.ttf", 21, b"Medium"), fill=SOFT, anchor="lm")
     if brand:
-        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=(210, 210, 218), anchor="rm")
+        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
 
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+BANNER_ACCENTS = {
+    "welcome": (88, 101, 242), "welcome_public": (88, 101, 242),
+    "deposit": (38, 161, 123), "withdraw": (229, 72, 77), "convert": (39, 117, 202),
+    "balance": (243, 160, 20), "wallets": (130, 71, 229), "generate": (20, 170, 160),
+    "help": (90, 110, 140), "tokens": (0, 152, 234), "profile": (200, 80, 160),
+    "transaction": (98, 126, 234),
+}
+
+
+def _emblem(img, x, y, size, accent):
+    """Rounded-square Vex mark: accent gradient tile with a white V."""
+    tile = Image.new("RGB", (size, size), accent)
+    top = tuple(min(255, int(c + (255 - c) * 0.35)) for c in accent)
+    td = ImageDraw.Draw(tile)
+    for i in range(size):
+        t = i / size
+        td.line([(0, i), (size, i)], fill=tuple(int(top[k] * (1 - t) + accent[k] * t) for k in range(3)))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, size - 1, size - 1], radius=size // 4, fill=255)
+    shadow = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(shadow).rounded_rectangle([x + 6, y + 14, x + size + 6, y + size + 14], radius=size // 4, fill=60)
+    img.paste(Image.composite(Image.new("RGB", (W, H), accent), img, shadow.filter(ImageFilter.GaussianBlur(18))))
+    img.paste(tile, (x, y), mask)
+    d = ImageDraw.Draw(img)
+    s = size
+    d.line([(x + s * 0.28, y + s * 0.30), (x + s * 0.50, y + s * 0.72), (x + s * 0.72, y + s * 0.30)],
+           fill=(255, 255, 255), width=max(6, s // 11), joint="curve")
+    return d
+
+
+def render_banner(title: str, subtitle: str, accent=None, brand: str = "@UseVexBot",
+                  tagline: str = "Secure Multi-Chain Wallet", kicker: str = "VEX") -> bytes:
+    """Section banner in the card style: kicker, big title, subtitle, emblem panel, footer."""
+    accent = accent or (88, 101, 242)
+    img, d = _canvas(accent, glow_box=(-60, -40, 560, 480))
+    x0 = 96
+    _spaced(d, (x0, 120), kicker, _font("Inter.ttf", 22, b"SemiBold"), MUTED, 6)
+    d.text((x0 - 5, 150), title, font=_fit(d, title, "SpaceGrotesk.ttf", b"Bold", 600, 120, 60), fill=TEXT)
+    d.rounded_rectangle([x0, 306, x0 + 120, 314], radius=4, fill=accent)
+    d.rounded_rectangle([x0 + 132, 306, x0 + 168, 314], radius=4, fill=TRACK)
+    d.text((x0, 340), subtitle, font=_fit(d, subtitle, "Inter.ttf", b"Medium", 600, 36, 22), fill=SOFT)
+
+    px0, py0, px1, py1 = 760, 96, W - 96, 452
+    d.rounded_rectangle([px0, py0, px1, py1], radius=28, fill=PANEL, outline=PANEL_EDGE, width=2)
+    size = 190
+    d = _emblem(img, (px0 + px1) // 2 - size // 2, (py0 + py1) // 2 - size // 2 - 6, size, accent)
+
+    fy = 510
+    d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=accent)
+    d.text((x0 + 26, fy), tagline, font=_font("Inter.ttf", 21, b"Medium"), fill=SOFT, anchor="lm")
+    if brand:
+        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
