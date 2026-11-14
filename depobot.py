@@ -452,9 +452,9 @@ def auto_button_style(text: str, data=None):
         return "danger"
     if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "notif_resume")) or _CONFIRM_RE.search(label):
         return "success"
-    if data.startswith(("menu_withdraw", "withdraw_")) or _OUT_RE.search(label):
+    if data.startswith(("menu_withdraw", "withdraw_", "qp_wd_")) or _OUT_RE.search(label):
         return "danger"
-    if data.startswith(("menu_deposit", "menu_generate", "gen_", "refresh_")) or _IN_RE.search(label):
+    if data.startswith(("menu_deposit", "menu_generate", "gen_", "refresh_", "qp_dep_")) or _IN_RE.search(label):
         return "success"
     if data.startswith(("menu_convert", "menu_balance", "menu_wallets", "menu_tokens")) \
             or _PRIMARY_RE.search(label):
@@ -1897,6 +1897,44 @@ class WalletDatabase:
         )
         conn.commit()
         conn.close()
+
+    def _pair_usage_table(self, cursor):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS pair_usage ("
+            "user_id INTEGER NOT NULL, action TEXT NOT NULL, token TEXT NOT NULL, "
+            "network TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0, "
+            "last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+            "PRIMARY KEY (user_id, action, token, network))"
+        )
+
+    def record_pair_use(self, user_id: int, action: str, token: str, network: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._pair_usage_table(cursor)
+        cursor.execute(
+            "INSERT INTO pair_usage (user_id, action, token, network, uses) VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(user_id, action, token, network) "
+            "DO UPDATE SET uses = uses + 1, last_used = CURRENT_TIMESTAMP",
+            (user_id, action, token, network)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_top_pairs(self, user_id: int, action: str, token: str = None, limit: int = 4) -> list:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._pair_usage_table(cursor)
+        query = "SELECT token, network FROM pair_usage WHERE user_id = ? AND action = ?"
+        args = [user_id, action]
+        if token:
+            query += " AND token = ?"
+            args.append(token)
+        query += " ORDER BY uses DESC, last_used DESC LIMIT ?"
+        args.append(limit)
+        cursor.execute(query, args)
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
 
     def get_wallet(self, user_id: int, network: str) -> Optional[dict]:
         conn = sqlite3.connect(self.db_path)
@@ -5922,6 +5960,7 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
+        *quick_pair_rows(update.effective_user.id, "dep"),
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
@@ -6093,6 +6132,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
+        *quick_pair_rows(update.effective_user.id, "wd"),
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
@@ -7408,6 +7448,40 @@ async def do_generate_wallet(query, network: str, user_id: int):
         )
 
 
+def quick_pair_rows(user_id: int, action: str, token: str = None) -> list:
+    """Buttons for the user's most-used token/network pairs, two per row."""
+    try:
+        pairs = db.get_top_pairs(user_id, action, token)
+    except Exception as e:
+        logger.warning(f"Quick pairs lookup failed: {e}")
+        return []
+    buttons = [
+        ikb(f"{tk} {net}", callback_data=f"qp_{action}_{tk}_{net}", token=TOKENS[tk]["symbol"])
+        for tk, net in pairs
+        if tk in TOKENS and net in get_available_networks_for_token(tk)
+    ]
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+async def quick_pair_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Jump straight to the deposit address / withdraw amount step for a saved pair."""
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    _, action, token, network = query.data.split("_", 3)
+    if token not in TOKENS or network not in get_available_networks_for_token(token):
+        await query.answer("This pair is no longer available.", show_alert=True)
+        return None
+    if action == "dep":
+        context.user_data["deposit_token"] = token
+        context.user_data["deposit_network"] = network
+        return await confirm_deposit_selection(update, context)
+    clear_withdrawal_state(query.from_user.id, context)
+    context.user_data["withdraw_token"] = token
+    context.user_data["withdraw_network"] = network
+    return await confirm_withdraw_selection(update, context)
+
+
 async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return
@@ -7428,6 +7502,7 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
+        *quick_pair_rows(update.effective_user.id, "dep"),
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
@@ -7477,6 +7552,7 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
             ),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
+                *quick_pair_rows(update.effective_user.id, "dep"),
                 [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
                 [InlineKeyboardButton("Back", callback_data="main_menu")]
             ])
@@ -7503,7 +7579,10 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
             f"_{networks_str}_"
         ),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_deposit")]])
+        reply_markup=InlineKeyboardMarkup([
+            *quick_pair_rows(update.effective_user.id, "dep", token),
+            [InlineKeyboardButton("Back", callback_data="menu_deposit")]
+        ])
     )
     context.user_data["deposit_msg_id"] = msg.message_id
 
@@ -7544,7 +7623,10 @@ async def receive_deposit_network(update: Update, context: ContextTypes.DEFAULT_
                 "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_deposit")]])
+            reply_markup=InlineKeyboardMarkup([
+            *quick_pair_rows(update.effective_user.id, "dep", token),
+            [InlineKeyboardButton("Back", callback_data="menu_deposit")]
+        ])
         )
         context.user_data["deposit_msg_id"] = msg.message_id
         return DEPOSIT_NETWORK
@@ -7599,6 +7681,11 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
 
     token = context.user_data.get("deposit_token")
     network = context.user_data.get("deposit_network")
+    if token in TOKENS and network:
+        try:
+            db.record_pair_use(user_id, "dep", token, network)
+        except Exception as e:
+            logger.warning(f"Pair usage record failed: {e}")
 
     token_info = TOKENS.get(token, {})
     network_info = NETWORKS.get(network, {})
@@ -8521,6 +8608,7 @@ async def show_withdraw_menu(
     )
 
     keyboard = [
+        *quick_pair_rows(update.effective_user.id, "wd"),
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
@@ -8586,7 +8674,10 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
                 "Please try again (e.g., 'USDT', 'ETH', 'solana')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
+            reply_markup=InlineKeyboardMarkup([
+            *quick_pair_rows(update.effective_user.id, "wd", token),
+            [InlineKeyboardButton("Back", callback_data="menu_withdraw")]
+        ])
         )
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_TOKEN
@@ -8611,7 +8702,10 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
             f"_{networks_str}_"
         ),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
+        reply_markup=InlineKeyboardMarkup([
+            *quick_pair_rows(update.effective_user.id, "wd", token),
+            [InlineKeyboardButton("Back", callback_data="menu_withdraw")]
+        ])
     )
     context.user_data["withdraw_msg_id"] = msg.message_id
 
@@ -8652,7 +8746,10 @@ async def receive_withdraw_network(update: Update, context: ContextTypes.DEFAULT
                 "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
+            reply_markup=InlineKeyboardMarkup([
+            *quick_pair_rows(update.effective_user.id, "wd", token),
+            [InlineKeyboardButton("Back", callback_data="menu_withdraw")]
+        ])
         )
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_NETWORK
@@ -8707,6 +8804,11 @@ async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAU
 
     token = context.user_data.get("withdraw_token")
     network = context.user_data.get("withdraw_network")
+    if token in TOKENS and network:
+        try:
+            db.record_pair_use(user_id, "wd", token, network)
+        except Exception as e:
+            logger.warning(f"Pair usage record failed: {e}")
 
     token_info = TOKENS.get(token, {})
     network_info = NETWORKS.get(network, {})
@@ -11424,7 +11526,8 @@ def main():
             CallbackQueryHandler(
                 show_deposit_menu,
                 pattern=r"^menu_deposit$"
-            )
+            ),
+            CallbackQueryHandler(quick_pair_selected, pattern=r"^qp_dep_[A-Z0-9]+_[A-Z0-9]+$")
         ],
         states={
             DEPOSIT_TOKEN: [
@@ -11448,7 +11551,8 @@ def main():
         fallbacks=[
             CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
-            CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$")
+            CallbackQueryHandler(show_deposit_menu, pattern="^menu_deposit$"),
+            CallbackQueryHandler(quick_pair_selected, pattern=r"^qp_dep_[A-Z0-9]+_[A-Z0-9]+$")
         ],
         per_message=False
     )
@@ -11475,7 +11579,8 @@ def main():
             CallbackQueryHandler(
                 show_token_withdraw_networks,
                 pattern=r"^withdraw_token_[A-Z]+$"
-            )
+            ),
+            CallbackQueryHandler(quick_pair_selected, pattern=r"^qp_wd_[A-Z0-9]+_[A-Z0-9]+$")
         ],
         states={
             WITHDRAW_TOKEN: [
@@ -11521,7 +11626,8 @@ def main():
             CommandHandler("cancel", cancel_command),
             CallbackQueryHandler(cancel_withdraw, pattern="^cancel_withdraw$"),
             CallbackQueryHandler(show_main_menu, pattern="^main_menu$"),
-            CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$")
+            CallbackQueryHandler(show_withdraw_menu, pattern="^menu_withdraw$"),
+            CallbackQueryHandler(quick_pair_selected, pattern=r"^qp_wd_[A-Z0-9]+_[A-Z0-9]+$")
         ],
         per_message=False
     )
