@@ -88,7 +88,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
-from address_card import render_address_card, render_dashboard_card, render_portfolio_card
+from address_card import (render_address_card, render_dashboard_card, render_portfolio_card,
+                          render_transaction_card)
 
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -6738,11 +6739,55 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
         "\U0001F310 View on Explorer",
         url=result.get("explorer_url") or tx_explorer_url(used_network, tx_hash)
     )]]
-    await loading_msg.edit_text(
-        "".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    try:
+        png = await asyncio.to_thread(
+            render_transaction_card, net_info["name"], status, amount, asset, sender, receiver,
+            when, h, _bot_brand(update.get_bot())
+        )
+    except Exception as e:
+        logger.warning(f"Transaction card render failed: {e}")
+        png = None
+    caption = (
+        f"{ui('note')}  <b>Transaction</b> \u00b7 {esc(net_info['name'])}\n"
+        f"<code>{esc(h)}</code>"
     )
+    await _send_check_card(update, loading_msg, "transaction", caption, "".join(lines), keyboard, png)
+
+
+def _bot_brand(bot):
+    try:
+        return f"@{bot.username}" if bot is not None and bot.username else None
+    except Exception:
+        return None
+
+
+async def _send_check_card(update: Update, old_msg, banner: str, caption: str, text: str, keyboard, png):
+    """Send a lookup result as an image card (rich, else photo) and remove the old message;
+    falls back to the plain text version if no image can be sent."""
+    bot = update.get_bot()
+    chat_id = update.effective_chat.id
+    markup = InlineKeyboardMarkup(keyboard)
+    sent = await send_rich_screen(bot, chat_id, banner, caption, markup, image=png) if png else None
+    if not sent and png and len(caption) <= 1024:
+        try:
+            sent = await bot.send_photo(chat_id=chat_id, photo=png, caption=caption,
+                                        parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            logger.warning(f"Card photo failed, sending text: {e}")
+    if sent:
+        try:
+            await old_msg.delete()
+        except Exception:
+            pass
+        return
+    try:
+        await old_msg.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup)
+        try:
+            await old_msg.delete()
+        except Exception:
+            pass
 
 
 async def _gather_address_balances(address: str, detected):
@@ -6901,7 +6946,10 @@ async def _check_address(update: Update, address: str, detected, message=None, b
         )
     else:
         loading_msg = message
-        await loading_msg.edit_text(loading_text, parse_mode="HTML")
+        try:
+            await loading_msg.edit_text(loading_text, parse_mode="HTML")
+        except Exception:
+            pass
 
     try:
         balances, total_usd, errors = await _gather_address_balances(address, detected)
@@ -6930,11 +6978,34 @@ async def _check_address(update: Update, address: str, detected, message=None, b
                 [InlineKeyboardButton("Refresh", callback_data=f"check_refresh_{address}")],
             ]
 
-        await loading_msg.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        merged = {}
+        for entry in balances:
+            amt, usd = merged.get(entry["token"], (Decimal("0"), Decimal("0")))
+            merged[entry["token"]] = (amt + entry["balance"], usd + entry["usd_value"])
+        holdings = [(sym, amt, usd) for sym, (amt, usd) in merged.items() if amt > 0]
+        top = max(holdings, key=lambda h: h[2])[0] if holdings else None
+        nets = detected if isinstance(detected, list) else [detected]
+        chips = [NETWORKS.get(nets[0], {}).get("name", nets[0]) if len(nets) == 1 else f"{len(nets)} networks",
+                 f"{len(holdings)} asset{'s' if len(holdings) != 1 else ''}"]
+        try:
+            png = await asyncio.to_thread(
+                render_portfolio_card, f"Address {address[:6]}\u2026{address[-4:]}", total_usd, holdings,
+                chips, _bot_brand(update.get_bot()), time.strftime("%H:%M UTC", time.gmtime()), top,
+                "This address holds no funds"
+            )
+        except Exception as e:
+            logger.warning(f"Address check card render failed: {e}")
+            png = None
+        if breakdown:
+            caption = text
+        else:
+            caption = (
+                f"{ui('search')}  <b>Address Check</b>\n<code>{esc(address)}</code>\n\n"
+                f"{ui('money')}  <b>Total</b>  <code>${esc(f'{total_usd:,.2f}')}</code>"
+            )
+        if errors:
+            caption += f"\n\n<i>Couldn't read: {esc(', '.join(errors[:3]))}</i>"
+        await _send_check_card(update, loading_msg, "balance", caption, text, keyboard, png)
     except Exception as e:
         logger.error(f"Error in check_command (address): {e}")
         await loading_msg.edit_text(

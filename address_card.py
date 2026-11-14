@@ -499,3 +499,87 @@ def render_profile_picture(size: int = 640) -> bytes:
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+_STATUS_STYLES = {
+    "success": ((22, 163, 74), "Confirmed"),
+    "failed": ((220, 38, 38), "Failed"),
+    "pending": ((217, 119, 6), "Pending"),
+}
+
+
+def _short(value: str, head: int = 8, tail: int = 6) -> str:
+    value = value or "Unknown"
+    return value if len(value) <= head + tail + 1 else f"{value[:head]}\u2026{value[-tail:]}"
+
+
+def render_transaction_card(network_name: str, status: str, amount, asset: str, sender: str,
+                            receiver: str, when: str, tx_hash: str, brand: str = None) -> bytes:
+    """Receipt-style card: amount, status, network, from/to, hash and time."""
+    asset = (asset or "").upper()
+    accent = TOKEN_COLORS.get(asset, (98, 126, 234))
+    img, d = _canvas(accent)
+
+    # Coin and amount
+    x0, size = 96, 132
+    if asset:
+        _logo_or_badge(img, d, asset, x0, 100, size)
+    else:
+        d.ellipse([x0, 100, x0 + size, 100 + size], fill=TRACK)
+    tx = x0 + size + 32
+    _spaced(d, (tx, 104), "TRANSACTION", _font("Inter.ttf", 22, b"SemiBold"), MUTED, 5)
+    amount_s = f"{_amount(amount)} {asset}".strip() if amount not in (None, "") else "Unknown amount"
+    try:
+        float(amount)
+    except (TypeError, ValueError):
+        amount_s = f"{amount} {asset}".strip() if amount not in (None, "") else "Unknown amount"
+    d.text((tx - 3, 132), amount_s, font=_fit(d, amount_s, "SpaceGrotesk.ttf", b"Bold", 560, 68, 32), fill=TEXT)
+    pill_font = _font("Inter.ttf", 24, b"Medium")
+    pw = d.textlength(network_name, font=pill_font) + 52
+    d.rounded_rectangle([tx, 218, tx + pw, 258], radius=20, fill=CHIP, outline=accent, width=2)
+    d.ellipse([tx + 16, 232, tx + 28, 244], fill=accent)
+    d.text((tx + 38, 238), network_name, font=pill_font, fill=TEXT, anchor="lm")
+
+    # Status badge
+    key = (status or "").lower()
+    key = "success" if key in ("success", "confirmed") else "failed" if key in ("failed", "fail", "revert", "error") \
+        else "pending" if key in ("pending", "") else None
+    colour, label = _STATUS_STYLES.get(key, ((90, 110, 140), (status or "Unknown").title()))
+    sf = _font("Inter.ttf", 24, b"SemiBold")
+    sw = d.textlength(label, font=sf) + 64
+    sx1 = W - 96
+    tint = tuple(int(c * 0.14 + 255 * 0.86) for c in colour)
+    d.rounded_rectangle([sx1 - sw, 100, sx1, 146], radius=23, fill=tint, outline=colour, width=2)
+    d.ellipse([sx1 - sw + 20, 116, sx1 - sw + 34, 130], fill=colour)
+    d.text((sx1 - sw + 44, 123), label, font=sf, fill=colour, anchor="lm")
+
+    # From / To panel with hash and time
+    px0, py0, px1, py1 = 96, 288, W - 96, 466
+    d.rounded_rectangle([px0, py0, px1, py1], radius=22, fill=PANEL, outline=PANEL_EDGE, width=2)
+    lab = _font("Inter.ttf", 18, b"SemiBold")
+    mono = _font("JetBrainsMono.ttf", 28, b"Medium")
+    mid = (px0 + px1) // 2
+    _spaced(d, (px0 + 30, py0 + 20), "FROM", lab, MUTED, 4)
+    d.text((px0 + 30, py0 + 48), _short(sender), font=mono, fill=TEXT)
+    _spaced(d, (mid + 40, py0 + 20), "TO", lab, MUTED, 4)
+    d.text((mid + 40, py0 + 48), _short(receiver), font=mono, fill=TEXT)
+    ay = py0 + 64
+    d.line([(mid - 22, ay), (mid + 18, ay)], fill=accent, width=4)
+    d.polygon([(mid + 24, ay), (mid + 10, ay - 10), (mid + 10, ay + 10)], fill=accent)
+    d.line([(px0 + 30, py0 + 104), (px1 - 30, py0 + 104)], fill=TRACK, width=2)
+    _spaced(d, (px0 + 30, py0 + 118), "TX HASH", lab, MUTED, 4)
+    d.text((px0 + 30, py0 + 140), _short(tx_hash, 10, 8), font=_font("JetBrainsMono.ttf", 22, b"Medium"), fill=SOFT)
+    _spaced(d, (px1 - 30 - _spaced_width(d, "DATE", lab, 4), py0 + 118), "DATE", lab, MUTED, 4)
+    d.text((px1 - 30, py0 + 140), when or "Unknown", font=_font("Inter.ttf", 22, b"Medium"), fill=SOFT, anchor="ra")
+
+    # Footer
+    fy = 512
+    d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=accent)
+    d.text((x0 + 26, fy), f"On-chain details \u00b7 {network_name}", font=_font("Inter.ttf", 21, b"Medium"),
+           fill=SOFT, anchor="lm")
+    if brand:
+        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
