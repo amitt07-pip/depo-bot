@@ -583,3 +583,64 @@ def render_transaction_card(network_name: str, status: str, amount, asset: str, 
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+def render_breakdown_card(heading: str, address: str, total_usd, rows, brand: str = None,
+                          updated: str = None) -> bytes:
+    """Per-network holdings list. rows: list of (network_name, symbol, amount, usd_value)."""
+    rows = sorted((r for r in rows if float(r[2]) > 0), key=lambda r: float(r[3]), reverse=True)
+    accent = TOKEN_COLORS.get(rows[0][1].upper(), (38, 161, 123)) if rows else (38, 161, 123)
+    img, d = _canvas(accent, glow_box=(-60, -40, 520, 460))
+
+    x0 = 96
+    _spaced(d, (x0, 92), heading.upper(), _font("Inter.ttf", 20, b"SemiBold"), MUTED, 5)
+    d.text((x0, 122), _short(address, 10, 8), font=_font("JetBrainsMono.ttf", 34, b"Medium"), fill=TEXT)
+    right = W - 96
+    lab = _font("Inter.ttf", 20, b"SemiBold")
+    _spaced(d, (right - _spaced_width(d, "TOTAL", lab, 5), 92), "TOTAL", lab, MUTED, 5)
+    total_s = _usd(float(total_usd))
+    d.text((right, 118), total_s, font=_fit(d, total_s, "SpaceGrotesk.ttf", b"Bold", 380, 52, 28),
+           fill=TEXT, anchor="ra")
+
+    px0, py0, px1, py1 = 96, 200, W - 96, 476
+    d.rounded_rectangle([px0, py0, px1, py1], radius=22, fill=PANEL, outline=PANEL_EDGE, width=2)
+    if not rows:
+        d.text(((px0 + px1) / 2, (py0 + py1) / 2 - 14), "No funds on this address",
+               font=_font("Inter.ttf", 28, b"SemiBold"), fill=TEXT, anchor="mm")
+        d.text(((px0 + px1) / 2, (py0 + py1) / 2 + 24), "Every supported network was checked",
+               font=_font("Inter.ttf", 20, b"Regular"), fill=MUTED, anchor="mm")
+    cells = rows[:10]
+    if len(rows) > 10:
+        cells = rows[:9] + [("", "+", len(rows) - 9, sum(float(r[3]) for r in rows[9:]))]
+    col_w = (px1 - px0 - 72) // 2
+    sym_font = _font("Inter.ttf", 22, b"SemiBold")
+    sub_font = _font("Inter.ttf", 17, b"Regular")
+    usd_font = _font("SpaceGrotesk.ttf", 22, b"Bold")
+    for i, (net, sym, amt, usd) in enumerate(cells):
+        cx = px0 + 24 + (i // 5) * (col_w + 24) if len(cells) > 5 else px0 + 24
+        w = col_w if len(cells) > 5 else px1 - px0 - 48
+        cy = py0 + 18 + (i % 5) * 50
+        if i % 5:
+            d.line([(cx, cy - 4), (cx + w, cy - 4)], fill=TRACK, width=1)
+        if sym == "+":
+            d.ellipse([cx, cy + 4, cx + 36, cy + 40], fill=TRACK)
+            d.text((cx + 18, cy + 22), "+", font=_font("Inter.ttf", 22, b"Bold"), fill=TEXT, anchor="mm")
+            d.text((cx + 48, cy + 4), "Others", font=sym_font, fill=TEXT)
+            d.text((cx + 48, cy + 28), f"{amt} more", font=sub_font, fill=MUTED)
+        else:
+            _logo_or_badge(img, d, sym.upper(), cx, cy + 4, 36)
+            d.text((cx + 48, cy + 2), sym, font=sym_font, fill=TEXT)
+            d.text((cx + 48, cy + 28), net, font=sub_font, fill=MUTED)
+            d.text((cx + w, cy + 28), _amount(amt), font=sub_font, fill=MUTED, anchor="ra")
+        d.text((cx + w, cy + 2), _usd(float(usd)), font=usd_font, fill=TEXT, anchor="ra")
+
+    fy = 512
+    d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=accent)
+    foot = "Balance breakdown" + (f"  \u00b7  Updated {updated}" if updated else "")
+    d.text((x0 + 26, fy), foot, font=_font("Inter.ttf", 21, b"Medium"), fill=SOFT, anchor="lm")
+    if brand:
+        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()

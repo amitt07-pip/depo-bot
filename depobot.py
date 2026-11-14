@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 import traceback
 
 from address_card import (render_address_card, render_dashboard_card, render_portfolio_card,
-                          render_transaction_card)
+                          render_transaction_card, render_breakdown_card)
 
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -6747,11 +6747,8 @@ async def _check_transaction(update: Update, networks, tx_hash: str):
     except Exception as e:
         logger.warning(f"Transaction card render failed: {e}")
         png = None
-    caption = (
-        f"{ui('note')}  <b>Transaction</b> \u00b7 {esc(net_info['name'])}\n"
-        f"<code>{esc(h)}</code>"
-    )
-    await _send_check_card(update, loading_msg, "transaction", caption, "".join(lines), keyboard, png)
+    keyboard.insert(0, [ikb("Copy Hash", ui_name="copy", copy_text=CopyTextButton(h), style="success")])
+    await _send_check_card(update, loading_msg, "transaction", "", "".join(lines), keyboard, png)
 
 
 def _bot_brand(bot):
@@ -6770,8 +6767,8 @@ async def _send_check_card(update: Update, old_msg, banner: str, caption: str, t
     sent = await send_rich_screen(bot, chat_id, banner, caption, markup, image=png) if png else None
     if not sent and png and len(caption) <= 1024:
         try:
-            sent = await bot.send_photo(chat_id=chat_id, photo=png, caption=caption,
-                                        parse_mode="HTML", reply_markup=markup)
+            sent = await bot.send_photo(chat_id=chat_id, photo=png, caption=caption or None,
+                                        parse_mode="HTML" if caption else None, reply_markup=markup)
         except Exception as e:
             logger.warning(f"Card photo failed, sending text: {e}")
     if sent:
@@ -6987,25 +6984,27 @@ async def _check_address(update: Update, address: str, detected, message=None, b
         nets = detected if isinstance(detected, list) else [detected]
         chips = [NETWORKS.get(nets[0], {}).get("name", nets[0]) if len(nets) == 1 else f"{len(nets)} networks",
                  f"{len(holdings)} asset{'s' if len(holdings) != 1 else ''}"]
+        brand = _bot_brand(update.get_bot())
+        updated = time.strftime("%H:%M UTC", time.gmtime())
         try:
-            png = await asyncio.to_thread(
-                render_portfolio_card, f"Address {address[:6]}\u2026{address[-4:]}", total_usd, holdings,
-                chips, _bot_brand(update.get_bot()), time.strftime("%H:%M UTC", time.gmtime()), top,
-                "This address holds no funds"
-            )
+            if breakdown:
+                png = await asyncio.to_thread(
+                    render_breakdown_card, "Balance breakdown", address, total_usd,
+                    [(e["network_name"], e["token"], e["balance"], e["usd_value"]) for e in balances],
+                    brand, updated
+                )
+            else:
+                png = await asyncio.to_thread(
+                    render_portfolio_card, f"Address {address[:6]}\u2026{address[-4:]}", total_usd, holdings,
+                    chips, brand, updated, top, "This address holds no funds"
+                )
         except Exception as e:
             logger.warning(f"Address check card render failed: {e}")
             png = None
-        if breakdown:
-            caption = text
-        else:
-            caption = (
-                f"{ui('search')}  <b>Address Check</b>\n<code>{esc(address)}</code>\n\n"
-                f"{ui('money')}  <b>Total</b>  <code>${esc(f'{total_usd:,.2f}')}</code>"
-            )
         if errors:
-            caption += f"\n\n<i>Couldn't read: {esc(', '.join(errors[:3]))}</i>"
-        await _send_check_card(update, loading_msg, "balance", caption, text, keyboard, png)
+            logger.info(f"Address check partial errors for {address}: {errors}")
+        keyboard.insert(0, [copy_address_button(address)])
+        await _send_check_card(update, loading_msg, "balance", "", text, keyboard, png)
     except Exception as e:
         logger.error(f"Error in check_command (address): {e}")
         await loading_msg.edit_text(
