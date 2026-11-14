@@ -12,7 +12,7 @@ import address_card as ac  # noqa: E402
 OUT = os.path.join(ROOT, "assets", "brand")
 GW, GH = 640, 360
 ACCENT = ac.BANNER_ACCENTS["welcome"]
-SYMS = ["BTC", "ETH", "USDT", "SOL", "BNB", "TON"]
+FEATURES = [("deposit", "Deposit"), ("withdraw", "Withdraw"), ("convert", "Swap"), ("balance", "Balance")]
 
 
 def ease(t):
@@ -55,31 +55,38 @@ def frame(i, n, base, tile, logos):
     if q > 0:
         col = tuple(int(ac.BG[k] + (ac.SOFT[k] - ac.BG[k]) * q) for k in range(3))
         d.text((266, 216), "Secure Multi-Chain Wallet", font=ac._font("Inter.ttf", 24, b"Medium"), fill=col)
-    # Token logos rise in one by one, then bob in a wave
-    for k, logo in enumerate(logos):
-        r = ease((t - 0.34 - k * 0.05) / 0.15)
-        if r <= 0:
-            continue
-        x = 168 + k * 54
-        y = int(296 + (1 - r) * 24 + math.sin(2 * math.pi * (t * 2 - k / 6)) * 3 * r)
-        lg = logo.copy()
-        lg.putalpha(lg.getchannel("A").point(lambda v: int(v * r)))
-        img.paste(lg, (x, y - 21), lg)
+    # Feature chips rise in one by one, then bob in a wave
+    gap = 12
+    x = (GW - sum(c.width for c in logos) - gap * (len(logos) - 1)) // 2
+    for k, chip in enumerate(logos):
+        r = ease((t - 0.34 - k * 0.07) / 0.15)
+        if r > 0:
+            y = int(296 + (1 - r) * 24 + math.sin(2 * math.pi * (t * 2 - k / 4)) * 2 * r)
+            ch = chip.copy()
+            ch.putalpha(ch.getchannel("A").point(lambda v: int(v * r)))
+            img.paste(ch, (x, y - chip.height // 2), ch)
+        x += chip.width + gap
     d.text((GW - 22, GH - 18), "@UseVexBot", font=ac._font("Inter.ttf", 16, b"Bold"), fill=ac.TEXT, anchor="rm")
     return img
+
+
+def feature_chip(name, label):
+    font = ac._font("Inter.ttf", 17, b"SemiBold")
+    w = int(ImageDraw.Draw(Image.new("L", (1, 1))).textlength(label, font=font)) + 64
+    chip = Image.new("RGBA", (w, 44), (0, 0, 0, 0))
+    d = ImageDraw.Draw(chip)
+    d.rounded_rectangle([0, 0, w - 1, 43], radius=22, fill=ac.PANEL + (255,), outline=ac.PANEL_EDGE + (255,), width=2)
+    accent = ac.BANNER_ACCENTS.get(name, ACCENT)
+    icon = ac._glyph_tile(name, 30, accent)
+    chip.paste(icon, (7, 7), icon if icon.mode == "RGBA" else None)
+    d.text((44, 22), label, font=font, fill=ac.TEXT + (255,), anchor="lm")
+    return chip
 
 
 def make_gif(path, n=48, ms=70):
     base = backdrop()
     tile = ac._glyph_tile("welcome", 150, ACCENT)
-    logos = []
-    for sym in SYMS:
-        ring = Image.new("RGBA", (42, 42), (0, 0, 0, 0))
-        ImageDraw.Draw(ring).ellipse([0, 0, 41, 41], fill=(255, 255, 255, 255))
-        lg = ac._token_logo(sym, 36)
-        if lg is not None:
-            ring.paste(lg, (3, 3), lg)
-        logos.append(ring)
+    logos = [feature_chip(name, label) for name, label in FEATURES]
     frames = [frame(i, n, base, tile, logos) for i in range(n)]
     hold = [frames[-1]] * 0
     pal = frames[-1].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
