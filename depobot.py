@@ -80,7 +80,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
-from address_card import render_address_card
+from address_card import render_address_card, render_dashboard_card
 
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -577,15 +577,16 @@ def address_card_spec(symbol, network_name, address, balance=None, title="DEPOSI
 
 
 async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
-                           parse_mode: str = "HTML", qr: str = None, card: dict = None):
+                           parse_mode: str = "HTML", qr: str = None, card: dict = None,
+                           image: bytes = None):
     """Send a screen as a rich message. Returns the Message, or None so the
     caller falls back to the classic photo + inline keyboard."""
     if not RICH_MESSAGES_ENABLED or time.time() < _RICH_STATE["retry_after"]:
         return None
     caption_html = tg_html(caption) if parse_mode == "Markdown" else caption
     banner_path = get_banner_path(banner_name) if banner_name else None
-    card_png = None
-    if card:
+    card_png = image
+    if card and not card_png:
         try:
             brand = f"@{bot.username}" if getattr(bot, "username", None) else None
         except Exception:
@@ -611,7 +612,7 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
     media = []
     if card_png:
         media.append({"id": "banner", "media": {"type": "photo", "media": "attach://banner"}})
-        form.add_field("banner", card_png, filename="address_card.png", content_type="image/png")
+        form.add_field("banner", card_png, filename="card.png", content_type="image/png")
     elif use_banner:
         cached = _RICH_BANNER_FILE_IDS.get(banner_name)
         media.append({"id": "banner", "media": {"type": "photo", "media": cached or "attach://banner"}})
@@ -657,10 +658,12 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
 
 
 async def replace_with_rich(query, banner_name, caption, keyboard,
-                            parse_mode: str = "HTML", qr: str = None, card: dict = None):
+                            parse_mode: str = "HTML", qr: str = None, card: dict = None,
+                            image: bytes = None):
     """Send the screen as a new rich message, then remove the old one."""
     msg = await send_rich_screen(
-        query.get_bot(), query.message.chat_id, banner_name, caption, keyboard, parse_mode, qr, card
+        query.get_bot(), query.message.chat_id, banner_name, caption, keyboard, parse_mode, qr, card,
+        image
     )
     if msg:
         try:
@@ -1588,6 +1591,7 @@ COINGECKO_IDS = {
     "SOL": "solana",
     "TRX": "tron",
     "LTC": "litecoin",
+    "BTC": "bitcoin",
     "TON": "the-open-network",
     "USDT": "tether",
     "USDC": "usd-coin",
@@ -1607,6 +1611,7 @@ class PriceFetcher:
         "SOL": Decimal("180"),
         "TRX": Decimal("0.12"),
         "LTC": Decimal("100"),
+        "BTC": Decimal("95000"),
         "TON": Decimal("5"),
         "USDT": Decimal("1.0"),
         "USDC": Decimal("1.0"),
@@ -1646,6 +1651,43 @@ class PriceFetcher:
         
         # Return fallback price if API fails
         return PriceFetcher.FALLBACK_PRICES.get(asset, Decimal("0"))
+
+    @staticmethod
+    async def get_prices(assets) -> dict:
+        """USD prices for several assets with one CoinGecko request (cached)."""
+        now = time.time()
+        prices, missing = {}, []
+        for asset in set(assets):
+            cached = PriceFetcher._price_cache.get(asset)
+            if asset in ("USDT", "USDC"):
+                prices[asset] = Decimal("1.0")
+            elif cached and now - cached[1] < PriceFetcher._cache_ttl:
+                prices[asset] = cached[0]
+            elif COINGECKO_IDS.get(asset):
+                missing.append(asset)
+            else:
+                prices[asset] = PriceFetcher.FALLBACK_PRICES.get(asset, Decimal("0"))
+        if missing:
+            ids = ",".join(COINGECKO_IDS[a] for a in missing)
+            data = {}
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.coingecko.com/api/v3/simple/price",
+                        params={"ids": ids, "vs_currencies": "usd"}, timeout=aiohttp.ClientTimeout(total=6)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+            except Exception as e:
+                logger.warning(f"CoinGecko batch price error: {e}")
+            for asset in missing:
+                price = data.get(COINGECKO_IDS[asset], {}).get("usd") or 0
+                if price > 0:
+                    prices[asset] = Decimal(str(price))
+                    PriceFetcher._price_cache[asset] = (prices[asset], now)
+                else:
+                    prices[asset] = PriceFetcher.FALLBACK_PRICES.get(asset, Decimal("0"))
+        return prices
 
     @staticmethod
     async def get_conversion_rate(from_asset: str, to_asset: str) -> Decimal:
@@ -5272,6 +5314,55 @@ def build_main_menu_text(user_id: int) -> str:
     return menu_text
 
 
+async def build_dashboard(user_id: int, name: str, bot=None):
+    """Caption and dashboard image (PNG bytes, or None if rendering fails) for /start.
+    Uses the on-chain balances the deposit monitor keeps in wallet_balances_cache,
+    falling back to the internal ledger for wallets it has not scanned yet."""
+    wallets = db.get_all_wallets(user_id) or []
+    amounts = {}
+    scanned = set()
+    prefix = f"{user_id}:"
+    for key, value in list(wallet_balances_cache.items()):
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        try:
+            _, network, _, asset = key.split(":", 3)
+            amount = Decimal(str(value))
+        except Exception:
+            continue
+        scanned.add(network)
+        symbol = NETWORKS.get(network, {}).get("symbol", network) if asset == "NATIVE" else asset
+        amounts[symbol] = amounts.get(symbol, Decimal("0")) + amount
+    if not scanned and wallets:
+        for asset, balance in (db.get_all_internal_balances(user_id) or {}).items():
+            amounts[asset] = amounts.get(asset, Decimal("0")) + Decimal(str(balance))
+    amounts = {k: v for k, v in amounts.items() if v > 0}
+
+    prices = await PriceFetcher.get_prices(amounts) if amounts else {}
+    holdings = [(sym, amt, amt * prices.get(sym, Decimal("0"))) for sym, amt in amounts.items()]
+    total = sum((h[2] for h in holdings), Decimal("0"))
+
+    caption = (
+        f"{h_html('portfolio', 'Dashboard')}\n\n"
+        f"{ui('cash')}  <b>Total</b>   <code>${total:,.2f}</code>   "
+        f"{ui('wallet')}  <b>Wallets</b>   <code>{len(wallets)}</code>"
+    )
+    brand = None
+    try:
+        brand = f"@{bot.username}" if bot is not None and bot.username else None
+    except Exception:
+        pass
+    try:
+        png = await asyncio.to_thread(
+            render_dashboard_card, name, total, holdings, len(wallets), brand,
+            time.strftime("%H:%M UTC", time.gmtime())
+        )
+    except Exception as e:
+        logger.warning(f"Dashboard render failed: {e}")
+        png = None
+    return caption, png
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "User"
@@ -5289,15 +5380,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.add_authorized_user(user_id=user_id, username=username)
         load_authorized_users()
 
-    menu_text = build_main_menu_text(user_id)
+    menu_text, dash_png = await build_dashboard(user_id, user_name, context.bot)
 
     if await send_rich_screen(
-        context.bot, update.effective_chat.id, "welcome", menu_text, get_main_menu_keyboard()
+        context.bot, update.effective_chat.id, "welcome", menu_text, get_main_menu_keyboard(),
+        image=dash_png
     ):
         return
 
     banner_path = get_banner_path("welcome")
-    if os.path.exists(banner_path):
+    if dash_png:
+        await update.message.reply_photo(
+            photo=dash_png, caption=menu_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard()
+        )
+    elif os.path.exists(banner_path):
         with open(banner_path, "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
@@ -6783,11 +6879,24 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del pending_withdrawals[user_id]
     context.user_data.clear()
 
-    menu_text = build_main_menu_text(user_id)
+    menu_text, dash_png = await build_dashboard(user_id, query.from_user.first_name or "", context.bot)
 
-    await send_new_message_with_banner(
-        query, "welcome", menu_text, get_main_menu_keyboard(), parse_mode="HTML", rich=True
-    )
+    if dash_png:
+        if not await replace_with_rich(
+            query, "welcome", menu_text, get_main_menu_keyboard(), "HTML", image=dash_png
+        ):
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.get_bot().send_photo(
+                chat_id=query.message.chat_id, photo=dash_png, caption=menu_text,
+                parse_mode="HTML", reply_markup=get_main_menu_keyboard()
+            )
+    else:
+        await send_new_message_with_banner(
+            query, "welcome", menu_text, get_main_menu_keyboard(), parse_mode="HTML", rich=True
+        )
     
     return ConversationHandler.END
 
