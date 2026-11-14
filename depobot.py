@@ -6206,6 +6206,10 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if context.args:
+        await run_check(update, context.args[0].strip())
+        return ConversationHandler.END
+
     chat_id = update.message.chat_id
     network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
     networks_str = ", ".join(network_names)
@@ -6667,8 +6671,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
         "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
-        "<code>/check &lt;address&gt;</code>  <i>All token balances</i>\n"
-        "<code>/check &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
+        "<code>/balance &lt;address&gt;</code>  <i>All token balances</i>\n"
+        "<code>/balance &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
         f"{h_html('withdraw', 'Withdrawals')}\n"
         "<code>/withdraw</code>  <i>Send funds to an external wallet</i>\n\n"
         f"{h_html('convert', 'Convert')}\n"
@@ -7027,19 +7031,22 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         await update.message.reply_text(
-            "\u26a0\ufe0f *Usage:* `/check <address | tx hash | tx link>`\n\n"
+            "\u26a0\ufe0f *Usage:* `/balance <address | tx hash | tx link>`\n\n"
             "Examples:\n"
-            "`/check 0x1234...` \u2013 Address balance (ETH/BSC/Polygon)\n"
-            "`/check T1234...` \u2013 Tron address balance\n"
-            "`/check EQ...` or `/check UQ...` \u2013 TON address balance\n"
-            "`/check 0xabc...<64 hex>` \u2013 Transaction details\n"
-            "`/check https://bscscan.com/tx/0x...` \u2013 Transaction details",
+            "`/balance 0x1234...` \u2013 Address balance (ETH/BSC/Polygon)\n"
+            "`/balance T1234...` \u2013 Tron address balance\n"
+            "`/balance EQ...` or `/balance UQ...` \u2013 TON address balance\n"
+            "`/balance 0xabc...<64 hex>` \u2013 Transaction details\n"
+            "`/balance https://bscscan.com/tx/0x...` \u2013 Transaction details",
             parse_mode="Markdown"
         )
         return
 
-    query = args[0].strip()
+    await run_check(update, args[0].strip())
 
+
+async def run_check(update: Update, query: str):
+    """Address balances or transaction details for an address / tx hash / explorer link."""
     link = parse_explorer_link(query)
     if link:
         kind, link_network, value = link
@@ -10107,8 +10114,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
         "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
-        "<code>/check &lt;address&gt;</code>  <i>All token balances</i>\n"
-        "<code>/check &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
+        "<code>/balance &lt;address&gt;</code>  <i>All token balances</i>\n"
+        "<code>/balance &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
         f"{h_html('withdraw', 'Withdrawals')}\n"
         "<code>/withdraw</code>  <i>Send funds to an external wallet</i>\n\n"
         f"{h_html('convert', 'Convert')}\n"
