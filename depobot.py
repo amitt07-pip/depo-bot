@@ -905,6 +905,13 @@ async def send_new_message_with_banner(query, banner_name: str, caption: str, re
         )
 
 
+async def send_screen(bot, chat_id, banner, caption, parse_mode: str = "Markdown", reply_markup=None):
+    """Rich message with in-text buttons, or the classic banner photo if rich fails."""
+    return await send_rich_screen(bot, chat_id, banner, caption, reply_markup, parse_mode) or \
+        await bot.send_photo(chat_id=chat_id, photo=open(get_banner_path(banner), "rb"),
+                             caption=caption, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
 async def edit_message_with_banner(
     query, banner_name: str, caption: str, reply_markup, parse_mode: str = "Markdown",
     rich: bool = False
@@ -2128,7 +2135,28 @@ class WalletDatabase:
         query += " ORDER BY uses DESC, last_used DESC LIMIT ?"
         args.append(limit)
         cursor.execute(query, args)
-        rows = cursor.fetchall()
+        rows = [tuple(r) for r in cursor.fetchall()]
+        if len(rows) < limit:
+            # Fill in from past deposits/withdrawals recorded in the ledger
+            query = (
+                "SELECT asset, network FROM ledger WHERE user_id = ? AND tx_type = ? "
+                "AND network IS NOT NULL AND network != 'ALL'"
+            )
+            args = [user_id, {"dep": "deposit", "wd": "withdraw"}.get(action, action)]
+            if token:
+                query += " AND asset = ?"
+                args.append(token)
+            query += " GROUP BY asset, network ORDER BY COUNT(*) DESC, MAX(id) DESC"
+            try:
+                cursor.execute(query, args)
+                history = cursor.fetchall()
+            except sqlite3.OperationalError:
+                history = []
+            for row in history:
+                if len(rows) >= limit:
+                    break
+                if tuple(row) not in rows:
+                    rows.append(tuple(row))
         conn.close()
         return rows
 
@@ -7979,9 +8007,8 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
     token = detect_token_from_text(text)
 
     if not token:
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("deposit"), "rb"),
+        msg = await send_screen(
+            context.bot, chat_id, "deposit",
             caption=(
                 "\u26a0\ufe0f *Token Not Recognized*\n\n"
                 f"I couldn't understand which token you want to deposit.\n\n"
@@ -8008,9 +8035,8 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
     network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
     networks_str = ", ".join(network_names)
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("deposit"), "rb"),
+    msg = await send_screen(
+        context.bot, chat_id, "deposit",
         caption=(
             f"\U0001F4E5 *Deposit {token}*\n\n"
             f"Which network?\n\n"
@@ -8051,9 +8077,8 @@ async def receive_deposit_network(update: Update, context: ContextTypes.DEFAULT_
     if not network or network not in available_networks:
         network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
         networks_str = ", ".join(network_names)
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("deposit"), "rb"),
+        msg = await send_screen(
+            context.bot, chat_id, "deposit",
             caption=(
                 f"\u26a0\ufe0f *Network Not Recognized*\n\n"
                 f"I couldn't understand which network you want to use for {token}.\n\n"
@@ -9104,9 +9129,8 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
     token = detect_token_from_text(text)
 
     if not token:
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("withdraw"), "rb"),
+        msg = await send_screen(
+            context.bot, chat_id, "withdraw",
             caption=(
                 "\u26a0\ufe0f *Token Not Recognized*\n\n"
                 f"I couldn't understand which token you want to withdraw.\n\n"
@@ -9132,9 +9156,8 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
     network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
     networks_str = ", ".join(network_names)
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("withdraw"), "rb"),
+    msg = await send_screen(
+        context.bot, chat_id, "withdraw",
         caption=(
             f"\U0001F4E4 *Withdraw {token}*\n\n"
             f"Which network?\n\n"
@@ -9175,9 +9198,8 @@ async def receive_withdraw_network(update: Update, context: ContextTypes.DEFAULT
     if not network or network not in available_networks:
         network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
         networks_str = ", ".join(network_names)
-        msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("withdraw"), "rb"),
+        msg = await send_screen(
+            context.bot, chat_id, "withdraw",
             caption=(
                 f"\u26a0\ufe0f *Network Not Recognized*\n\n"
                 f"I couldn't understand which network you want to use for {token}.\n\n"
