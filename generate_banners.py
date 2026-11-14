@@ -158,7 +158,7 @@ def create_banner(title, subtitle, filename, accent_color, gradient_colors, extr
     tagline = ""
     draw.text((70, height - 65), tagline, font=tagline_font, fill=accent_color)
     
-    handle = "@VMDepoBot"
+    handle = "@UseVexBot"
     handle_bbox = draw.textbbox((0, 0), handle, font=handle_font)
     handle_width = handle_bbox[2] - handle_bbox[0]
     draw.text((width - handle_width - 70, height - 65), handle, font=handle_font, fill=accent_color)
@@ -176,7 +176,7 @@ welcome_info = [
 ]
 
 banners = [
-    ("VM DEPO BOT 2.0", "Secure Crypto Wallet", "welcome.png", 
+    ("VEX", "Secure Crypto Wallet", "welcome.png", 
      (99, 102, 241), [(10, 10, 30), (20, 20, 50), (30, 25, 60)], welcome_info),
     
     ("BALANCE", "View Your Assets", "balance.png", 
@@ -257,7 +257,7 @@ def create_profile_picture():
     
     draw.text((text_x, text_y), text, font=title_font, fill=(255, 255, 255))
     
-    subtitle = "DEPO BOT"
+    subtitle = "VEX"
     sub_bbox = draw.textbbox((0, 0), subtitle, font=subtitle_font)
     sub_width = sub_bbox[2] - sub_bbox[0]
     sub_x = (size - sub_width) // 2

@@ -6212,7 +6212,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     help_text = (
-        f"{h_html('help', 'VM Depo Bot 2.0')}\n"
+        f"{h_html('help', 'Vex')}\n"
         "<i>Help Center</i>\n\n"
         f"{h_html('home', 'Navigation')}\n"
         "<code>/start</code> or <code>/menu</code>\n"
@@ -9631,7 +9631,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     help_text = (
-        f"{h_html('help', 'VM Depo Bot 2.0')}\n"
+        f"{h_html('help', 'Vex')}\n"
         "<i>Help Center</i>\n\n"
         f"{h_html('home', 'Navigation')}\n"
         "<code>/start</code> or <code>/menu</code>\n"
@@ -11934,7 +11934,7 @@ def main():
     # Add global error handler to prevent bot from dying
     application.add_error_handler(error_handler)
 
-    logger.info("Starting Depo Bot with enhanced UI...")
+    logger.info("Starting Vex bot with enhanced UI...")
     application.run_polling(
         allowed_updates=["message", "callback_query", "my_chat_member"],
         drop_pending_updates=True

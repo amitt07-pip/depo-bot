@@ -1,4 +1,4 @@
-"""Generate the black & white VM CRYPTO BOT banners in assets/.
+"""Generate the black & white Vex banners in assets/.
 
 Produces welcome.png (dashboard), logo.png and one banner per bot section.
 """
@@ -19,7 +19,7 @@ WHITE = (255, 255, 255, 255)
 GREY = (200, 200, 200, 255)
 DIM = (140, 140, 140, 255)
 
-HANDLE = "@VM_CryptoBOT"
+HANDLE = "@UseVexBot"
 
 SECTION_BANNERS = {
     "balance": ("BALANCE", "Your Assets"),
@@ -31,7 +31,7 @@ SECTION_BANNERS = {
     "tokens": ("TOKENS", "Supported Assets"),
     "transaction": ("TRANSACTION", "Details"),
     "wallets": ("WALLETS", "Your Addresses"),
-    "welcome_public": ("VM CRYPTO BOT", "Secure Multi-Chain Wallet"),
+    "welcome_public": ("VEX", "Secure Multi-Chain Wallet"),
     "withdraw": ("WITHDRAW", "Send Crypto"),
 }
 
@@ -145,11 +145,11 @@ def make_dashboard():
     img.crop(logo_box).save(os.path.join(ASSETS, "logo.png"), "PNG", optimize=True)
 
     d = ImageDraw.Draw(img, "RGBA")
-    tx, ty = 330, 205
-    d.text((tx, ty), "VM CRYPTO BOT", font=font(FONT_BOLD, 84), fill=WHITE)
-    d.rounded_rectangle((tx, ty + 104, tx + 300, ty + 110), radius=3, fill=WHITE)
-    d.rounded_rectangle((tx + 312, ty + 104, tx + 360, ty + 110), radius=3, fill=DIM)
-    d.text((tx, ty + 130), "Secure Multi-Chain Wallet", font=font(FONT_REG, 34), fill=GREY)
+    tx, ty = 330, 175
+    d.text((tx, ty), "VEX", font=font(FONT_BOLD, 120), fill=WHITE)
+    d.rounded_rectangle((tx, ty + 150, tx + 300, ty + 156), radius=3, fill=WHITE)
+    d.rounded_rectangle((tx + 312, ty + 150, tx + 360, ty + 156), radius=3, fill=DIM)
+    d.text((tx, ty + 176), "Secure Multi-Chain Wallet", font=font(FONT_REG, 34), fill=GREY)
 
     footer(img, card)
     out = os.path.join(ASSETS, "welcome.png")
@@ -168,10 +168,11 @@ def make_section(name, title, subtitle):
     d = ImageDraw.Draw(img, "RGBA")
     f_title = font(FONT_BOLD, 64 if len(title) <= 11 else 52)
     tw = d.textlength(title, font=f_title)
-    tx = 230 + (W - 40 - 230 - tw) / 2
+    f_sub = font(FONT_REG, 28)
+    sw = d.textlength(subtitle, font=f_sub)
+    tx = 230 + (W - 40 - 230 - max(tw, sw)) / 2
     d.text((tx, 130), title, font=f_title, fill=WHITE)
     d.rounded_rectangle((tx, 208, tx + min(tw, 160), 213), radius=2, fill=WHITE)
-    f_sub = font(FONT_REG, 28)
     d.text((tx, 228), subtitle, font=f_sub, fill=GREY)
 
     footer(img, card)
