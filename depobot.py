@@ -2006,23 +2006,39 @@ class WalletDatabase:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        self._link_opbnb_wallets(cursor)
+        self._link_evm_wallets(cursor)
         conn.commit()
         conn.close()
 
+    EVM_PRIORITY = ("BSC", "ETH", "POLYGON", "OPBNB")
+
     @staticmethod
-    def _link_opbnb_wallets(cursor, user_id: int = None):
-        """opBNB uses the same EVM key format: reuse the user's BSC (or ETH/Polygon) wallet."""
-        for source in ("BSC", "ETH", "POLYGON"):
-            cursor.execute(
-                "INSERT OR IGNORE INTO wallets "
-                "(user_id, network, address, encrypted_private_key, interface_id) "
-                "SELECT user_id, 'OPBNB', address, encrypted_private_key, interface_id "
-                "FROM wallets w WHERE w.network = ? AND (? IS NULL OR w.user_id = ?) "
-                "AND NOT EXISTS (SELECT 1 FROM wallets o "
-                "WHERE o.user_id = w.user_id AND o.network = 'OPBNB')",
-                (source, user_id, user_id)
-            )
+    def _link_evm_wallets(cursor, user_id: int = None):
+        """One EVM key per user: give every EVM network the user is missing the
+        address of their existing EVM wallet (BSC first, then ETH, Polygon, opBNB)."""
+        evm = [n for n, i in NETWORKS.items() if i.get("type") == "evm"]
+        sources = [n for n in WalletDatabase.EVM_PRIORITY if n in evm] + [n for n in evm if n not in WalletDatabase.EVM_PRIORITY]
+        for target in evm:
+            for source in sources:
+                if source == target:
+                    continue
+                cursor.execute(
+                    "INSERT OR IGNORE INTO wallets "
+                    "(user_id, network, address, encrypted_private_key, interface_id) "
+                    "SELECT user_id, ?, address, encrypted_private_key, interface_id "
+                    "FROM wallets w WHERE w.network = ? AND (? IS NULL OR w.user_id = ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM wallets o "
+                    "WHERE o.user_id = w.user_id AND o.network = ?)",
+                    (target, source, user_id, user_id, target)
+                )
+
+    def get_evm_wallet(self, user_id: int) -> Optional[dict]:
+        """The user's EVM wallet (any EVM network, BSC preferred), or None."""
+        for network in self.EVM_PRIORITY + tuple(n for n, i in NETWORKS.items() if i.get("type") == "evm"):
+            wallet = self.get_wallet(user_id, network)
+            if wallet:
+                return wallet
+        return None
 
     def save_swap(self, shift_id: str, user_id: int, from_asset: str,
                   from_network: str, to_asset: str, to_network: str,
@@ -2126,6 +2142,8 @@ class WalletDatabase:
         address: str,
         encrypted_private_key: str
     ):
+        is_evm = NETWORKS.get(network, {}).get("type") == "evm"
+        old = self.get_wallet(user_id, network) if is_evm else None
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
@@ -2134,8 +2152,16 @@ class WalletDatabase:
             "VALUES (?, ?, ?, ?)",
             (user_id, network, address, encrypted_private_key)
         )
-        if network in ("BSC", "ETH", "POLYGON"):
-            self._link_opbnb_wallets(cursor, user_id)
+        if is_evm:
+            if old and old["address"].lower() != address.lower():
+                # Replacing the shared EVM address: move the linked networks along with it.
+                evm = [n for n, i in NETWORKS.items() if i.get("type") == "evm"]
+                cursor.execute(
+                    "UPDATE wallets SET address = ?, encrypted_private_key = ? "
+                    f"WHERE user_id = ? AND LOWER(address) = LOWER(?) AND network IN ({','.join('?' for _ in evm)})",
+                    (address, encrypted_private_key, user_id, old["address"], *evm)
+                )
+            self._link_evm_wallets(cursor, user_id)
         conn.commit()
         conn.close()
 
@@ -2570,6 +2596,16 @@ class WalletGenerator:
     def btc_address_from_private_key(private_key_hex: str) -> str:
         public_key = WalletGenerator._uncompressed_public_key(private_key_hex)
         return WalletGenerator._p2pkh_address(public_key, b'\x00')
+
+    @staticmethod
+    def wallet_for_user(user_id: int, network: str) -> tuple:
+        """(address, private_key or None). A user's EVM networks share one key, so a
+        new EVM network reuses their existing EVM wallet (private_key None = already stored)."""
+        if NETWORKS.get(network, {}).get("type") == "evm" and not db.get_wallet(user_id, network):
+            shared = db.get_evm_wallet(user_id)
+            if shared:
+                return shared["address"], None
+        return WalletGenerator.generate_wallet(network)
 
     @staticmethod
     def generate_wallet(network: str) -> tuple:
@@ -7557,6 +7593,17 @@ async def confirm_generate_ai(update: Update, context: ContextTypes.DEFAULT_TYPE
     return await do_generate_wallet_ai(update, context, chat_id, network, user_id)
 
 
+def evm_network_names() -> str:
+    names = [i["name"] for i in NETWORKS.values() if i.get("type") == "evm"]
+    return ", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else "".join(names)
+
+
+def evm_shared_note(network: str) -> str:
+    if NETWORKS.get(network, {}).get("type") != "evm":
+        return ""
+    return f"\n\n_Same address on {evm_network_names()}._"
+
+
 async def do_generate_wallet_ai(update, context, chat_id: int, network: str, user_id: int):
     """Generate wallet using AI conversational flow."""
     info = NETWORKS[network]
@@ -7570,10 +7617,13 @@ async def do_generate_wallet_ai(update, context, chat_id: int, network: str, use
     )
 
     try:
-        address, private_key = WalletGenerator.generate_wallet(network)
-        encrypted_key = CryptoUtils.encrypt_private_key(private_key)
-        db.save_wallet(user_id, network, address, encrypted_key)
+        address, private_key = WalletGenerator.wallet_for_user(user_id, network)
+        if private_key is None:
+            db.save_wallet(user_id, network, address, db.get_evm_wallet(user_id)["encrypted_private_key"])
+        else:
+            db.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(private_key))
         logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
+        shared_note = evm_shared_note(network)
 
         keyboard = [
             [
@@ -7588,7 +7638,7 @@ async def do_generate_wallet_ai(update, context, chat_id: int, network: str, use
             caption=(
                 f"\u2705 *Wallet Generated!*\n\n"
                 f"*Network:* {info['name']}\n"
-                f"*Address:*\n`{address}`"
+                f"*Address:*\n`{address}`{shared_note}"
             ),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -7633,6 +7683,11 @@ async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"You already have a {info['name']} wallet.\n"
             f"Generating new will replace it."
         )
+        if info.get("type") == "evm":
+            text += (
+                f"\n\nYour EVM address is shared, so it also changes on "
+                f"{evm_network_names()}. Move any funds off the old address first."
+            )
         await edit_message_with_banner(
             query, "generate", text, InlineKeyboardMarkup(keyboard)
         )
@@ -7665,10 +7720,13 @@ async def do_generate_wallet(query, network: str, user_id: int):
     )
 
     try:
-        address, private_key = WalletGenerator.generate_wallet(network)
-        encrypted_key = CryptoUtils.encrypt_private_key(private_key)
-        db.save_wallet(user_id, network, address, encrypted_key)
+        address, private_key = WalletGenerator.wallet_for_user(user_id, network)
+        if private_key is None:
+            db.save_wallet(user_id, network, address, db.get_evm_wallet(user_id)["encrypted_private_key"])
+        else:
+            db.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(private_key))
         logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
+        shared_note = evm_shared_note(network)
 
         keyboard = [
             [
@@ -7686,7 +7744,7 @@ async def do_generate_wallet(query, network: str, user_id: int):
         text = (
             f"*Wallet Generated!*\n\n"
             f"*Network:* {info['name']}\n"
-            f"*Address:*\n`{address}`"
+            f"*Address:*\n`{address}`{shared_note}"
         )
         await edit_message_with_banner(
             query, "generate", text, InlineKeyboardMarkup(keyboard)
