@@ -5983,82 +5983,19 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    if not args:
-        usage_text = (
-            f"{h_html('deposit', 'Send Command')}\n\n"
-            f"{ui('note')}  <b>Format:</b> <code>/send &lt;token&gt; [network]</code>\n\n"
-            f"{ui('idea')}  <b>Examples:</b>\n"
-            "    <code>/send USDT BSC</code>\n"
-            "    <code>/send USDC ETH</code>\n"
-            "    <code>/send ETH</code>\n"
-            "    <code>/send BNB</code>\n"
-            "    <code>/send SOL</code>\n"
-            "    <code>/send TRX</code>\n"
-            "    <code>/send LTC</code>\n"
-            "    <code>/send TON</code>\n\n"
-            "<i>Network is auto-detected for single-network tokens</i>\n\n"
-            f"{ui('coin')}  <b>Available Tokens:</b>\n"
-            "    ETH, BNB, MATIC, SOL, TRX, LTC, TON, USDT, USDC\n\n"
-            f"{ui('explorer')}  <b>Available Networks:</b>\n"
-            "    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC, BTC, TON"
-        )
-        await update.message.reply_text(usage_text, parse_mode="HTML")
-        return
-
-    token = detect_token_from_text(args[0])
-    if not token:
-        token = args[0].upper()
-
-    if len(args) >= 2:
-        network = detect_network_from_text(args[1])
-        if not network:
-            network = args[1].upper()
+    if is_admin(user_id):
+        await update.message.reply_text("Usage: `/send <chat_id> <message>`", parse_mode="Markdown")
     else:
-        available = get_available_networks_for_token(token)
-        if len(available) == 1:
-            network = available[0]
-        else:
-            networks_str = ", ".join(available) if available else "N/A"
-            await update.message.reply_text(
-                f"\U0001F4E4 *Send {token}*\n\n"
-                f"Multiple networks available: `{networks_str}`\n\n"
-                f"Please specify: `/send {token} <network>`",
-                parse_mode="Markdown"
-            )
-            return
-
-    if network not in NETWORKS:
         await update.message.reply_text(
-            f"\u274C *Invalid Network*\n\n"
-            f"Network `{network}` is not supported.\n\n"
-            f"\U0001F310 *Available Networks:*\n"
-            f"    ETH, BSC, OPBNB, POLYGON, SOLANA, TRON, LTC, BTC, TON",
+            "Use `/deposit <token> [network]` for a deposit address, e.g. `/deposit USDT BSC`.",
             parse_mode="Markdown"
         )
-        return
 
-    if token not in TOKENS:
-        await update.message.reply_text(
-            f"\u274C *Invalid Token*\n\n"
-            f"Token `{token}` is not supported.\n\n"
-            f"\U0001F4B5 *Available Tokens:*\n"
-            f"    ETH, BNB, MATIC, SOL, TRX, LTC, TON, USDT, USDC",
-            parse_mode="Markdown"
-        )
-        return
 
+async def deposit_shortcut(update: Update, context: ContextTypes.DEFAULT_TYPE, token: str, network: str):
+    """/deposit <token> <network>: send the deposit address screen straight away."""
+    user_id = update.effective_user.id
     token_info = TOKENS[token]
-    if network not in token_info.get("networks", {}):
-        available_networks = list(token_info.get("networks", {}).keys())
-        await update.message.reply_text(
-            f"\u274C *Token Not Available on Network*\n\n"
-            f"`{token}` is not available on `{network}`.\n\n"
-            f"\U0001F310 *{token} is available on:*\n"
-            f"    {', '.join(available_networks)}",
-            parse_mode="Markdown"
-        )
-        return
-
     wallet = db.get_wallet(user_id, network)
     if not wallet:
         await update.message.reply_text(
@@ -6069,6 +6006,10 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
+    try:
+        db.record_pair_use(user_id, "dep", token, network)
+    except Exception as e:
+        logger.warning(f"Pair usage not recorded: {e}")
 
     address = wallet["address"]
     network_info = NETWORKS[network]
@@ -6398,6 +6339,32 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.message.chat_id
 
+    if context.args:
+        token = detect_token_from_text(context.args[0])
+        if token not in TOKENS:
+            await update.message.reply_text(
+                f"\u274C Token `{context.args[0][:20]}` isn't supported. See /tokens.",
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
+        available = get_available_networks_for_token(token)
+        if len(context.args) >= 2:
+            network = detect_network_from_text(" ".join(context.args[1:]))
+            if network not in available:
+                await update.message.reply_text(
+                    f"\u274C {token} isn't available on that network.\n\n"
+                    f"*{token} networks:* {', '.join(available)}",
+                    parse_mode="Markdown"
+                )
+                return ConversationHandler.END
+        elif len(available) == 1:
+            network = available[0]
+        else:
+            context.user_data["deposit_token"] = token
+            return await ask_deposit_network(update, context, chat_id, token)
+        await deposit_shortcut(update, context, token, network)
+        return ConversationHandler.END
+
     text = (
         "\U0001F4E5 *Deposit*\n\n"
         "Which token?\n\n"
@@ -6669,7 +6636,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/tokens</code>  <i>Token balances by network</i>\n\n"
         f"{h_html('deposit', 'Deposits')}\n"
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
-        "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
+        "<code>/deposit TOKEN [NETWORK]</code>  <i>Quick deposit (e.g. /deposit USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
         "<code>/balance &lt;address&gt;</code>  <i>All token balances</i>\n"
         "<code>/balance &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
@@ -8039,9 +8006,13 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["deposit_network"] = available_networks[0]
         return await ask_deposit_confirmation(update, context, chat_id)
 
-    network_names = [f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in available_networks]
-    networks_str = ", ".join(network_names)
+    return await ask_deposit_network(update, context, chat_id, token)
 
+
+async def ask_deposit_network(update, context, chat_id: int, token: str):
+    networks_str = ", ".join(
+        f"{NETWORKS.get(n, {}).get('name', n)} ({n})" for n in get_available_networks_for_token(token)
+    )
     msg = await send_screen(
         context.bot, chat_id, "deposit",
         caption=(
@@ -10112,7 +10083,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/tokens</code>  <i>Token balances by network</i>\n\n"
         f"{h_html('deposit', 'Deposits')}\n"
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
-        "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
+        "<code>/deposit TOKEN [NETWORK]</code>  <i>Quick deposit (e.g. /deposit USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
         "<code>/balance &lt;address&gt;</code>  <i>All token balances</i>\n"
         "<code>/balance &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
