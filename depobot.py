@@ -1399,6 +1399,15 @@ TOKENS = {
             "SOLANA": {"address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "decimals": 6}
         }
     },
+    "BTC": {
+        "name": "Bitcoin",
+        "symbol": "BTC",
+        "icon": "\U0001F7E0",
+        "native": True,
+        "networks": {
+            "BTC": {"native": True, "decimals": 8}
+        }
+    },
     "LTC": {
         "name": "Litecoin",
         "symbol": "LTC",
@@ -1486,6 +1495,7 @@ TOKEN_ALIASES = {
     "trx": "TRX", "tron": "TRX", "tronix": "TRX", "trn": "TRX",
     "ltc": "LTC", "litecoin": "LTC", "lite coin": "LTC", "lite": "LTC", "lc": "LTC",
     "ton": "TON", "toncoin": "TON",
+    "btc": "BTC", "bitcoin": "BTC", "bit coin": "BTC", "xbt": "BTC",
     "dai": "DAI", "wbtc": "WBTC", "wrapped bitcoin": "WBTC", "btcb": "BTCB", "btc bep20": "BTCB",
     "weth": "WETH", "wrapped ether": "WETH", "link": "LINK", "chainlink": "LINK",
     "uni": "UNI", "uniswap": "UNI", "aave": "AAVE", "shib": "SHIB", "shiba": "SHIB", "shiba inu": "SHIB",
@@ -8148,6 +8158,10 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
             balance_result = await BalanceChecker.get_tron_balance(address)
         elif network == "LTC":
             balance_result = await BalanceChecker.get_ltc_balance(address)
+        elif network == "BTC":
+            balance_result = await BalanceChecker.get_btc_balance(address)
+        elif network == "TON":
+            balance_result = await BalanceChecker.get_balance(network, address)
         else:
             balance_result = await BalanceChecker.get_evm_balance(network, address)
         
