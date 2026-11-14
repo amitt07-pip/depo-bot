@@ -200,25 +200,39 @@ def _amount(v) -> str:
 def render_dashboard_card(name: str, total_usd, holdings, wallet_count: int,
                           brand: str = None, updated: str = None) -> bytes:
     """holdings: list of (symbol, amount, usd_value), any order."""
-    accent = (38, 161, 123)
+    assets = sum(1 for h in holdings if float(h[2]) > 0 or float(h[1]) > 0)
+    return render_portfolio_card(
+        f"Welcome back, {name}" if name else "Welcome back", total_usd, holdings,
+        [f"{wallet_count} wallet{'s' if wallet_count != 1 else ''}",
+         f"{assets} asset{'s' if assets != 1 else ''}"],
+        brand=brand, updated=updated,
+    )
+
+
+def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str = None,
+                          updated: str = None, accent_symbol: str = None,
+                          empty_hint: str = "Tap Deposit to get started") -> bytes:
+    """Total USD value, chips, allocation bar and a holdings panel.
+    holdings: list of (symbol, amount, usd_value), any order."""
+    accent = TOKEN_COLORS.get((accent_symbol or "").upper(), (38, 161, 123))
     img, d = _canvas(accent, glow_box=(-60, -40, 520, 460))
     holdings = sorted((h for h in holdings if float(h[2]) > 0 or float(h[1]) > 0),
                       key=lambda h: float(h[2]), reverse=True)
     total = float(total_usd)
 
-    # Left: greeting, total, chips
+    # Left: heading, total, chips
     x0 = 96
-    hello = f"Welcome back, {name}" if name else "Welcome back"
-    d.text((x0, 96), hello, font=_fit(d, hello, "Inter.ttf", b"Medium", 540, 28, 18), fill=MUTED)
+    d.text((x0, 96), heading, font=_fit(d, heading, "Inter.ttf", b"Medium", 540, 28, 18), fill=MUTED)
     _spaced(d, (x0, 158), "TOTAL BALANCE", _font("Inter.ttf", 20, b"SemiBold"), MUTED, 5)
     total_s = _usd(total)
     d.text((x0 - 4, 184), total_s, font=_fit(d, total_s, "SpaceGrotesk.ttf", b"Bold", 540, 104, 44), fill=TEXT)
 
     chip_font = _font("Inter.ttf", 22, b"Medium")
     cx = x0
-    for label in (f"{wallet_count} wallet{'s' if wallet_count != 1 else ''}",
-                  f"{len(holdings)} asset{'s' if len(holdings) != 1 else ''}"):
+    for label in chips:
         w = d.textlength(label, font=chip_font) + 50
+        if cx + w > 640:
+            break
         d.rounded_rectangle([cx, 316, cx + w, 354], radius=19, fill=(26, 26, 32), outline=(58, 58, 66), width=2)
         d.ellipse([cx + 16, 329, cx + 28, 341], fill=accent)
         d.text((cx + 36, 335), label, font=chip_font, fill=TEXT, anchor="lm")
@@ -255,7 +269,7 @@ def render_dashboard_card(name: str, total_usd, holdings, wallet_count: int,
     if not rows:
         d.text(((px0 + px1) / 2, (py0 + py1) / 2 + 10), "No funds yet",
                font=_font("Inter.ttf", 26, b"SemiBold"), fill=TEXT, anchor="mm")
-        d.text(((px0 + px1) / 2, (py0 + py1) / 2 + 46), "Tap Deposit to get started",
+        d.text(((px0 + px1) / 2, (py0 + py1) / 2 + 46), empty_hint,
                font=sub_font, fill=MUTED, anchor="mm")
     for sym, amt, usd in rows:
         if sym == "OTHER":

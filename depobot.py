@@ -43,20 +43,27 @@ from telegram.ext import (
 
 
 class InlineKeyboardMarkup(InlineKeyboardMarkup):
-    """Drop any inline row whose label is a main-menu button."""
+    """Turn main-menu buttons into a single Back button (dropped if the screen already has Back)."""
 
     _MAIN_MENU_LABELS = {"main menu", "home", "back to menu"}
 
     def __init__(self, inline_keyboard, *args, **kwargs):
         cleaned = []
-        emoji_re = re.compile(r"^[\U0001F300-\U0001FAFF\s]+")
+        emoji_re = re.compile(r"^[\U0001F300-\U0001FAFF\u2190-\u21FF\u2B05\s]+")
+        has_back = any(
+            emoji_re.sub("", (b.text or "")).strip().lower().startswith("back")
+            for row in inline_keyboard for b in row
+        )
         for row in inline_keyboard:
             new_row = []
             for button in row:
                 text = (button.text or "").strip()
                 label = emoji_re.sub("", text).strip().lower()
                 if label in self._MAIN_MENU_LABELS and getattr(button, "callback_data", None) == "main_menu":
-                    continue
+                    if has_back:
+                        continue
+                    button = InlineKeyboardButton("Back", callback_data="main_menu")
+                    has_back = True
                 new_row.append(button)
             if new_row:
                 cleaned.append(new_row)
@@ -80,7 +87,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
-from address_card import render_address_card, render_dashboard_card
+from address_card import render_address_card, render_dashboard_card, render_portfolio_card
 
 # Suppress noisy HTTP request logs from httpx and telegram
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -5314,6 +5321,114 @@ def build_main_menu_text(user_id: int) -> str:
     return menu_text
 
 
+async def wallet_holdings(network: str, address: str) -> list:
+    """[(symbol, amount, usd_or_None)] for the native coin, built-in tokens and,
+    on Solana, any other SPL tokens (which carry their own USD value)."""
+    info = NETWORKS[network]
+    out = []
+    try:
+        bal = await BalanceChecker.get_balance(network, address)
+        if not bal.get("error"):
+            out.append((bal.get("symbol", info["symbol"]), Decimal(str(bal.get("balance", "0"))), None))
+    except Exception as e:
+        logger.warning(f"Native balance failed for {network}: {e}")
+    for token_key, token_info in TOKENS.items():
+        net_info = token_info.get("networks", {}).get(network)
+        if not net_info or net_info.get("native"):
+            continue
+        try:
+            result = await BalanceChecker.get_token_balance(token_key, network, address)
+            if result and "balance" in result and not result.get("error"):
+                out.append((token_info["symbol"], Decimal(str(result["balance"])), None))
+        except Exception:
+            pass
+    if network == "SOLANA":
+        try:
+            for h in await solana_extra_holdings(address):
+                sym = re.sub(r"[^A-Za-z0-9.$_-]", "", str(h["symbol"]))[:10] or "SPL"
+                out.append((sym, h["balance"], h["usd_value"]))
+        except Exception as e:
+            logger.warning(f"Solana token list failed for {address}: {e}")
+    return out
+
+
+async def build_balance_screen(wallets: list, bot=None):
+    """Caption and portfolio image for one wallet or all wallets (live balances)."""
+    per_wallet = await asyncio.gather(
+        *(wallet_holdings(w["network"], w["address"]) for w in wallets), return_exceptions=True
+    )
+    agg = {}
+    for result in per_wallet:
+        if isinstance(result, Exception):
+            continue
+        for sym, amt, usd in result:
+            a, u, priced = agg.get(sym, (Decimal("0"), Decimal("0"), True))
+            agg[sym] = (a + amt, u + (usd or Decimal("0")), priced and usd is not None)
+    prices = await PriceFetcher.get_prices([s for s, v in agg.items() if not v[2] and v[0] > 0])
+    holdings = []
+    for sym, (amt, usd, priced) in agg.items():
+        value = usd if priced else amt * prices.get(sym, Decimal("0"))
+        holdings.append((sym, amt, value))
+    total = sum((h[2] for h in holdings), Decimal("0"))
+    held = [h for h in holdings if h[1] > 0]
+
+    single = len(wallets) == 1
+    if single:
+        net = wallets[0]["network"]
+        info = NETWORKS[net]
+        addr = wallets[0]["address"]
+        heading = f"{info['name']} wallet"
+        chips = [f"{addr[:6]}\u2026{addr[-4:]}", f"{len(held)} asset{'s' if len(held) != 1 else ''}"]
+        accent = info["symbol"]
+        caption = (
+            f"{h_html('balance', info['name'] + ' Balance')}\n\n"
+            f"{ui('cash')}  <b>Total</b>   <code>${total:,.2f}</code>\n"
+            f"{ui('address')}  <code>{esc(addr)}</code>"
+        )
+    else:
+        heading = "All networks"
+        chips = [f"{len(wallets)} wallet{'s' if len(wallets) != 1 else ''}",
+                 f"{len(held)} asset{'s' if len(held) != 1 else ''}"]
+        accent = None
+        caption = (
+            f"{h_html('balance', 'Your Balances')}\n\n"
+            f"{ui('cash')}  <b>Total</b>   <code>${total:,.2f}</code>   "
+            f"{ui('wallet')}  <b>Wallets</b>   <code>{len(wallets)}</code>"
+        )
+    lines = [f"{tok(sym)}  <b>{esc(sym)}</b>  <code>{esc(f'{amt.normalize():f}')}</code>"
+             + (f"  \u2248 ${value:,.2f}" if value > 0 else "")
+             for sym, amt, value in sorted(held, key=lambda h: h[2], reverse=True)]
+    if lines:
+        caption += "\n\n" + "\n".join(lines)
+    brand = None
+    try:
+        brand = f"@{bot.username}" if bot is not None and bot.username else None
+    except Exception:
+        pass
+    try:
+        png = await asyncio.to_thread(
+            render_portfolio_card, heading, total, holdings, chips, brand,
+            time.strftime("%H:%M UTC", time.gmtime()), accent, "Deposit to see it here"
+        )
+    except Exception as e:
+        logger.warning(f"Balance card render failed: {e}")
+        png = None
+    return caption, png
+
+
+async def send_image_screen(bot, chat_id, banner_name, caption_html, keyboard, png):
+    """Rich message with the image on top; classic photo (or banner) if rich is rejected."""
+    if await send_rich_screen(bot, chat_id, banner_name, caption_html, keyboard, image=png):
+        return
+    if png:
+        await bot.send_photo(chat_id=chat_id, photo=png, caption=caption_html,
+                             parse_mode="HTML", reply_markup=keyboard)
+        return
+    with open(get_banner_path(banner_name), "rb") as photo:
+        await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption_html,
+                             parse_mode="HTML", reply_markup=keyboard)
+
+
 async def build_dashboard(user_id: int, name: str, bot=None):
     """Caption and dashboard image (PNG bytes, or None if rendering fails) for /start.
     Uses the on-chain balances the deposit monitor keeps in wallet_balances_cache,
@@ -5731,7 +5846,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -5808,7 +5923,7 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -5893,7 +6008,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Please provide a valid wallet address.\n\n"
                 "_Supported: EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin, TON_"
             )
-            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(get_banner_path("withdraw"), "rb"),
@@ -5914,7 +6029,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"This is an EVM address. Which network?\n\n"
                 f"Type: `{networks_str}`"
             )
-            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
             msg = await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(get_banner_path("withdraw"), "rb"),
@@ -5959,7 +6074,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return ConversationHandler.END
             
-            keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+            keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
             msg = await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=open(get_banner_path("withdraw"), "rb"),
@@ -5979,7 +6094,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -6016,7 +6131,7 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await context.bot.send_photo(
@@ -7049,7 +7164,7 @@ async def show_generate_menu(
     )
 
     keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await context.bot.send_photo(
@@ -7097,7 +7212,7 @@ async def receive_generate_network(update: Update, context: ContextTypes.DEFAULT
                 "Please try again (e.g., 'Ethereum', 'BSC', 'Polygon')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="main_menu")]])
         )
         context.user_data["generate_msg_id"] = msg.message_id
         return GENERATE_NETWORK
@@ -7314,7 +7429,7 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -7363,7 +7478,7 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
-                [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+                [InlineKeyboardButton("Back", callback_data="main_menu")]
             ])
         )
         context.user_data["deposit_msg_id"] = msg.message_id
@@ -7388,7 +7503,7 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
             f"_{networks_str}_"
         ),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_deposit")]])
     )
     context.user_data["deposit_msg_id"] = msg.message_id
 
@@ -7429,7 +7544,7 @@ async def receive_deposit_network(update: Update, context: ContextTypes.DEFAULT_
                 "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_deposit")]])
         )
         context.user_data["deposit_msg_id"] = msg.message_id
         return DEPOSIT_NETWORK
@@ -8196,7 +8311,7 @@ async def show_balance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -8249,7 +8364,7 @@ async def receive_balance_network(update: Update, context: ContextTypes.DEFAULT_
                 "Type 'all' for all balances, or a network name (e.g., 'Ethereum', 'BSC')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="main_menu")]])
         )
         context.user_data["balance_msg_id"] = msg.message_id
         return BALANCE_NETWORK
@@ -8271,52 +8386,18 @@ async def do_check_balance_all(update, context, chat_id: int, user_id: int):
         )
         return ConversationHandler.END
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("balance"), "rb"),
-        caption="*Fetching all balances...*",
-        parse_mode="Markdown"
-    )
-
-    text = "*Your Balances*\n\n"
-    text += "*On-Chain:*\n"
-    for wallet in wallets:
-        net = wallet["network"]
-        info = NETWORKS[net]
-        text += f"\n{info['icon']} *{info['name']}*\n"
-        balance_info = await BalanceChecker.get_balance(net, wallet["address"])
-        if balance_info.get("error"):
-            text += f"{info['icon']} Native: `Error`\n"
-        else:
-            balance_str = balance_info.get("balance", "Error")
-            symbol = balance_info.get("symbol", info["symbol"])
-            text += f"{info['icon']} Native: `{balance_str} {symbol}`\n"
-        for token_key, token_info in TOKENS.items():
-            if net in token_info.get("networks", {}):
-                if token_info["networks"][net].get("native"):
-                    continue
-                try:
-                    result = await BalanceChecker.get_token_balance(
-                        token_key, net, wallet["address"]
-                    )
-                    if result and "balance" in result and not result.get("error"):
-                        bal_str = result["balance"]
-                        text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
-                except Exception:
-                    pass
-        if net == "SOLANA":
-            text += await solana_extra_tokens_md(wallet["address"])
-
-    keyboard = [
-        [InlineKeyboardButton("Check Another", callback_data="menu_balance")],
-        [InlineKeyboardButton("Home", callback_data="main_menu")]
-    ]
-
-    await msg.edit_caption(
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    msg = await context.bot.send_message(chat_id=chat_id, text="Fetching all balances...")
+    caption, png = await build_balance_screen(wallets, context.bot)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Refresh", callback_data="balance_all"),
+         InlineKeyboardButton("Check Another", callback_data="menu_balance")],
+        [InlineKeyboardButton("Back", callback_data="menu_balance")]
+    ])
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await send_image_screen(context.bot, chat_id, "balance", caption, keyboard, png)
     return ConversationHandler.END
 
 
@@ -8339,59 +8420,19 @@ async def do_check_balance_network(update, context, chat_id: int, user_id: int, 
         )
         return ConversationHandler.END
 
-    msg = await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("balance"), "rb"),
-        caption=f"*Fetching {info['name']} balances...*",
-        parse_mode="Markdown"
-    )
-
-    balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-    if balance_info.get("error"):
-        native_balance = "Error"
-        native_symbol = info["symbol"]
-    else:
-        native_balance = balance_info.get("balance", "Error")
-        native_symbol = balance_info.get("symbol", info["symbol"])
-
-    text = f"*{info['name']} Balances*\n\n"
-    text += f"*On-Chain:*\n"
-    text += f"{info['icon']} Native: `{native_balance} {native_symbol}`\n"
-
-    for token_key, token_info in TOKENS.items():
-        if network in token_info.get("networks", {}):
-            net_info = token_info["networks"][network]
-            if net_info.get("native"):
-                continue
-            try:
-                result = await BalanceChecker.get_token_balance(
-                    token_key, network, wallet["address"]
-                )
-                if result and "balance" in result and not result.get("error"):
-                    bal_str = result["balance"]
-                    text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
-            except Exception:
-                pass
-    if network == "SOLANA":
-        text += await solana_extra_tokens_md(wallet["address"])
-
-
-
-    text += f"\n*Address:*\n`{wallet['address']}`"
-
-    keyboard = [
-        [
-            InlineKeyboardButton("Check Another", callback_data="menu_balance"),
-            InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")
-        ],
-        [InlineKeyboardButton("Home", callback_data="main_menu")]
-    ]
-
-    await msg.edit_caption(
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    msg = await context.bot.send_message(chat_id=chat_id, text=f"Fetching {info['name']} balances...")
+    caption, png = await build_balance_screen([wallet], context.bot)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Refresh", callback_data=f"balance_{network}"),
+         InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")],
+        [copy_address_button(wallet["address"])],
+        [InlineKeyboardButton("Back", callback_data="menu_balance")]
+    ])
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    await send_image_screen(context.bot, chat_id, "balance", caption, keyboard, png)
     return ConversationHandler.END
 
 
@@ -8413,47 +8454,17 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await edit_message_with_banner(
-            query, "balance", "*Fetching all balances...*", None
-        )
-
-        text = "*Your Balances*\n\n"
-        text += "*On-Chain:*\n"
-        for wallet in wallets:
-            net = wallet["network"]
-            info = NETWORKS[net]
-            text += f"\n{info['icon']} *{info['name']}*\n"
-            balance_info = await BalanceChecker.get_balance(net, wallet["address"])
-            if balance_info.get("error"):
-                text += f"{info['icon']} Native: `Error`\n"
-            else:
-                balance_str = balance_info.get("balance", "Error")
-                symbol = balance_info.get("symbol", info["symbol"])
-                text += f"{info['icon']} Native: `{balance_str} {symbol}`\n"
-            for token_key, token_info in TOKENS.items():
-                if net in token_info.get("networks", {}):
-                    if token_info["networks"][net].get("native"):
-                        continue
-                    try:
-                        result = await BalanceChecker.get_token_balance(
-                            token_key, net, wallet["address"]
-                        )
-                        if result and "balance" in result and not result.get("error"):
-                            bal_str = result["balance"]
-                            text += f"{token_info['icon']} {token_info['symbol']}: `{bal_str}`\n"
-                    except Exception:
-                        pass
-            if net == "SOLANA":
-                text += await solana_extra_tokens_md(wallet["address"])
-
-        keyboard = [
-            [InlineKeyboardButton("Refresh", callback_data="balance_all")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
-        ]
-
-        await edit_message_with_banner(
-            query, "balance", text, InlineKeyboardMarkup(keyboard)
-        )
+        caption, png = await build_balance_screen(wallets, context.bot)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Refresh", callback_data="balance_all"),
+             InlineKeyboardButton("Check Another", callback_data="menu_balance")],
+            [InlineKeyboardButton("Back", callback_data="menu_balance")]
+        ])
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await send_image_screen(context.bot, query.message.chat_id, "balance", caption, keyboard, png)
     else:
         wallet = db.get_wallet(user_id, network)
         info = NETWORKS[network]
@@ -8471,55 +8482,18 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await edit_message_with_banner(
-            query, "balance", f"*Fetching {info['name']} balances...*", None
-        )
-
-        balance_info = await BalanceChecker.get_balance(network, wallet["address"])
-        if balance_info.get("error"):
-            native_balance = "Error"
-            native_symbol = info["symbol"]
-        else:
-            native_balance = balance_info.get("balance", "Error")
-            native_symbol = balance_info.get("symbol", info["symbol"])
-
-        text = f"*{info['name']} Balances*\n\n"
-        text += f"*On-Chain:*\n"
-        text += f"{info['icon']} Native: `{native_balance} {native_symbol}`\n"
-
-        for token_key, token_info in TOKENS.items():
-            if network in token_info.get("networks", {}):
-                net_info = token_info["networks"][network]
-                if net_info.get("native"):
-                    continue
-                try:
-                    result = await BalanceChecker.get_token_balance(
-                        token_key, network, wallet["address"]
-                    )
-                    if result and "balance" in result and not result.get("error"):
-                        bal_str = result["balance"]
-                        text += f"\U0001F4B5 {token_info['symbol']}: `{bal_str}`\n"
-                except Exception:
-                    pass
-        if network == "SOLANA":
-            text += await solana_extra_tokens_md(wallet["address"])
-
-
-
-        text += f"\n*Address:*\n`{wallet['address']}`"
-
-        keyboard = [
-            [
-                InlineKeyboardButton("Refresh", callback_data=f"balance_{network}"),
-                InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")
-            ],
-            [InlineKeyboardButton("Back", callback_data="menu_balance")],
-            [InlineKeyboardButton("Home", callback_data="main_menu")]
-        ]
-
-        await edit_message_with_banner(
-            query, "balance", text, InlineKeyboardMarkup(keyboard)
-        )
+        caption, png = await build_balance_screen([wallet], context.bot)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Refresh", callback_data=f"balance_{network}"),
+             InlineKeyboardButton("Withdraw", callback_data=f"withdraw_{network}")],
+            [copy_address_button(wallet["address"])],
+            [InlineKeyboardButton("Back", callback_data="menu_balance")]
+        ])
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await send_image_screen(context.bot, query.message.chat_id, "balance", caption, keyboard, png)
 
 
 async def show_withdraw_menu(
@@ -8548,7 +8522,7 @@ async def show_withdraw_menu(
 
     keyboard = [
         [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
-        [InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]
+        [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
     msg = await send_rich_screen(
@@ -8566,22 +8540,14 @@ async def show_withdraw_menu(
 
 
 async def show_tokens_list_popup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show a popup with all supported tokens."""
+    """Show all supported tokens in a Telegram pop-up alert."""
     query = update.callback_query
-    await query.answer()
-    
-    tokens_list = ", ".join([f"{info.get('icon', '')} {symbol}" for symbol, info in TOKENS.items()])
-    popup_text = f"Supported: {tokens_list}"
-    
-    chat_id = query.message.chat_id
     action = query.data.split("_")[-1]
-    
-    msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"\U0001F4CB *Supported Tokens*\n\n{popup_text}\n\n_Type the token name to continue_",
-        parse_mode="Markdown"
+    names = ", ".join(TOKENS.keys())
+    await query.answer(
+        f"Supported tokens:\n{names}\n\nType the token name to continue."[:200],
+        show_alert=True,
     )
-    
     if action == "withdraw":
         return WITHDRAW_TOKEN
     elif action == "deposit":
@@ -8620,7 +8586,7 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
                 "Please try again (e.g., 'USDT', 'ETH', 'solana')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
         )
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_TOKEN
@@ -8645,7 +8611,7 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
             f"_{networks_str}_"
         ),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
     )
     context.user_data["withdraw_msg_id"] = msg.message_id
 
@@ -8686,7 +8652,7 @@ async def receive_withdraw_network(update: Update, context: ContextTypes.DEFAULT
                 "Please try again (e.g., 'Polygon', 'BSC', 'Ethereum')"
             ),
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="menu_withdraw")]])
         )
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_NETWORK
@@ -8894,7 +8860,7 @@ async def receive_withdraw_quick_network(
             "\U0001F4E4 *Quick Withdraw*\n\n"
             f"\u274c Invalid network. Please type one of:\n`{networks_str}`"
         )
-        keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+        keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
         msg = await context.bot.send_photo(
             chat_id=chat_id,
             photo=open(get_banner_path("withdraw"), "rb"),
@@ -8939,7 +8905,7 @@ async def receive_withdraw_quick_network(
         )
         return ConversationHandler.END
 
-    keyboard = [[InlineKeyboardButton("\u274c Cancel", callback_data="main_menu")]]
+    keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
     msg = await send_rich_screen(
         context.bot, chat_id, "withdraw", text, InlineKeyboardMarkup(keyboard), "Markdown"
     ) or await context.bot.send_photo(
@@ -9985,7 +9951,8 @@ def _convert_provider_view():
     keyboard = [
         [ikb("SideShift.ai", callback_data="swap_prov:sideshift", ui_name="convert")],
         [ikb("LI.FI", callback_data="swap_prov:lifi", ui_name="convert")],
-        _swap_cancel_row(),
+        [ikb("Back", callback_data="main_menu", emoji_fallback="\U0001F519"),
+         ikb("Cancel", callback_data="cancel_convert", emoji_fallback="\u274c")],
     ]
     sideshift_note = "" if SideShift.configured() else " <i>(not configured)</i>"
     caption = (
