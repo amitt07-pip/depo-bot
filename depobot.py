@@ -1251,6 +1251,153 @@ TOKENS = {
             }
         }
     },
+    "DAI": {
+        "name": "Dai",
+        "symbol": "DAI",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x6B175474E89094C44Da98b954EedeAC495271d0F", "decimals": 18},
+            "BSC": {"address": "0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3", "decimals": 18},
+            "POLYGON": {"address": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063", "decimals": 18}
+        }
+    },
+    "WBTC": {
+        "name": "Wrapped Bitcoin",
+        "symbol": "WBTC",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "decimals": 8},
+            "POLYGON": {"address": "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6", "decimals": 8}
+        }
+    },
+    "BTCB": {
+        "name": "Bitcoin BEP20",
+        "symbol": "BTCB",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c", "decimals": 18}
+        }
+    },
+    "WETH": {
+        "name": "Wrapped Ether",
+        "symbol": "WETH",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "decimals": 18},
+            "POLYGON": {"address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", "decimals": 18}
+        }
+    },
+    "LINK": {
+        "name": "Chainlink",
+        "symbol": "LINK",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x514910771AF9Ca656af840dff83E8264EcF986CA", "decimals": 18},
+            "BSC": {"address": "0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD", "decimals": 18},
+            "POLYGON": {"address": "0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39", "decimals": 18}
+        }
+    },
+    "UNI": {
+        "name": "Uniswap",
+        "symbol": "UNI",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", "decimals": 18},
+            "BSC": {"address": "0xBf5140A22578168FD562DCcF235E5D43A02ce9B1", "decimals": 18},
+            "POLYGON": {"address": "0xb33EaAd8d922B1083446DC23f610c2567fB5180f", "decimals": 18}
+        }
+    },
+    "AAVE": {
+        "name": "Aave",
+        "symbol": "AAVE",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9", "decimals": 18},
+            "POLYGON": {"address": "0xD6DF932A45C0f255f85145f286eA0b292B21C90B", "decimals": 18}
+        }
+    },
+    "SHIB": {
+        "name": "Shiba Inu",
+        "symbol": "SHIB",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE", "decimals": 18},
+            "BSC": {"address": "0x2859e4544C4bB03966803b044A93563Bd2D0DD4D", "decimals": 18}
+        }
+    },
+    "PEPE": {
+        "name": "Pepe",
+        "symbol": "PEPE",
+        "icon": "\U0001FA99",
+        "networks": {
+            "ETH": {"address": "0x6982508145454Ce325dDbE47a25d4ec3d2311933", "decimals": 18},
+            "BSC": {"address": "0x25d887Ce7a35172C62FeBFD67a1856F20FaEbB00", "decimals": 18}
+        }
+    },
+    "DOGE": {
+        "name": "Dogecoin BEP20",
+        "symbol": "DOGE",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0x4206931337dc273a630d328dA6441786BfaD668f", "decimals": 8}
+        }
+    },
+    "XRP": {
+        "name": "XRP BEP20",
+        "symbol": "XRP",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0x1D2F0da169ceB9fC7B3144628dB156f3F6c60dBE", "decimals": 18}
+        }
+    },
+    "ADA": {
+        "name": "Cardano BEP20",
+        "symbol": "ADA",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47", "decimals": 18}
+        }
+    },
+    "CAKE": {
+        "name": "PancakeSwap",
+        "symbol": "CAKE",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82", "decimals": 18}
+        }
+    },
+    "FDUSD": {
+        "name": "First Digital USD",
+        "symbol": "FDUSD",
+        "icon": "\U0001FA99",
+        "networks": {
+            "BSC": {"address": "0xc5f0f7b66764F6ec8C8Dff7BA683102295E16409", "decimals": 18}
+        }
+    },
+    "BONK": {
+        "name": "Bonk",
+        "symbol": "BONK",
+        "icon": "\U0001FA99",
+        "networks": {
+            "SOLANA": {"address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "decimals": 5}
+        }
+    },
+    "JUP": {
+        "name": "Jupiter",
+        "symbol": "JUP",
+        "icon": "\U0001FA99",
+        "networks": {
+            "SOLANA": {"address": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "decimals": 6}
+        }
+    },
+    "WIF": {
+        "name": "dogwifhat",
+        "symbol": "WIF",
+        "icon": "\U0001FA99",
+        "networks": {
+            "SOLANA": {"address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "decimals": 6}
+        }
+    },
     "LTC": {
         "name": "Litecoin",
         "symbol": "LTC",
@@ -1337,6 +1484,14 @@ TOKEN_ALIASES = {
     "sol": "SOL", "solana": "SOL", "solan": "SOL",
     "trx": "TRX", "tron": "TRX", "tronix": "TRX", "trn": "TRX",
     "ltc": "LTC", "litecoin": "LTC", "lite coin": "LTC", "lite": "LTC", "lc": "LTC",
+    "ton": "TON", "toncoin": "TON",
+    "dai": "DAI", "wbtc": "WBTC", "wrapped bitcoin": "WBTC", "btcb": "BTCB", "btc bep20": "BTCB",
+    "weth": "WETH", "wrapped ether": "WETH", "link": "LINK", "chainlink": "LINK",
+    "uni": "UNI", "uniswap": "UNI", "aave": "AAVE", "shib": "SHIB", "shiba": "SHIB", "shiba inu": "SHIB",
+    "pepe": "PEPE", "doge": "DOGE", "dogecoin": "DOGE", "xrp": "XRP", "ripple": "XRP",
+    "ada": "ADA", "cardano": "ADA", "cake": "CAKE", "pancakeswap": "CAKE",
+    "fdusd": "FDUSD", "first digital usd": "FDUSD", "bonk": "BONK",
+    "jup": "JUP", "jupiter": "JUP", "wif": "WIF", "dogwifhat": "WIF",
 }
 
 NETWORK_ALIASES = {
@@ -1386,6 +1541,16 @@ def get_available_networks_for_token(token: str):
     if not token_info:
         return []
     return list(token_info.get("networks", {}).keys())
+
+
+def is_contract_token(token: str, network: str) -> bool:
+    net = TOKENS.get(token, {}).get("networks", {}).get(network) or {}
+    return bool(net.get("address")) and not net.get("native")
+
+
+def contract_tokens(network: str) -> list:
+    """Token keys that live on ``network`` as a contract / SPL mint (not the native coin)."""
+    return [k for k in TOKENS if is_contract_token(k, network)]
 
 def detect_network_from_address(address: str):
     """Detect network type from wallet address format.
@@ -1602,6 +1767,10 @@ COINGECKO_IDS = {
     "TON": "the-open-network",
     "USDT": "tether",
     "USDC": "usd-coin",
+    "DAI": "dai", "WBTC": "wrapped-bitcoin", "BTCB": "binance-bitcoin", "WETH": "weth",
+    "LINK": "chainlink", "UNI": "uniswap", "AAVE": "aave", "SHIB": "shiba-inu", "PEPE": "pepe",
+    "DOGE": "dogecoin", "XRP": "ripple", "ADA": "cardano", "CAKE": "pancakeswap-token",
+    "FDUSD": "first-digital-usd", "BONK": "bonk", "JUP": "jupiter-exchange-solana", "WIF": "dogwifcoin",
 }
 
 
@@ -5209,15 +5378,12 @@ def get_main_menu_keyboard():
 
 
 def get_token_keyboard():
-    keyboard = []
-    for token_key, token_info in TOKENS.items():
-        keyboard.append([
-            ikb(
-                f"{token_info['name']} ({token_info['symbol']})",
-                callback_data=f"token_{token_key}",
-                token=token_info['symbol'], emoji_fallback=token_info['icon']
-            )
-        ])
+    buttons = [
+        ikb(token_info['symbol'], callback_data=f"token_{token_key}",
+            token=token_info['symbol'], emoji_fallback=token_info['icon'])
+        for token_key, token_info in TOKENS.items()
+    ]
+    keyboard = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
     keyboard.append([
         ikb("Main Menu", callback_data="main_menu", ui_name="home")
     ])
@@ -5359,6 +5525,71 @@ def build_main_menu_text(user_id: int) -> str:
     return menu_text
 
 
+async def _evm_token_balances(network: str, address: str, tokens: list) -> dict:
+    """balanceOf for many ERC20s in one JSON-RPC batch (falls back to per-token calls)."""
+    info = NETWORKS[network]
+    owner = address.lower().replace("0x", "").rjust(64, "0")
+    batch = [{
+        "jsonrpc": "2.0", "id": i, "method": "eth_call",
+        "params": [{"to": TOKENS[t]["networks"][network]["address"], "data": "0x70a08231" + owner}, "latest"],
+    } for i, t in enumerate(tokens)]
+    for url in [info.get("rpc")] + info.get("rpc_fallbacks", []):
+        if not url:
+            continue
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=batch, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    data = await resp.json(content_type=None)
+            if not isinstance(data, list):
+                continue
+            out = {}
+            for item in data:
+                res = item.get("result") if isinstance(item, dict) else None
+                if res is None or not isinstance(item.get("id"), int) or item["id"] >= len(tokens):
+                    continue
+                t = tokens[item["id"]]
+                raw = int(res, 16) if res not in ("0x", "") else 0
+                out[t] = Decimal(raw) / Decimal(10 ** TOKENS[t]["networks"][network]["decimals"])
+            if len(out) == len(tokens):
+                return out
+        except Exception as e:
+            logger.debug(f"Batch token balance failed on {network} via {url}: {e}")
+    out = {}
+    for t in tokens:
+        result = await BalanceChecker.get_token_balance(t, network, address)
+        if result and not result.get("error"):
+            out[t] = Decimal(str(result.get("balance") or "0"))
+    return out
+
+
+async def token_balances(network: str, address: str) -> dict:
+    """{token_key: Decimal} for every built-in token on ``network``; tokens whose
+    lookup failed are left out so callers don't mistake an error for a zero balance."""
+    tokens = contract_tokens(network)
+    if not tokens:
+        return {}
+    kind = NETWORKS.get(network, {}).get("type")
+    if kind == "evm":
+        return await _evm_token_balances(network, address, tokens)
+    if kind == "solana":
+        held = await solana_token_accounts(address)
+        if "error" not in held:
+            by_mint = {}
+            for acct in held["accounts"]:
+                by_mint[acct["mint"]] = by_mint.get(acct["mint"], 0) + acct["amount"]
+            out = {}
+            for t in tokens:
+                meta = TOKENS[t]["networks"][network]
+                out[t] = Decimal(by_mint.get(meta["address"], 0)) / Decimal(10 ** meta["decimals"])
+            return out
+    out = {}
+    for t in tokens:
+        result = await BalanceChecker.get_token_balance(t, network, address)
+        if result and not result.get("error"):
+            out[t] = Decimal(str(result.get("balance") or "0"))
+    return out
+
+
 async def wallet_holdings(network: str, address: str) -> list:
     """[(symbol, amount, usd_or_None)] for the native coin, built-in tokens and,
     on Solana, any other SPL tokens (which carry their own USD value)."""
@@ -5370,16 +5601,11 @@ async def wallet_holdings(network: str, address: str) -> list:
             out.append((bal.get("symbol", info["symbol"]), Decimal(str(bal.get("balance", "0"))), None))
     except Exception as e:
         logger.warning(f"Native balance failed for {network}: {e}")
-    for token_key, token_info in TOKENS.items():
-        net_info = token_info.get("networks", {}).get(network)
-        if not net_info or net_info.get("native"):
-            continue
-        try:
-            result = await BalanceChecker.get_token_balance(token_key, network, address)
-            if result and "balance" in result and not result.get("error"):
-                out.append((token_info["symbol"], Decimal(str(result["balance"])), None))
-        except Exception:
-            pass
+    try:
+        for token_key, amount in (await token_balances(network, address)).items():
+            out.append((TOKENS[token_key]["symbol"], amount, None))
+    except Exception as e:
+        logger.warning(f"Token balances failed for {network}: {e}")
     if network == "SOLANA":
         try:
             for h in await solana_extra_holdings(address):
@@ -5467,6 +5693,28 @@ async def send_image_screen(bot, chat_id, banner_name, caption_html, keyboard, p
                              parse_mode="HTML", reply_markup=keyboard)
 
 
+_AVATAR_CACHE = {}
+
+
+async def user_avatar(bot, user_id: int):
+    """Smallest Telegram profile photo of the user as bytes (cached 30 min), or None."""
+    cached = _AVATAR_CACHE.get(user_id)
+    if cached and time.time() - cached[1] < 1800:
+        return cached[0]
+    data = None
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count and photos.photos:
+            sizes = photos.photos[0]
+            size = sizes[1] if len(sizes) > 1 else sizes[0]
+            f = await bot.get_file(size.file_id)
+            data = bytes(await f.download_as_bytearray())
+    except Exception as e:
+        logger.debug(f"Profile photo lookup failed for {user_id}: {e}")
+    _AVATAR_CACHE[user_id] = (data, time.time())
+    return data
+
+
 async def build_dashboard(user_id: int, name: str, bot=None):
     """Caption and dashboard image (PNG bytes, or None if rendering fails) for /start.
     Uses the on-chain balances the deposit monitor keeps in wallet_balances_cache,
@@ -5505,10 +5753,11 @@ async def build_dashboard(user_id: int, name: str, bot=None):
         brand = f"@{bot.username}" if bot is not None and bot.username else None
     except Exception:
         pass
+    avatar = await user_avatar(bot, user_id) if bot is not None else None
     try:
         png = await asyncio.to_thread(
             render_dashboard_card, name, total, holdings, len(wallets), brand,
-            time.strftime("%H:%M UTC", time.gmtime())
+            time.strftime("%H:%M UTC", time.gmtime()), avatar
         )
     except Exception as e:
         logger.warning(f"Dashboard render failed: {e}")
@@ -5955,13 +6204,12 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "\U0001F4E5 *Deposit*\n\n"
         "Which token?\n\n"
-        "_e.g. USDT, ETH, SOL_\n\n"
-        "_Tap the button below to see all supported tokens_"
+        "_Type a token, e.g. USDT, ETH, SOL_"
     )
 
     keyboard = [
         *quick_pair_rows(update.effective_user.id, "dep"),
-        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+        [InlineKeyboardButton("\U0001F4CB Supported Tokens", callback_data="show_tokens_list_deposit")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
@@ -6133,7 +6381,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         *quick_pair_rows(update.effective_user.id, "wd"),
-        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
+        [InlineKeyboardButton("\U0001F4CB Supported Tokens", callback_data="show_tokens_list_withdraw")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
@@ -6225,7 +6473,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
         "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
-        "<code>/check &lt;address&gt;</code>  <i>USDT &amp; USDC balance</i>\n"
+        "<code>/check &lt;address&gt;</code>  <i>All token balances</i>\n"
         "<code>/check &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
         f"{h_html('withdraw', 'Withdrawals')}\n"
         "<code>/withdraw</code>  <i>Send funds to an external wallet</i>\n\n"
@@ -6365,11 +6613,28 @@ async def _gather_address_balances(address: str, detected):
             logger.error(f"Error checking {label} balance: {e}")
             return None, f"{label}: error"
 
-    jobs = []
-    for network in networks:
-        jobs.append(fetch_entry(network))
-        if NETWORKS.get(network, {}).get("type", "") not in ("btc", "ltc"):
-            jobs.extend(fetch_entry(network, token) for token in stablecoins)
+    async def fetch_tokens(network):
+        try:
+            found = await token_balances(network, address)
+        except Exception as e:
+            logger.error(f"Error checking token balances on {network}: {e}")
+            return []
+        found = {t: a for t, a in found.items() if a > 0 or t in stablecoins}
+        prices = await PriceFetcher.get_prices(list(found))
+        return [({
+            "network": network,
+            "network_name": NETWORKS[network]["name"],
+            "token": t,
+            "balance": a,
+            "usd_value": a * prices.get(t, Decimal("0")),
+            "explorer_url": address_explorer_url(network, address),
+        }, None) for t, a in found.items()]
+
+    async def no_tokens():
+        return []
+
+    jobs = [fetch_entry(network) for network in networks]
+    token_jobs = [fetch_tokens(network) if contract_tokens(network) else no_tokens() for network in networks]
 
     async def fetch_solana_extras():
         try:
@@ -6389,7 +6654,8 @@ async def _gather_address_balances(address: str, detected):
     balances = []
     errors = []
     total_usd = Decimal("0")
-    for entry, error in await asyncio.gather(*jobs):
+    token_results = await asyncio.gather(*token_jobs)
+    for entry, error in list(await asyncio.gather(*jobs)) + [e for r in token_results for e in r]:
         if entry:
             balances.append(entry)
             total_usd += entry["usd_value"]
@@ -6702,8 +6968,8 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # First, aggregate token balances across all networks
     # Tokens like USDT/USDC share a single ledger entry across networks
-    token_totals = {"USDT": Decimal("0"), "USDC": Decimal("0")}
-    token_details = {"USDT": [], "USDC": []}
+    token_totals = {t: Decimal("0") for t in TOKENS if any(is_contract_token(t, n) for n in NETWORKS)}
+    token_details = {t: [] for t in token_totals}
     
     for wallet in wallets:
         network = wallet["network"]
@@ -6733,31 +6999,16 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error syncing {network}: {e}")
 
         # Collect token balances across all networks (don't update yet)
-        for token_key in ["USDT", "USDC"]:
-            token_info = TOKENS.get(token_key, {})
-            if network not in token_info.get("networks", {}):
-                continue
-            network_token = token_info["networks"][network]
-            if network_token.get("native"):
-                continue
-
-            try:
-                token_balance_info = await BalanceChecker.get_token_balance(
-                    token_key, network, address
-                )
-                if token_balance_info.get("error"):
-                    continue
-
-                onchain_token = Decimal(token_balance_info.get("balance", "0"))
+        try:
+            for token_key, onchain_token in (await token_balances(network, address)).items():
                 token_totals[token_key] += onchain_token
                 if onchain_token > Decimal("0"):
                     token_details[token_key].append(f"{network}: {onchain_token:.6f}")
-
-            except Exception as e:
-                logger.error(f"Error fetching {token_key} on {network}: {e}")
+        except Exception as e:
+            logger.error(f"Error fetching token balances on {network}: {e}")
 
     # Now update token balances with the aggregated totals
-    for token_key in ["USDT", "USDC"]:
+    for token_key in token_totals:
         total_onchain = token_totals[token_key]
         ledger_asset = get_ledger_asset(None, token_key)  # Just returns token_key
         internal_balance = db.get_internal_balance(user_id, ledger_asset)
@@ -7161,10 +7412,9 @@ async def refresh_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = balance_info.get("symbol", info["symbol"])
     token_lines = ""
     if network == "SOLANA":
-        for token_key in ("USDT", "USDC"):
-            t = await BalanceChecker.get_token_balance(token_key, network, wallet["address"])
-            if not t.get("error"):
-                token_lines += f"{TOKENS[token_key]['icon']} {token_key}: `{t.get('balance', '0')}`\n"
+        for token_key, amount in (await token_balances(network, wallet["address"])).items():
+            if token_key in ("USDT", "USDC") or amount > 0:
+                token_lines += f"{TOKENS[token_key]['icon']} {token_key}: `{amount.normalize():f}`\n"
         token_lines += await solana_extra_tokens_md(wallet["address"])
 
     text = (
@@ -7497,13 +7747,12 @@ async def show_deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "\U0001F4E5 *Deposit*\n\n"
         "Which token?\n\n"
-        "_e.g. USDT, ETH, SOL_\n\n"
-        "_Tap the button below to see all supported tokens_"
+        "_Type a token, e.g. USDT, ETH, SOL_"
     )
 
     keyboard = [
         *quick_pair_rows(update.effective_user.id, "dep"),
-        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+        [InlineKeyboardButton("\U0001F4CB Supported Tokens", callback_data="show_tokens_list_deposit")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
@@ -7548,12 +7797,12 @@ async def receive_deposit_token(update: Update, context: ContextTypes.DEFAULT_TY
                 "\u26a0\ufe0f *Token Not Recognized*\n\n"
                 f"I couldn't understand which token you want to deposit.\n\n"
                 "Please try again (e.g., 'USDT', 'ETH', 'solana')\n\n"
-                "_Tap the button below to see all supported tokens_"
+                "_Tap Supported Tokens for the list_"
             ),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 *quick_pair_rows(update.effective_user.id, "dep"),
-                [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_deposit")],
+                [InlineKeyboardButton("\U0001F4CB Supported Tokens", callback_data="show_tokens_list_deposit")],
                 [InlineKeyboardButton("Back", callback_data="main_menu")]
             ])
         )
@@ -7707,7 +7956,7 @@ async def confirm_deposit_selection(update: Update, context: ContextTypes.DEFAUL
     address = wallet["address"]
     qr_buffer = generate_qr_code(address)
 
-    if token in ["USDT", "USDC"]:
+    if is_contract_token(token, network):
         token_balance_result = await BalanceChecker.get_token_balance(token, network, address)
         if "error" in token_balance_result:
             balance_display = f"`0` {token}"
@@ -8603,13 +8852,12 @@ async def show_withdraw_menu(
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
         "Which token?\n\n"
-        "_e.g. USDT, ETH, SOL_\n\n"
-        "_Tap the button below to see all supported tokens_"
+        "_Type a token, e.g. USDT, ETH, SOL_"
     )
 
     keyboard = [
         *quick_pair_rows(update.effective_user.id, "wd"),
-        [InlineKeyboardButton("\U0001F4CB View Supported Tokens", callback_data="show_tokens_list_withdraw")],
+        [InlineKeyboardButton("\U0001F4CB Supported Tokens", callback_data="show_tokens_list_withdraw")],
         [InlineKeyboardButton("Back", callback_data="main_menu")]
     ]
 
@@ -8631,9 +8879,9 @@ async def show_tokens_list_popup(update: Update, context: ContextTypes.DEFAULT_T
     """Show all supported tokens in a Telegram pop-up alert."""
     query = update.callback_query
     action = query.data.split("_")[-1]
-    names = ", ".join(TOKENS.keys())
+    names = " \u00b7 ".join(TOKENS.keys())
     await query.answer(
-        f"Supported tokens:\n{names}\n\nType the token name to continue."[:200],
+        f"{len(TOKENS)} tokens supported\n\n{names}"[:200],
         show_alert=True,
     )
     if action == "withdraw":
@@ -8663,14 +8911,12 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
     token = detect_token_from_text(text)
 
     if not token:
-        available_tokens = ", ".join(TOKENS.keys())
         msg = await context.bot.send_photo(
             chat_id=chat_id,
             photo=open(get_banner_path("withdraw"), "rb"),
             caption=(
                 "\u26a0\ufe0f *Token Not Recognized*\n\n"
                 f"I couldn't understand which token you want to withdraw.\n\n"
-                f"_Available tokens: {available_tokens}_\n\n"
                 "Please try again (e.g., 'USDT', 'ETH', 'solana')"
             ),
             parse_mode="Markdown",
@@ -8834,8 +9080,9 @@ async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAU
         )
         return ConversationHandler.END
 
-    ledger_asset = token if token in ["USDT", "USDC"] else get_ledger_asset(network)
-    internal_balance = await get_withdrawable_balance(user_id, network, token if token in ["USDT", "USDC"] else None)
+    is_token = is_contract_token(token, network)
+    ledger_asset = token if is_token else get_ledger_asset(network)
+    internal_balance = await get_withdrawable_balance(user_id, network, token if is_token else None)
     balance_str = str(internal_balance)
 
     context.user_data["withdraw_balance"] = balance_str
@@ -9644,7 +9891,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
         "<code>/send TOKEN NETWORK</code>  <i>Quick deposit (e.g. /send USDT BSC)</i>\n\n"
         f"{h_html('search', 'Check')}\n"
-        "<code>/check &lt;address&gt;</code>  <i>USDT &amp; USDC balance</i>\n"
+        "<code>/check &lt;address&gt;</code>  <i>All token balances</i>\n"
         "<code>/check &lt;tx hash|link&gt;</code>  <i>Transaction details</i>\n\n"
         f"{h_html('withdraw', 'Withdrawals')}\n"
         "<code>/withdraw</code>  <i>Send funds to an external wallet</i>\n\n"
@@ -9711,8 +9958,8 @@ def _build_lifi_pairs() -> dict:
         if info.get("type") != "evm":
             continue
         pairs[(info["symbol"], network)] = (info["chain_id"], LIFI_NATIVE_TOKEN, 18)
-        for token in ("USDT", "USDC"):
-            meta = TOKENS.get(token, {}).get("networks", {}).get(network)
+        for token in contract_tokens(network):
+            meta = TOKENS[token]["networks"][network]
             if meta and meta.get("address"):
                 pairs[(token, network)] = (info["chain_id"], meta["address"], meta["decimals"])
     return pairs
@@ -11341,22 +11588,20 @@ async def check_wallet_transactions(application):
         except Exception as e:
             logger.error(f"Error checking native balance for {network}: {e}")
 
-        for token_key in ["USDT", "USDC"]:
-            network_token = TOKENS.get(token_key, {}).get("networks", {}).get(network)
-            if not network_token or network_token.get("native"):
-                continue
-            if gap:
-                await asyncio.sleep(gap)
-            try:
-                info = await BalanceChecker.get_token_balance(token_key, network, address)
-                if info.get("error"):
-                    continue
-                handle_change(
-                    f"{user_id}:{network}:{address}:{token_key}", user_id, network, address,
-                    info.get("symbol", token_key), info.get("balance", "0"), token_key
-                )
-            except Exception as e:
-                logger.error(f"Error checking {token_key} balance on {network}: {e}")
+        if not contract_tokens(network):
+            return
+        if gap:
+            await asyncio.sleep(gap)
+        try:
+            balances = await token_balances(network, address)
+        except Exception as e:
+            logger.error(f"Error checking token balances on {network}: {e}")
+            return
+        for token_key, amount in balances.items():
+            handle_change(
+                f"{user_id}:{network}:{address}:{token_key}", user_id, network, address,
+                TOKENS[token_key]["symbol"], f"{amount.normalize():f}", token_key
+            )
 
     async def scan_network(network, network_wallets):
         gap = DEPOSIT_POLL_GAP.get(NETWORKS.get(network, {}).get("type"), 0.2)
@@ -11406,7 +11651,8 @@ async def background_sync_balances():
                     continue
                 
                 # Aggregate token balances across all networks
-                token_totals = {"USDT": Decimal("0"), "USDC": Decimal("0")}
+                token_totals = {t: Decimal("0") for t in TOKENS
+                                if any(is_contract_token(t, n) for n in NETWORKS)}
                 
                 for wallet in wallets:
                     network = wallet["network"]
@@ -11435,29 +11681,16 @@ async def background_sync_balances():
                     await asyncio.sleep(2)
                     
                     # Collect token balances
-                    for token_key in ["USDT", "USDC"]:
-                        token_info = TOKENS.get(token_key, {})
-                        if network not in token_info.get("networks", {}):
-                            continue
-                        network_token = token_info["networks"][network]
-                        if network_token.get("native"):
-                            continue
-                        
+                    if contract_tokens(network):
                         try:
-                            token_balance_info = await BalanceChecker.get_token_balance(
-                                token_key, network, address
-                            )
-                            if not token_balance_info.get("error"):
-                                onchain_token = Decimal(token_balance_info.get("balance", "0"))
+                            for token_key, onchain_token in (await token_balances(network, address)).items():
                                 token_totals[token_key] += onchain_token
                         except Exception as e:
-                            logger.debug(f"Background sync error for {token_key} on {network}: {e}")
-                        
-                        # Add delay between RPC calls to avoid rate limiting
+                            logger.debug(f"Background sync token error on {network}: {e}")
                         await asyncio.sleep(2)
                 
                 # Update aggregated token balances
-                for token_key in ["USDT", "USDC"]:
+                for token_key in token_totals:
                     total_onchain = token_totals[token_key]
                     ledger_asset = get_ledger_asset(None, token_key)
                     internal_balance = db.get_internal_balance(user_id, ledger_asset)

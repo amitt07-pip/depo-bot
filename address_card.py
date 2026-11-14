@@ -25,6 +25,11 @@ TOKEN_COLORS = {
     "BNB": (243, 186, 47), "MATIC": (130, 71, 229), "POL": (130, 71, 229),
     "SOL": (153, 69, 255), "TRX": (235, 0, 41), "BTC": (247, 147, 26),
     "LTC": (52, 93, 157), "TON": (0, 152, 234),
+    "DAI": (245, 172, 55), "WBTC": (240, 146, 66), "BTCB": (247, 147, 26), "WETH": (236, 72, 153),
+    "LINK": (42, 90, 218), "UNI": (255, 0, 122), "AAVE": (182, 80, 158), "SHIB": (228, 96, 20),
+    "PEPE": (60, 150, 60), "DOGE": (194, 166, 51), "XRP": (35, 41, 47), "ADA": (0, 51, 173),
+    "CAKE": (209, 136, 76), "FDUSD": (0, 0, 0), "BONK": (248, 160, 40), "JUP": (100, 190, 160),
+    "WIF": (180, 140, 110),
 }
 _DEFAULT_COLOR = (120, 120, 140)
 
@@ -202,20 +207,48 @@ def _amount(v) -> str:
 
 
 def render_dashboard_card(name: str, total_usd, holdings, wallet_count: int,
-                          brand: str = None, updated: str = None) -> bytes:
+                          brand: str = None, updated: str = None, avatar: bytes = None) -> bytes:
     """holdings: list of (symbol, amount, usd_value), any order."""
     assets = sum(1 for h in holdings if float(h[2]) > 0 or float(h[1]) > 0)
     return render_portfolio_card(
         f"Welcome back, {name}" if name else "Welcome back", total_usd, holdings,
         [f"{wallet_count} wallet{'s' if wallet_count != 1 else ''}",
          f"{assets} asset{'s' if assets != 1 else ''}"],
-        brand=brand, updated=updated,
+        brand=brand, updated=updated, avatar=avatar if avatar is not None else b"", initials=name,
     )
+
+
+def _draw_avatar(img, data: bytes, initials: str, x: int, y: int, size: int) -> int:
+    """Round user photo (or initials disc) with a white ring; returns the width used."""
+    k = 3
+    mask = Image.new("L", (size * k, size * k), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, size * k - 1, size * k - 1], fill=255)
+    mask = mask.resize((size, size), Image.LANCZOS)
+    face = None
+    if data:
+        try:
+            face = Image.open(io.BytesIO(data)).convert("RGB")
+            side = min(face.size)
+            face = face.crop(((face.width - side) // 2, (face.height - side) // 2,
+                              (face.width + side) // 2, (face.height + side) // 2)).resize((size, size), Image.LANCZOS)
+        except Exception:
+            face = None
+    if face is None:
+        face = Image.new("RGB", (size, size), (88, 101, 242))
+        letters = "".join(w[0] for w in (initials or "").split()[:2] if w and w[0].isalnum()).upper() or "V"
+        ImageDraw.Draw(face).text((size / 2, size / 2), letters, fill=(255, 255, 255), anchor="mm",
+                                  font=_font("Inter.ttf", int(size * 0.4), b"Bold"))
+    ring = Image.new("L", (size + 8, size + 8), 0)
+    ImageDraw.Draw(ring).ellipse([0, 0, size + 7, size + 7], fill=255)
+    img.paste((255, 255, 255), (x - 4, y - 4), ring)
+    img.paste(face, (x, y), mask)
+    return size
 
 
 def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str = None,
                           updated: str = None, accent_symbol: str = None,
-                          empty_hint: str = "Tap Deposit to get started") -> bytes:
+                          empty_hint: str = "Tap Deposit to get started",
+                          avatar: bytes = None, initials: str = "") -> bytes:
     """Total USD value, chips, allocation bar and a holdings panel.
     holdings: list of (symbol, amount, usd_value), any order."""
     accent = TOKEN_COLORS.get((accent_symbol or "").upper(), (38, 161, 123))
@@ -226,7 +259,11 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
 
     # Left: heading, total, chips
     x0 = 96
-    d.text((x0, 96), heading, font=_fit(d, heading, "Inter.ttf", b"Medium", 540, 28, 18), fill=MUTED)
+    hx = x0
+    if avatar is not None:
+        hx = x0 + _draw_avatar(img, avatar, initials, x0, 84, 56) + 16
+        d = ImageDraw.Draw(img)
+    d.text((hx, 96), heading, font=_fit(d, heading, "Inter.ttf", b"Medium", 540 - (hx - x0), 28, 18), fill=MUTED)
     _spaced(d, (x0, 158), "TOTAL BALANCE", _font("Inter.ttf", 20, b"SemiBold"), MUTED, 5)
     total_s = _usd(total)
     d.text((x0 - 4, 184), total_s, font=_fit(d, total_s, "SpaceGrotesk.ttf", b"Bold", 540, 104, 44), fill=TEXT)
