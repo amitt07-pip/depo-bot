@@ -11,6 +11,7 @@ import time
 import aiohttp
 import requests
 import re
+import secrets
 import inspect
 import contextvars
 from typing import Optional
@@ -2175,6 +2176,15 @@ class WalletDatabase:
         rows = cursor.fetchall()
         conn.close()
         return [{"network": row[0], "address": row[1]} for row in rows]
+
+    def delete_all_wallets(self, user_id: int) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM wallets WHERE user_id = ?", (user_id,))
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return count
 
     def get_all_wallets_with_users(self) -> list:
         conn = sqlite3.connect(self.db_path)
@@ -6219,10 +6229,119 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
     keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
+    keyboard.append([ikb("Delete All Wallets", callback_data="delall:start", emoji_fallback="\U0001F5D1")])
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await send_photo_with_banner(
         update.message, "wallets", text, InlineKeyboardMarkup(keyboard), rich=True
+    )
+
+
+async def _delete_all_screen(user_id: int, context) -> tuple:
+    """Warning text + keyboard for /deleteall, listing each wallet and what it still holds."""
+    wallets = db.get_all_wallets(user_id)
+    if not wallets:
+        return "*Delete All Wallets*\n\nYou have no wallets.", get_back_button("main_menu")
+    safe = lambda v: re.sub(r"[`*_\[\]]", "", str(v))
+    try:
+        results = await asyncio.wait_for(asyncio.gather(
+            *(wallet_holdings(w["network"], w["address"]) for w in wallets), return_exceptions=True
+        ), timeout=25)
+    except asyncio.TimeoutError:
+        results = [None] * len(wallets)
+    lines, funded, unknown = [], [], 0
+    for w, held in zip(wallets, results):
+        short = f"{w['address'][:6]}...{w['address'][-4:]}"
+        name = NETWORKS.get(w["network"], {}).get("name", w["network"])
+        if not isinstance(held, list):
+            unknown += 1
+            lines.append(f"\u2022 {name} `{short}` · balance unknown")
+            continue
+        coins = [f"{amt.normalize():f} {safe(sym)}" for sym, amt, _ in held if amt > 0]
+        if coins:
+            funded.append(name)
+            lines.append(f"\u2022 *{name}* `{short}` · {', '.join(coins[:3])}{' ...' if len(coins) > 3 else ''}")
+        else:
+            lines.append(f"\u2022 {name} `{short}` · empty")
+    nonce = secrets.token_hex(4)
+    context.user_data["delall_nonce"] = nonce
+    context.user_data["delall_funded"] = bool(funded or unknown)
+    text = (
+        "\u26A0\uFE0F *Delete All Wallets*\n\n"
+        f"This permanently deletes all *{len(wallets)}* of your wallets and their private keys. "
+        "The bot can't restore them.\n\n" + "\n".join(lines)
+    )
+    if funded:
+        text += (f"\n\n\U0001F534 *{len(funded)} wallets still hold funds.*" if len(funded) != 1 else "\n\n\U0001F534 *1 wallet still holds funds.*") + " Withdraw first or the funds will be lost."
+    elif unknown:
+        text += "\n\n\U0001F534 Some balances couldn't be checked. Make sure those wallets are empty."
+    keyboard = InlineKeyboardMarkup([
+        [ikb("Delete All Wallets", callback_data=f"delall:ok:{nonce}", emoji_fallback="\U0001F5D1")],
+        [ikb("Cancel", callback_data="delall:no", emoji_fallback="\u274C")],
+    ])
+    return text, keyboard
+
+
+async def deleteall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("*You are not authorised to use the bot!*", parse_mode="Markdown")
+        return
+    text, keyboard = await _delete_all_screen(user_id, context)
+    await send_photo_with_banner(update.message, "wallets", text, keyboard)
+
+
+async def deleteall_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return
+    query = update.callback_query
+    user_id = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1]
+    if action == "start":
+        await query.answer()
+        text, keyboard = await _delete_all_screen(user_id, context)
+        await edit_message_with_banner(query, "wallets", text, keyboard)
+        return
+    if action == "no":
+        await query.answer("Cancelled")
+        context.user_data.pop("delall_nonce", None)
+        await edit_message_with_banner(
+            query, "wallets", "*Cancelled.* Your wallets were not changed.", get_back_button("menu_wallets")
+        )
+        return
+    nonce = parts[2] if len(parts) > 2 else ""
+    if not nonce or nonce != context.user_data.get("delall_nonce"):
+        await query.answer("This button has expired. Run /deleteall again.", show_alert=True)
+        return
+    if action == "ok" and context.user_data.get("delall_funded"):
+        await query.answer()
+        await edit_message_with_banner(
+            query, "wallets",
+            "\U0001F534 *Final warning*\n\n"
+            "Some of your wallets still hold funds or couldn't be checked. "
+            "Once deleted, their private keys are gone and *those funds can't be recovered*.\n\n"
+            "Delete everything anyway?",
+            InlineKeyboardMarkup([
+                [ikb("Yes, Delete Everything", callback_data=f"delall:sure:{nonce}", emoji_fallback="\U0001F5D1")],
+                [ikb("Cancel", callback_data="delall:no", emoji_fallback="\u274C")],
+            ]),
+        )
+        return
+    context.user_data.pop("delall_nonce", None)
+    context.user_data.pop("delall_funded", None)
+    count = db.delete_all_wallets(user_id)
+    for key in [k for k in wallet_balances_cache if str(k).startswith(f"{user_id}:")]:
+        wallet_balances_cache.pop(key, None)
+    logger.info(f"User {user_id} deleted all {count} wallets")
+    await query.answer("Wallets deleted")
+    await edit_message_with_banner(
+        query, "wallets",
+        f"\U0001F5D1 *{count} wallet{'s' if count != 1 else ''} deleted.*\n\nCreate a new wallet any time.",
+        InlineKeyboardMarkup([
+            [ikb("Create Wallet", callback_data="menu_generate")],
+            [ikb("Back", callback_data="main_menu", emoji_fallback="\U0001F519")],
+        ]),
     )
 
 
@@ -6504,6 +6623,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{h_html('money', 'Balance & Wallets')}\n"
         "<code>/balance</code>  <i>Check balances across networks</i>\n"
         "<code>/wallets</code>  <i>Manage your wallet addresses</i>\n"
+        "<code>/deleteall</code>  <i>Delete all your wallets</i>\n"
         "<code>/tokens</code>  <i>Token balances by network</i>\n\n"
         f"{h_html('deposit', 'Deposits')}\n"
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
@@ -7377,6 +7497,7 @@ async def show_wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
     keyboard.append([InlineKeyboardButton("Add Wallet", callback_data="menu_generate")])
+    keyboard.append([ikb("Delete All Wallets", callback_data="delall:start", emoji_fallback="\U0001F5D1")])
     keyboard.append([InlineKeyboardButton("Home", callback_data="main_menu")])
 
     await edit_message_with_banner(
@@ -9944,6 +10065,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{h_html('money', 'Balance & Wallets')}\n"
         "<code>/balance</code>  <i>Check balances across networks</i>\n"
         "<code>/wallets</code>  <i>Manage your wallet addresses</i>\n"
+        "<code>/deleteall</code>  <i>Delete all your wallets</i>\n"
         "<code>/tokens</code>  <i>Token balances by network</i>\n\n"
         f"{h_html('deposit', 'Deposits')}\n"
         "<code>/deposit</code>  <i>Get a deposit address</i>\n"
@@ -11994,6 +12116,8 @@ def main():
     application.add_handler(CommandHandler("get_link", get_link_command))
     application.add_handler(CallbackQueryHandler(get_link_callback, pattern=r"^getlink:-?\d+$"))
     application.add_handler(CommandHandler("rescue", rescue_command))
+    application.add_handler(CommandHandler("deleteall", deleteall_command))
+    application.add_handler(CallbackQueryHandler(deleteall_callback, pattern=r"^delall:(start|no|ok:[0-9a-f]+|sure:[0-9a-f]+)$"))
     application.add_handler(CallbackQueryHandler(rescue_callback, pattern=r"^rescue:(ok|no):[0-9a-f]+$"))
 
     application.add_handler(
