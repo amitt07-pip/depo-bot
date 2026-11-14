@@ -12,7 +12,7 @@ import address_card as ac  # noqa: E402
 OUT = os.path.join(ROOT, "assets", "brand")
 GW, GH = 640, 360
 ACCENT = ac.BANNER_ACCENTS["welcome"]
-FEATURES = [("deposit", "Deposit"), ("withdraw", "Withdraw"), ("convert", "Swap"), ("balance", "Balance")]
+TAGLINES = ["Your crypto, one chat away"]
 
 
 def ease(t):
@@ -55,38 +55,33 @@ def frame(i, n, base, tile, logos):
     if q > 0:
         col = tuple(int(ac.BG[k] + (ac.SOFT[k] - ac.BG[k]) * q) for k in range(3))
         d.text((266, 216), "Secure Multi-Chain Wallet", font=ac._font("Inter.ttf", 24, b"Medium"), fill=col)
-    # Feature chips rise in one by one, then bob in a wave
-    gap = 12
-    x = (GW - sum(c.width for c in logos) - gap * (len(logos) - 1)) // 2
-    for k, chip in enumerate(logos):
-        r = ease((t - 0.34 - k * 0.07) / 0.15)
-        if r > 0:
-            y = int(296 + (1 - r) * 24 + math.sin(2 * math.pi * (t * 2 - k / 4)) * 2 * r)
-            ch = chip.copy()
-            ch.putalpha(ch.getchannel("A").point(lambda v: int(v * r)))
-            img.paste(ch, (x, y - chip.height // 2), ch)
-        x += chip.width + gap
+    # Taglines fade in one after another
+    slot = (1 - 0.34) / len(TAGLINES)
+    for k, line in enumerate(TAGLINES):
+        u = (t - 0.34) / slot - k
+        if u < 0 or (u >= 1 and k < len(TAGLINES) - 1):
+            continue
+        fade_in = ease(u / 0.25)
+        fade_out = 1 - ease((u - 0.78) / 0.22) if k < len(TAGLINES) - 1 else 1
+        p = fade_in * fade_out
+        if p <= 0:
+            continue
+        col = tuple(int(ac.BG[j] + (ac.TEXT[j] - ac.BG[j]) * p) for j in range(3))
+        dot = tuple(int(ac.BG[j] + (ACCENT[j] - ac.BG[j]) * p) for j in range(3))
+        font = ac._font("SpaceGrotesk.ttf", 30, b"Bold")
+        y = 300 + (1 - fade_in) * 14
+        w = d.textlength(line, font=font)
+        x = (GW - w) / 2 + 12
+        d.ellipse([x - 26, y - 6, x - 14, y + 6], fill=dot)
+        d.text((x, y), line, font=font, fill=col, anchor="lm")
     d.text((GW - 22, GH - 18), "@UseVexBot", font=ac._font("Inter.ttf", 16, b"Bold"), fill=ac.TEXT, anchor="rm")
     return img
 
 
-def feature_chip(name, label):
-    font = ac._font("Inter.ttf", 17, b"SemiBold")
-    w = int(ImageDraw.Draw(Image.new("L", (1, 1))).textlength(label, font=font)) + 64
-    chip = Image.new("RGBA", (w, 44), (0, 0, 0, 0))
-    d = ImageDraw.Draw(chip)
-    d.rounded_rectangle([0, 0, w - 1, 43], radius=22, fill=ac.PANEL + (255,), outline=ac.PANEL_EDGE + (255,), width=2)
-    accent = ac.BANNER_ACCENTS.get(name, ACCENT)
-    icon = ac._glyph_tile(name, 30, accent)
-    chip.paste(icon, (7, 7), icon if icon.mode == "RGBA" else None)
-    d.text((44, 22), label, font=font, fill=ac.TEXT + (255,), anchor="lm")
-    return chip
-
-
-def make_gif(path, n=48, ms=70):
+def make_gif(path, n=60, ms=70):
     base = backdrop()
     tile = ac._glyph_tile("welcome", 150, ACCENT)
-    logos = [feature_chip(name, label) for name, label in FEATURES]
+    logos = None
     frames = [frame(i, n, base, tile, logos) for i in range(n)]
     hold = [frames[-1]] * 0
     pal = frames[-1].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
