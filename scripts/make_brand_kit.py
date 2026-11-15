@@ -78,16 +78,28 @@ def frame(i, n, base, tile, logos):
     return img
 
 
-def make_gif(path, n=60, ms=70):
+def make_gif(path, n=40, ms=100, size=(GW, GH)):
+    """Every frame is stored at the full size: BotFather rejects GIFs whose frames are
+    cropped to the changed area ("GIF dimensions are invalid")."""
+    import subprocess
+    import tempfile
     base = backdrop()
     tile = ac._glyph_tile("welcome", 150, ACCENT)
-    logos = None
-    frames = [frame(i, n, base, tile, logos) for i in range(n)]
-    hold = [frames[-1]] * 0
-    pal = frames[-1].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
-    q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames + hold]
-    durations = [ms] * (n - 1) + [1600]
-    q[0].save(path, save_all=True, append_images=q[1:], duration=durations, loop=0, optimize=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(n):
+            img = frame(i, n, base, tile, None)
+            if img.size != size:
+                img = img.resize(size, Image.LANCZOS)
+            img.save(os.path.join(tmp, f"f{i:03d}.png"))
+        for _ in range(1600 // ms):
+            img.save(os.path.join(tmp, f"f{n + _:03d}.png"))
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-y", "-framerate", f"{1000 / ms:.4f}",
+            "-i", os.path.join(tmp, "f%03d.png"),
+            "-vf", "split[a][b];[a]palettegen=max_colors=96:reserve_transparent=0[p];"
+                   "[b][p]paletteuse=dither=none:diff_mode=none",
+            "-gifflags", "-offsetting-transdiff", "-loop", "0", path,
+        ], check=True)
 
 
 if __name__ == "__main__":
@@ -95,5 +107,6 @@ if __name__ == "__main__":
     with open(os.path.join(OUT, "profile.png"), "wb") as f:
         f.write(ac.render_profile_picture(640))
     make_gif(os.path.join(OUT, "description.gif"))
+    make_gif(os.path.join(OUT, "description_960.gif"), size=(960, 540))
     for name in os.listdir(OUT):
         print(name, os.path.getsize(os.path.join(OUT, name)))
