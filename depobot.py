@@ -9890,9 +9890,32 @@ async def receive_withdraw_amount(
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_AMOUNT
 
-    context.user_data["withdraw_amount"] = amount
     network = context.user_data.get("withdraw_network")
     token = context.user_data.get("withdraw_token")
+    if network in NETWORKS:
+        token_net = TOKENS.get(token, {}).get("networks", {}).get(network, {}) if token else {}
+        is_native = not token or token_net.get("native", False)
+        unit = TOKENS[token]["symbol"] if token in TOKENS else NETWORKS[network]["symbol"]
+        balance = await get_withdrawable_balance(update.effective_user.id, network, None if is_native else token)
+        spendable = balance
+        if is_native:
+            spendable = await resolve_withdraw_keyword_amount(
+                update.effective_user.id, network, token, "max") or Decimal("0")
+            spendable = min(spendable, balance) if balance > 0 else Decimal("0")
+        if amount_decimal > spendable:
+            fee_note = " Part is kept for the network fee." if is_native and spendable < balance else ""
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Not Enough Balance*\n\n"
+                f"*Available:* `{_fmt_amount(spendable)} {unit}`\n"
+                f"*Entered:* `{_fmt_amount(amount_decimal)} {unit}`\n\n"
+                f"Reply with a smaller amount, or `max`.{fee_note}",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
+
+    context.user_data["withdraw_amount"] = amount
     address = context.user_data.get("withdraw_address")
     token_address = context.user_data.get("withdraw_contract") or context.user_data.get("withdraw_token_address")
     info = NETWORKS[network]
