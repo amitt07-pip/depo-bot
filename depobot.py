@@ -7449,11 +7449,8 @@ async def _check_address(update: Update, address: str, detected, message=None, b
             parse_mode="HTML"
         )
     else:
+        # Refresh/breakdown: keep the current card until the new one is ready.
         loading_msg = message
-        try:
-            await loading_msg.edit_text(loading_text, parse_mode="HTML")
-        except Exception:
-            pass
 
     try:
         balances, total_usd, errors = await _gather_address_balances(address, detected)
@@ -8008,7 +8005,7 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
 
-    if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
+    if await replace_with_rich(
         query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address,
         card=address_card_spec(token, network_info["name"], address, balance_str)
     ):
@@ -8147,11 +8144,24 @@ async def refresh_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     info = NETWORKS[network]
 
-    await edit_message_with_banner(
-        query, "wallet",
-        f"*{info['name']} Wallet*\n\n*Address:*\n`{wallet['address']}`\n\n*Fetching balance...*",
-        None
-    )
+    try:
+        _, png = await build_balance_screen([wallet], context.bot)
+    except Exception as e:
+        logger.warning(f"Wallet refresh card failed: {e}")
+        png = None
+    if png:
+        markup = get_wallet_card_keyboard(network)
+        if await replace_with_rich(query, "wallet", "", markup, image=png):
+            return
+        try:
+            await context.bot.send_photo(chat_id=query.message.chat_id, photo=png, reply_markup=markup)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            logger.warning(f"Wallet refresh photo failed, sending text: {e}")
 
     balance_info = await BalanceChecker.get_balance(network, wallet["address"])
     balance_str = balance_info.get("balance", "Error")
@@ -9212,7 +9222,7 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n`{wallet['address']}`"
     )
-    if (query.message.chat_id, query.message.message_id) in RICH_MESSAGE_IDS and await replace_with_rich(
+    if await replace_with_rich(
         query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
         card=address_card_spec(token, network_info["name"], wallet["address"], balance_str)
     ):
