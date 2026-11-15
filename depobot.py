@@ -7206,27 +7206,28 @@ async def _check_address(update: Update, address: str, detected, message=None, b
     try:
         balances, total_usd, errors = await _gather_address_balances(address, detected)
 
+        explorer_buttons = []
+        seen_networks = set()
+        for entry in balances:
+            network = entry["network"]
+            if entry["balance"] > 0 and network not in seen_networks:
+                seen_networks.add(network)
+                explorer_buttons.append(InlineKeyboardButton(
+                    f"\U0001F310 {esc(entry['network_name'])}",
+                    url=entry["explorer_url"]
+                ))
+        explorer_rows = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
         if breakdown:
             text = _format_check_breakdown(address, balances)
-            explorer_buttons = []
-            seen_networks = set()
-            for entry in balances:
-                network = entry["network"]
-                if entry["balance"] > 0 and network not in seen_networks:
-                    seen_networks.add(network)
-                    explorer_buttons.append(InlineKeyboardButton(
-                        f"\U0001F310 {esc(entry['network_name'])}",
-                        url=entry["explorer_url"]
-                    ))
-            keyboard = [explorer_buttons[i:i + 2] for i in range(0, len(explorer_buttons), 2)]
+            keyboard = [[copy_address_button(address)]] + explorer_rows
             keyboard.append([
                 InlineKeyboardButton("Back", callback_data=f"check_refresh_{address}"),
                 InlineKeyboardButton("Refresh", callback_data=f"check_breakdown_{address}"),
             ])
         else:
             text = _format_check_summary(address, total_usd)
-            keyboard = [
-                [InlineKeyboardButton("View balance breakdown", callback_data=f"check_breakdown_{address}")],
+            keyboard = explorer_rows + [
+                [copy_address_button(address)],
                 [InlineKeyboardButton("Refresh", callback_data=f"check_refresh_{address}")],
             ]
 
@@ -7258,7 +7259,6 @@ async def _check_address(update: Update, address: str, detected, message=None, b
             png = None
         if errors:
             logger.info(f"Address check partial errors for {address}: {errors}")
-        keyboard.insert(0, [copy_address_button(address)])
         await _send_check_card(update, loading_msg, "balance", "", text, keyboard, png)
     except Exception as e:
         logger.error(f"Error in check_command (address): {e}")
