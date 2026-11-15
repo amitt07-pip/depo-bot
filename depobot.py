@@ -525,11 +525,67 @@ def _rich_attr(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+_FALLBACK_TO_UI = {fb.replace("\ufe0f", ""): name for name, (eid, fb) in UI_EMOJI.items() if eid}
+_LEADING_EMOJI_RE = re.compile(r"^([\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF][\uFE0F\u20E3]?)\s*")
+_ICON_KEYWORDS = (
+    (r"\b(cancel|delete|remove|stop|reject)\b", "error"),
+    (r"\b(confirm|yes|approve)\b", "success"),
+    (r"\b(resume|notifications?|alerts?)\b", "bell"),
+    (r"\brefresh\b", "refresh"),
+    (r"\b(back|main menu|home|menu)\b", "home"),
+    (r"\bcopy\b", "copy"),
+    (r"\b(explorer|view on)\b", "explorer"),
+    (r"\b(withdraw|send|rescue)\b", "withdraw"),
+    (r"\bdeposit\b", "deposit"),
+    (r"\b(convert|swap)\b", "convert"),
+    (r"\b(generate|create|new wallet|add wallet)\b", "new"),
+    (r"\bwallets?\b", "wallet"),
+    (r"\bbalances?\b", "balance"),
+    (r"\bportfolio\b", "portfolio"),
+    (r"\b(tokens?|coins?)\b", "coin"),
+    (r"\b(qr|address)\b", "address"),
+    (r"\b(hash|transaction|history)\b", "link"),
+    (r"\b(help|guide)\b", "help"),
+    (r"\bsettings?\b", "settings"),
+    (r"\b(sync|check)\b", "check"),
+)
+_ICON_KEYWORDS = tuple((re.compile(rx, re.I), name) for rx, name in _ICON_KEYWORDS)
+
+
+def auto_button_icon(text: str):
+    """Pick a premium emoji for a button that has none: a leading standard emoji is
+    swapped for its premium twin, a coin/network name gets its logo, else a keyword icon.
+    Returns (emoji_id, fallback, label_without_leading_emoji) or (None, None, text)."""
+    label = text or ""
+    lead = _LEADING_EMOJI_RE.match(label)
+    rest = label[lead.end():] if lead else label
+    first = rest.split()[0].upper() if rest.split() else ""
+    if first in TOKEN_EMOJI:
+        return TOKEN_EMOJI[first], "\U0001FA99", rest
+    for key, info in NETWORKS.items():
+        if rest.strip().lower() == info["name"].lower() and net_emoji_id(key):
+            return net_emoji_id(key), "\U0001FA99", rest
+    if lead:
+        name = _FALLBACK_TO_UI.get(lead.group(1).replace("\ufe0f", ""))
+        if name:
+            return UI_EMOJI[name][0], UI_EMOJI[name][1], rest
+        return None, None, label
+    for rx, name in _ICON_KEYWORDS:
+        if rx.search(label):
+            return UI_EMOJI[name][0], UI_EMOJI[name][1], label
+    return None, None, label
+
+
 def _rich_button(btn):
-    label = html.escape(btn.text, quote=False)
     if getattr(btn, "icon_custom_emoji_id", None):
+        label = html.escape(btn.text, quote=False)
         fallback = _EMOJI_ID_FALLBACK.get(btn.icon_custom_emoji_id, "\U0001FA99")
         label = f"{ce(btn.icon_custom_emoji_id, fallback)} {label}"
+    else:
+        eid, fallback, text = auto_button_icon(btn.text)
+        label = html.escape(text, quote=False)
+        if eid:
+            label = f"{ce(eid, fallback)} {label}"
     style = getattr(btn, "style", None) or auto_button_style(btn.text, btn.callback_data)
     style_attr = f' style="{style}"' if style else ""
     if btn.copy_text:
