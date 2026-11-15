@@ -780,3 +780,65 @@ def render_withdraw_card(title: str, step: int, rows=(), notes=(), symbol: str =
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+def render_deposit_card(symbol: str, amount, network_name: str, usd_value, balance, address: str,
+                        tx_hash: str, when: str, brand: str = None) -> bytes:
+    """Incoming-deposit alert: +amount with coin logo, USD value, wallet, hash, time, new balance."""
+    symbol = (symbol or "").upper()
+    accent = TOKEN_COLORS.get(symbol, (98, 126, 234))
+    green = _STATUS_STYLES["success"][0]
+    img, d = _canvas(accent)
+
+    x0, size = 96, 132
+    _logo_or_badge(img, d, symbol, x0, 100, size)
+    tx = x0 + size + 32
+    _spaced(d, (tx, 104), "DEPOSIT RECEIVED", _font("Inter.ttf", 22, b"SemiBold"), MUTED, 5)
+    amount_s = f"+{_amount(amount)} {symbol}"
+    d.text((tx - 3, 132), amount_s, font=_fit(d, amount_s, "SpaceGrotesk.ttf", b"Bold", 560, 68, 32), fill=green)
+    pill_font = _font("Inter.ttf", 24, b"Medium")
+    pw = d.textlength(network_name, font=pill_font) + 52
+    d.rounded_rectangle([tx, 218, tx + pw, 258], radius=20, fill=CHIP, outline=accent, width=2)
+    d.ellipse([tx + 16, 232, tx + 28, 244], fill=accent)
+    d.text((tx + 38, 238), network_name, font=pill_font, fill=TEXT, anchor="lm")
+
+    sf = _font("Inter.ttf", 24, b"SemiBold")
+    label = "Received"
+    sw = d.textlength(label, font=sf) + 64
+    sx1 = W - 96
+    tint = tuple(int(c * 0.14 + 255 * 0.86) for c in green)
+    d.rounded_rectangle([sx1 - sw, 100, sx1, 146], radius=23, fill=tint, outline=green, width=2)
+    d.ellipse([sx1 - sw + 20, 116, sx1 - sw + 34, 130], fill=green)
+    d.text((sx1 - sw + 44, 123), label, font=sf, fill=green, anchor="lm")
+    if usd_value is not None:
+        d.text((sx1, 176), f"\u2248 {_usd(usd_value)}", font=_font("SpaceGrotesk.ttf", 40, b"Bold"),
+               fill=TEXT, anchor="ra")
+        d.text((sx1, 228), "USD VALUE", font=_font("Inter.ttf", 18, b"SemiBold"), fill=MUTED, anchor="ra")
+
+    px0, py0, px1, py1 = 96, 288, W - 96, 466
+    d.rounded_rectangle([px0, py0, px1, py1], radius=22, fill=PANEL, outline=PANEL_EDGE, width=2)
+    lab = _font("Inter.ttf", 18, b"SemiBold")
+    mono = _font("JetBrainsMono.ttf", 28, b"Medium")
+    _spaced(d, (px0 + 30, py0 + 20), "TO YOUR WALLET", lab, MUTED, 4)
+    d.text((px0 + 30, py0 + 48), _short(address), font=mono, fill=TEXT)
+    bal_s = f"{_amount(balance)} {symbol}" if balance not in (None, "") else "\u2014"
+    _spaced(d, (px1 - 30 - _spaced_width(d, "NEW BALANCE", lab, 4), py0 + 20), "NEW BALANCE", lab, MUTED, 4)
+    d.text((px1 - 30, py0 + 48), bal_s, font=_fit(d, bal_s, "SpaceGrotesk.ttf", b"Bold", 420, 30, 20),
+           fill=TEXT, anchor="ra")
+    d.line([(px0 + 30, py0 + 104), (px1 - 30, py0 + 104)], fill=TRACK, width=2)
+    _spaced(d, (px0 + 30, py0 + 118), "TX HASH", lab, MUTED, 4)
+    d.text((px0 + 30, py0 + 140), _short(tx_hash, 10, 8) if tx_hash else "\u2014",
+           font=_font("JetBrainsMono.ttf", 22, b"Medium"), fill=SOFT)
+    _spaced(d, (px1 - 30 - _spaced_width(d, "DATE", lab, 4), py0 + 118), "DATE", lab, MUTED, 4)
+    d.text((px1 - 30, py0 + 140), when or "Unknown", font=_font("Inter.ttf", 22, b"Medium"), fill=SOFT, anchor="ra")
+
+    fy = 512
+    d.ellipse([x0 + 2, fy - 6, x0 + 14, fy + 6], fill=green)
+    d.text((x0 + 26, fy), f"Funds credited \u00b7 {network_name}", font=_font("Inter.ttf", 21, b"Medium"),
+           fill=SOFT, anchor="lm")
+    if brand:
+        d.text((W - 96, fy), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()

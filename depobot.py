@@ -90,7 +90,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
-from address_card import (render_address_card, render_withdraw_card, render_dashboard_card, render_portfolio_card,
+from address_card import (render_address_card, render_deposit_card, render_withdraw_card, render_dashboard_card, render_portfolio_card,
                           render_transaction_card, render_breakdown_card)
 
 # Suppress noisy HTTP request logs from httpx and telegram
@@ -12265,6 +12265,47 @@ def _spawn_background(coro):
     task.add_done_callback(_notification_tasks.discard)
 
 
+async def send_deposit_alert(bot, chat_ids, network, address, symbol, amount, new_balance,
+                             tx_hash, explorer_url, timestamp=None):
+    """Deposit notification as an image card + buttons (rich, else photo, else text)."""
+    network_name = NETWORKS.get(network, {}).get("name", network)
+    try:
+        usd_value = Decimal(str(amount)) * await PriceFetcher.get_price(symbol)
+    except Exception:
+        usd_value = None
+    when = format_ist(timestamp or time.time())
+    rows = [[ikb("View on Explorer", ui_name="explorer", url=explorer_url, style="primary")]]
+    if tx_hash:
+        rows[0].append(ikb("Copy Hash", ui_name="copy", copy_text=CopyTextButton(tx_hash), style="success"))
+    rows.append([ikb("Balance", callback_data="menu_balance", ui_name="balance", style="primary")])
+    keyboard = InlineKeyboardMarkup(rows)
+    try:
+        png = await asyncio.to_thread(
+            render_deposit_card, symbol, amount, network_name, usd_value, new_balance, address,
+            tx_hash, when, _bot_brand(bot)
+        )
+    except Exception as e:
+        logger.warning(f"Deposit card render failed: {e}")
+        png = None
+    text = (
+        f"{h_html('deposit', 'Deposit Received')}\n\n"
+        f"{tok(symbol)}  <b>+{esc(_fmt_amount(amount))} {esc(symbol)}</b>  [{esc(network_name)}]\n"
+        f"{ui('money')}  <b>Balance:</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
+    )
+    for chat_id in chat_ids:
+        try:
+            sent = await send_rich_screen(bot, chat_id, None, "", keyboard, image=png) if png else None
+            if not sent and png:
+                try:
+                    sent = await bot.send_photo(chat_id=chat_id, photo=png, reply_markup=keyboard)
+                except Exception as e:
+                    logger.warning(f"Deposit card photo failed, sending text: {e}")
+            if not sent:
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            logger.error(f"Error sending deposit notification to {chat_id}: {e}")
+
+
 async def _resolve_new_deposit(network: str, address: str, token_name: str, since: float, attempts: int):
     """Find the latest incoming tx that hasn't been notified yet (retries while indexers catch up)."""
     for i in range(attempts):
@@ -12339,26 +12380,15 @@ async def check_wallet_transactions(application):
             explorer_url = address_explorer_url(network, address)
         last_notified_balances[cooldown_key] = new_val
 
-        msg = (
-            f"{h_html('deposit', 'Deposit Received')}\n\n"
-            f"{tok(symbol)}  <b>+{esc(_fmt_amount(amount))} {esc(symbol)}</b>  "
-            f"[{esc(network_info.get('name', network))}]\n"
-            f"{ui('money')}  <b>Balance:</b>  <code>{esc(new_balance)} {esc(symbol)}</code>"
+        chats = [user_id]
+        if user_id == ALLOWED_USER_ID and ALLOWED_CHAT_ID:
+            # Also send owner notifications to the configured group chat
+            chats.append(ALLOWED_CHAT_ID)
+        await send_deposit_alert(
+            application.bot, chats, network, address, symbol, amount, new_balance,
+            tx_info.get("tx_hash") if tx_info else None, explorer_url,
+            tx_info.get("timestamp") if tx_info else None,
         )
-        keyboard = InlineKeyboardMarkup([[
-            ikb("View on Explorer", ui_name="explorer", url=explorer_url)
-        ]])
-        try:
-            await application.bot.send_message(
-                chat_id=user_id, text=msg, parse_mode="HTML", reply_markup=keyboard
-            )
-            if user_id == ALLOWED_USER_ID and ALLOWED_CHAT_ID:
-                # Also send owner notifications to the configured group chat
-                await application.bot.send_message(
-                    chat_id=ALLOWED_CHAT_ID, text=msg, parse_mode="HTML", reply_markup=keyboard
-                )
-        except Exception as e:
-            logger.error(f"Error sending transaction notification: {e}")
 
     def handle_change(cache_key, user_id, network, address, symbol, current, token_key=None):
         old = wallet_balances_cache.get(cache_key)
