@@ -1,7 +1,9 @@
 import os
 import io
 import json
+import functools
 import html
+import unicodedata
 import sqlite3
 import logging
 import hashlib
@@ -88,7 +90,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import traceback
 
-from address_card import (render_address_card, render_dashboard_card, render_portfolio_card,
+from address_card import (render_address_card, render_withdraw_card, render_dashboard_card, render_portfolio_card,
                           render_transaction_card, render_breakdown_card)
 
 # Suppress noisy HTTP request logs from httpx and telegram
@@ -590,6 +592,8 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
                            image: bytes = None):
     """Send a screen as a rich message. Returns the Message, or None so the
     caller falls back to the classic photo + inline keyboard."""
+    if WITHDRAW_CARD.get() is not None and image is None and card is None and caption:
+        return await withdraw_card_message(bot, chat_id, caption, parse_mode, keyboard)
     if not RICH_MESSAGES_ENABLED or time.time() < _RICH_STATE["retry_after"]:
         return None
     caption_html = tg_html(caption) if parse_mode == "Markdown" else caption
@@ -771,6 +775,217 @@ def _install_rich_edit_redirects():
 
 
 _install_rich_edit_redirects()
+
+
+# Withdrawal screens are image-only: while a withdraw handler runs, every message it
+# sends or edits is drawn as a withdraw card (see render_withdraw_card) with its buttons.
+WITHDRAW_CARD = contextvars.ContextVar("withdraw_card", default=None)
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200B\u200D\u20E3]")
+_CARD_ERROR_WORDS = ("not recognized", "not enough", "invalid", "insufficient", "not found", "not available",
+                     "unavailable", "no wallet", "not supported", "too low", "too small", "minimum",
+                     "exceeds", "unknown", "missing", "wrong")
+
+
+def withdraw_cards(step: int):
+    """Run a withdraw handler with card mode on; `step` is its place in the 5-step bar."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(update, context, *args, **kwargs):
+            query = getattr(update, "callback_query", None)
+            if query is not None and (query.data or "").startswith("qp_dep_"):
+                return await fn(update, context, *args, **kwargs)
+            state = WITHDRAW_CARD.get()
+            if state is not None:
+                state["step"] = step
+                return await fn(update, context, *args, **kwargs)
+            token = WITHDRAW_CARD.set({"step": step, "ud": context.user_data})
+            try:
+                return await fn(update, context, *args, **kwargs)
+            finally:
+                WITHDRAW_CARD.reset(token)
+        return wrapper
+    return deco
+
+
+def _plain_lines(text: str, parse_mode) -> list:
+    if parse_mode == "Markdown":
+        text = tg_html(text)
+    if parse_mode in ("Markdown", "HTML"):
+        text = re.sub(r"<br\s*/?>", "\n", text)
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    lines = []
+    for raw in (text or "").split("\n"):
+        line = re.sub(r"\s+", " ", _EMOJI_RE.sub("", unicodedata.normalize("NFKC", raw))).strip(" _*`")
+        line = re.sub(r"^step \d+\s*/\s*\d+\s*:\s*", "", line, flags=re.I).strip()
+        if line and not set(line) <= set("=-_\u2500\u2501\u2014 ."):
+            lines.append(line)
+    return lines
+
+
+def withdraw_card_spec(text: str, parse_mode, state: dict) -> dict:
+    """Turn a withdraw screen's text into the fields of its card."""
+    lines = _plain_lines(text, parse_mode)
+    title = lines[0].rstrip(":") if lines else "Withdraw"
+    rows, notes, warnings, i = [], [], [], 1
+    while i < len(lines):
+        line = lines[i]
+        amt = re.match(r"^([\d.,]+)\s+([A-Za-z0-9]+)\s*\[(.+)\]$", line)
+        if amt:
+            rows.append(("Amount", f"{amt.group(1)} {amt.group(2)}"))
+            i += 1
+            continue
+        if line.lower() in ("confirmed", "confirmation pending"):
+            i += 1
+            continue
+        if " " not in line and len(line) >= 10 and ("\u2026" in line or "..." in line):
+            rows.append(("To", line))
+            i += 1
+            continue
+        m = re.match(r"^([A-Za-z][A-Za-z0-9 ./()]{0,22}):\s*(.*)$", line)
+        if m and len(m.group(1).split()) <= 4:
+            label, value = m.group(1).strip(), m.group(2).strip()
+            if not value and i + 1 < len(lines):
+                i += 1
+                value = lines[i]
+            if label.lower() == "example":
+                notes.append(f"{label}: {value}")
+            elif label.lower() in ("warning", "note", "error"):
+                (warnings if label.lower() == "warning" else notes).append(
+                    f"Warning: {value}" if label.lower() == "warning" else value)
+            elif value:
+                rows.append((label, value))
+            else:
+                notes.append(line)
+        else:
+            notes.append(line)
+        i += 1
+
+    if warnings:
+        warnings[-1] = " ".join([warnings[-1]] + [n for n in notes if n.lower().startswith("please verify")])
+        notes = warnings + [n for n in notes if not n.lower().startswith(("please verify", "please review"))]
+    ud = state.get("ud") or {}
+    network = ud.get("withdraw_network")
+    symbol = ud.get("withdraw_token") or (NETWORKS.get(network, {}).get("symbol") if network else None)
+    if symbol and symbol in TOKENS:
+        symbol = TOKENS[symbol].get("symbol", symbol)
+    step = state.get("step", 1)
+    low, everything = title.lower(), " ".join(lines).lower()
+    status = label = None
+    if "withdrawal confirmation" in low or "review" in low:
+        step = 4
+    elif "destination address" in everything and step < 3:
+        step = 3
+    if "cancel" in low:
+        status, label = "muted", "Cancelled"
+    elif "processing" in low or "sending" in low:
+        step, status, label = 5, "pending", "Sending"
+    elif low.startswith("sent") or "successful" in low:
+        step = 5
+        status, label = ("pending", "Pending") if "pending" in everything else ("success", "Confirmed")
+    elif "failed" in low or low.startswith("error"):
+        status, label = ("failed", "Failed") if step == 5 else ("error", "Error")
+    elif any(w in low for w in _CARD_ERROR_WORDS) or low.startswith("no ") or "\u26a0" in (text or "")[:4]:
+        status, label = "error", "Check this"
+    shown = {(symbol or "").upper(), (NETWORKS.get(network, {}).get("name") or "").lower()}
+    rows = [(k, v) for k, v in rows
+            if not (k.lower() in ("token", "asset") and v.upper() in shown)
+            and not (k.lower() == "network" and v.lower() in shown)]
+    if not rows and not notes:
+        notes = {"pending": ["Sending your withdrawal\u2026", "This can take a few seconds."],
+                 "muted": ["Withdrawal cancelled.", "Nothing was sent."]}.get(status, [])
+    return {"title": title, "step": step, "rows": rows, "notes": notes, "symbol": symbol,
+            "network_name": NETWORKS.get(network, {}).get("name") if network else None,
+            "status": status, "status_label": label}
+
+
+async def withdraw_card_message(bot, chat_id, text, parse_mode, reply_markup):
+    """Send a withdraw card (rich message with in-text buttons, or photo) instead of text."""
+    state = WITHDRAW_CARD.get() or {}
+    spec = withdraw_card_spec(text, parse_mode, state)
+    try:
+        brand = f"@{bot.username}" if getattr(bot, "username", None) else None
+    except Exception:
+        brand = None
+    png = await asyncio.to_thread(render_withdraw_card, brand=brand, **spec)
+    rows = list(reply_markup.inline_keyboard) if isinstance(reply_markup, InlineKeyboardMarkup) else []
+    for label, value in spec["rows"]:
+        if "hash" in label.lower() and len(value) > 20 and " " not in value:
+            rows.insert(0, [ikb("Copy Hash", ui_name="copy", copy_text=CopyTextButton(value), style="success")])
+            break
+    if not rows and spec["step"] < 5 and spec["status"] != "muted":
+        rows = [[InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")]]
+    markup = InlineKeyboardMarkup(rows) if rows else None
+    token = WITHDRAW_CARD.set(None)
+    try:
+        msg = await send_rich_screen(bot, chat_id, None, "", markup, image=png)
+        if msg is None:
+            msg = await bot.send_photo(chat_id=chat_id, photo=png, reply_markup=markup)
+        return msg
+    finally:
+        WITHDRAW_CARD.reset(token)
+
+
+def _install_withdraw_cards():
+    from telegram import Bot
+
+    orig_send = Bot.send_message
+    orig_photo = Bot.send_photo
+    edits = {name: getattr(Bot, name) for name in
+             ("edit_message_text", "edit_message_caption", "edit_message_media")}
+
+    async def send_message(self, *args, **kwargs):
+        if WITHDRAW_CARD.get() is None:
+            return await orig_send(self, *args, **kwargs)
+        chat_id = kwargs.get("chat_id", args[0] if args else None)
+        text = kwargs.get("text", args[1] if len(args) > 1 else "")
+        return await withdraw_card_message(self, chat_id, text, kwargs.get("parse_mode"),
+                                           kwargs.get("reply_markup"))
+
+    async def send_photo(self, *args, **kwargs):
+        if WITHDRAW_CARD.get() is None or not kwargs.get("caption"):
+            return await orig_photo(self, *args, **kwargs)
+        chat_id = kwargs.get("chat_id", args[0] if args else None)
+        photo = kwargs.get("photo")
+        if hasattr(photo, "close"):
+            photo.close()
+        return await withdraw_card_message(self, chat_id, kwargs["caption"], kwargs.get("parse_mode"),
+                                           kwargs.get("reply_markup"))
+
+    def _edit(name, text_of):
+        orig = edits[name]
+
+        async def wrapper(self, *args, **kwargs):
+            if WITHDRAW_CARD.get() is None or kwargs.get("inline_message_id") or kwargs.get("chat_id") is None:
+                return await orig(self, *args, **kwargs)
+            text, parse_mode = text_of(args, kwargs)
+            if not text:
+                return await orig(self, *args, **kwargs)
+            key = (kwargs["chat_id"], kwargs.get("message_id"))
+            seen = 0
+            while key in RICH_REPLACED and seen < 10:
+                key, seen = (key[0], RICH_REPLACED[key]), seen + 1
+            try:
+                await self.delete_message(key[0], key[1])
+            except Exception:
+                pass
+            new = await withdraw_card_message(self, key[0], text, parse_mode, kwargs.get("reply_markup"))
+            RICH_REPLACED[key] = new.message_id
+            return new
+
+        wrapper.__name__ = name
+        wrapper.__doc__ = orig.__doc__
+        setattr(Bot, name, wrapper)
+
+    _edit("edit_message_text",
+          lambda a, k: (k.get("text", a[0] if a else None), k.get("parse_mode")))
+    _edit("edit_message_caption", lambda a, k: (k.get("caption"), k.get("parse_mode")))
+    _edit("edit_message_media", lambda a, k: (getattr(k.get("media"), "caption", None),
+                                              getattr(k.get("media"), "parse_mode", None)))
+    send_message.__doc__, send_photo.__doc__ = orig_send.__doc__, orig_photo.__doc__
+    Bot.send_message, Bot.send_photo = send_message, send_photo
+
+
+_install_withdraw_cards()
 
 
 _KNOWN_BOT_CHATS = {}
@@ -6476,6 +6691,7 @@ async def _pick_withdraw_token_for_network(user_id: int, network: str):
     return None, Decimal("0"), None, network_info.get("symbol", native_asset), True
 
 
+@withdraw_cards(1)
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
@@ -8013,6 +8229,7 @@ def quick_pair_rows(user_id: int, action: str, token: str = None) -> list:
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
+@withdraw_cards(1)
 async def quick_pair_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Jump straight to the deposit address / withdraw amount step for a saved pair."""
     if not await check_callback_auth(update):
@@ -8753,6 +8970,7 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+@withdraw_cards(2)
 async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return ConversationHandler.END
@@ -8828,6 +9046,7 @@ async def show_combo_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE
     return WITHDRAW_AMOUNT
 
 
+@withdraw_cards(1)
 async def show_token_withdraw_networks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -8865,6 +9084,7 @@ async def show_token_withdraw_networks(
     )
 
 
+@withdraw_cards(2)
 async def show_token_withdraw_info(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -9137,6 +9357,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_image_screen(context.bot, query.message.chat_id, "balance", caption, keyboard, png)
 
 
+@withdraw_cards(1)
 async def show_withdraw_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -9196,6 +9417,7 @@ async def show_tokens_list_popup(update: Update, context: ContextTypes.DEFAULT_T
     return None
 
 
+@withdraw_cards(1)
 async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive and parse token from user's natural language input."""
     text = update.message.text.strip()
@@ -9261,6 +9483,7 @@ async def receive_withdraw_token(update: Update, context: ContextTypes.DEFAULT_T
     return WITHDRAW_NETWORK
 
 
+@withdraw_cards(1)
 async def receive_withdraw_network(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive and parse network from user's natural language input."""
     text = update.message.text.strip()
@@ -9338,6 +9561,7 @@ async def ask_withdraw_confirmation(update: Update, context: ContextTypes.DEFAUL
     return WITHDRAW_CONFIRM_SELECTION
 
 
+@withdraw_cards(2)
 async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User confirmed their token/network selection, proceed to amount entry."""
     query = update.callback_query
@@ -9409,6 +9633,7 @@ async def confirm_withdraw_selection(update: Update, context: ContextTypes.DEFAU
     return WITHDRAW_AMOUNT
 
 
+@withdraw_cards(2)
 async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return ConversationHandler.END
@@ -9480,6 +9705,7 @@ async def start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WITHDRAW_AMOUNT
 
 
+@withdraw_cards(1)
 async def receive_withdraw_quick_network(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -9609,6 +9835,7 @@ async def resolve_withdraw_keyword_amount(user_id: int, network: str, token: str
     return amount if amount > 0 else None
 
 
+@withdraw_cards(2)
 async def receive_withdraw_amount(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -9734,6 +9961,7 @@ async def receive_withdraw_amount(
     return WITHDRAW_ADDRESS
 
 
+@withdraw_cards(3)
 async def receive_withdraw_address(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -9870,6 +10098,7 @@ async def receive_withdraw_address(
     return WITHDRAW_CONFIRM
 
 
+@withdraw_cards(5)
 async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -10113,6 +10342,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+@withdraw_cards(1)
 async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_callback_auth(update):
         return ConversationHandler.END

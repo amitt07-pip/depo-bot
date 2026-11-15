@@ -644,3 +644,139 @@ def render_breakdown_card(heading: str, address: str, total_usd, rows, brand: st
     out = io.BytesIO()
     img.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+WITHDRAW_STEPS = ("Asset", "Amount", "Address", "Review", "Sent")
+_KIND_COLOURS = {"success": (22, 163, 74), "pending": (217, 119, 6),
+                 "failed": (220, 38, 38), "error": (220, 38, 38), "muted": (112, 117, 132)}
+
+
+def _wrap_lines(d, text, font, max_w, max_lines):
+    lines, cur = [], ""
+    for word in text.split():
+        trial = f"{cur} {word}".strip()
+        if d.textlength(trial, font=font) <= max_w:
+            cur = trial
+            continue
+        if cur:
+            lines.append(cur)
+        cur = word
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rstrip(".,:;") + "\u2026"
+    return lines
+
+
+def _note_colour(note: str, status: str):
+    if status in ("error", "failed"):
+        return _KIND_COLOURS["error"]
+    return AMBER if note.startswith("Warning") else SOFT
+
+
+def _is_code(value: str) -> bool:
+    return len(value) >= 20 and " " not in value
+
+
+def render_withdraw_card(title: str, step: int, rows=(), notes=(), symbol: str = None,
+                         network_name: str = None, status: str = None, status_label: str = None,
+                         brand: str = None) -> bytes:
+    """One card per withdrawal step: coin, title, step/status badge, details panel and a
+    5-step progress bar (Asset, Amount, Address, Review, Sent)."""
+    symbol = (symbol or "").upper() or None
+    accent = _KIND_COLOURS.get(status) if status in ("success", "failed", "error") \
+        else BANNER_ACCENTS["withdraw"]
+    img, d = _canvas(accent)
+
+    x0, size = 96, 112
+    if symbol:
+        _logo_or_badge(img, d, symbol, x0, 92, size)
+    else:
+        tint = tuple(int(c * 0.16 + 255 * 0.84) for c in accent)
+        d.ellipse([x0, 92, x0 + size, 92 + size], fill=tint, outline=accent, width=3)
+        cx, cy = x0 + size // 2, 92 + size // 2
+        d.line([(cx - 20, cy + 20), (cx + 18, cy - 18)], fill=accent, width=8)
+        d.polygon([(cx + 26, cy - 26), (cx - 2, cy - 22), (cx + 22, cy + 2)], fill=accent)
+    tx = x0 + size + 30
+    _spaced(d, (tx, 96), "WITHDRAW", _font("Inter.ttf", 22, b"SemiBold"), MUTED, 5)
+    d.text((tx - 3, 122), title, font=_fit(d, title, "SpaceGrotesk.ttf", b"Bold", 560, 56, 28), fill=TEXT)
+    if network_name:
+        pill_font = _font("Inter.ttf", 24, b"Medium")
+        pw = d.textlength(network_name, font=pill_font) + 52
+        d.rounded_rectangle([tx, 196, tx + pw, 236], radius=20, fill=CHIP, outline=accent, width=2)
+        d.ellipse([tx + 16, 210, tx + 28, 222], fill=accent)
+        d.text((tx + 38, 216), network_name, font=pill_font, fill=TEXT, anchor="lm")
+
+    # Step / status badge
+    colour = _KIND_COLOURS.get(status, SOFT)
+    label = status_label or f"Step {max(1, min(step, 5))} of 5"
+    sf = _font("Inter.ttf", 24, b"SemiBold")
+    sw = d.textlength(label, font=sf) + 64
+    sx1 = W - 96
+    tint = tuple(int(c * 0.14 + 255 * 0.86) for c in colour)
+    d.rounded_rectangle([sx1 - sw, 96, sx1, 142], radius=23, fill=tint, outline=colour, width=2)
+    d.ellipse([sx1 - sw + 20, 112, sx1 - sw + 34, 126], fill=colour)
+    d.text((sx1 - sw + 44, 119), label, font=sf, fill=colour, anchor="lm")
+
+    # Details panel
+    px0, py0, px1, py1 = 96, 258, W - 96, 472
+    d.rounded_rectangle([px0, py0, px1, py1], radius=22, fill=PANEL, outline=PANEL_EDGE, width=2)
+    rows = [(str(k), str(v)) for k, v in rows if str(v).strip()][:6]
+    notes = [str(n) for n in notes if str(n).strip()]
+    lab = _font("Inter.ttf", 18, b"SemiBold")
+    if rows:
+        cols = 2 if len(rows) > 3 else 1
+        per_col = (len(rows) + cols - 1) // cols
+        cw = (px1 - px0 - 60) // cols
+        for i, (k, v) in enumerate(rows):
+            cx = px0 + 30 + (i // per_col) * cw
+            cy = py0 + 18 + (i % per_col) * 64
+            _spaced(d, (cx, cy), k.upper()[:28], lab, MUTED, 4)
+            if _is_code(v):
+                keep = 46 if cols == 1 else 22
+                head = (keep - 1) // 2
+                vt = v if len(v) <= keep else f"{v[:head]}\u2026{v[-(keep - 1 - head):]}"
+                d.text((cx, cy + 24), vt, font=_fit(d, vt, "JetBrainsMono.ttf", b"Medium", cw - 30, 26, 16),
+                       fill=TEXT)
+            else:
+                d.text((cx, cy + 22), v, font=_fit(d, v, "Inter.ttf", b"SemiBold", cw - 30, 28, 16), fill=TEXT)
+        room = 3 - per_col
+        if notes and room > 0:
+            nf = _font("Inter.ttf", 24, b"Medium")
+            lines = []
+            for n in notes:
+                lines += [(ln, n) for ln in _wrap_lines(d, n, nf, px1 - px0 - 60, room)]
+            lines = lines[:room]
+            for j, (line, src) in enumerate(lines):
+                y = py1 - 24 - (len(lines) - 1 - j) * 36
+                d.text((px0 + 30, y), line, font=nf, fill=_note_colour(src, status), anchor="ls")
+    elif notes:
+        nf = _font("Inter.ttf", 30, b"Medium")
+        lines = []
+        for n in notes:
+            lines += [(ln, n) for ln in _wrap_lines(d, n, nf, px1 - px0 - 70, 4)]
+        lines = lines[:4]
+        top = (py0 + py1) // 2 - len(lines) * 21
+        for i, (line, src) in enumerate(lines):
+            fill = _note_colour(src, status) if src.startswith("Warning") or status in ("error", "failed") \
+                else TEXT if i == 0 else SOFT
+            d.text((px0 + 34, top + i * 42 + 21), line, font=nf, fill=fill, anchor="lm")
+
+    # Progress
+    sx, ex, gap, by = 96, 860, 12, 496
+    seg = (ex - sx - gap * 4) / 5
+    sf = _font("Inter.ttf", 18, b"SemiBold")
+    done_all = status == "success"
+    for i, name in enumerate(WITHDRAW_STEPS):
+        a = sx + i * (seg + gap)
+        n = i + 1
+        fill = accent if done_all or n <= step else TRACK
+        d.rounded_rectangle([a, by, a + seg, by + 6], radius=3, fill=fill)
+        d.text((a, by + 16), name, font=sf, fill=TEXT if n == step else MUTED)
+    if brand:
+        d.text((W - 96, by + 12), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
