@@ -747,6 +747,26 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
     return msg
 
 
+async def replace_with_card_photo(query, card: dict, keyboard):
+    """Classic fallback for refreshes: re-send the address card as a photo (no text)."""
+    try:
+        bot = query.get_bot()
+        brand = f"@{bot.username}" if getattr(bot, "username", None) else None
+        png = await asyncio.to_thread(
+            render_address_card, card["symbol"], card["network"], card["address"],
+            card.get("balance"), brand, card.get("title", "DEPOSIT")
+        )
+        msg = await bot.send_photo(chat_id=query.message.chat_id, photo=png, reply_markup=keyboard)
+    except Exception as e:
+        logger.warning(f"Card photo refresh failed: {e}")
+        return None
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    return msg
+
+
 async def replace_with_rich(query, banner_name, caption, keyboard,
                             parse_mode: str = "HTML", qr: str = None, card: dict = None,
                             image: bytes = None):
@@ -8005,10 +8025,10 @@ async def refresh_send_balance(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("Main Menu", callback_data="main_menu")]
     ]
 
+    card = address_card_spec(token, network_info["name"], address, balance_str)
     if await replace_with_rich(
-        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address,
-        card=address_card_spec(token, network_info["name"], address, balance_str)
-    ):
+        query, "deposit", response_text, InlineKeyboardMarkup(keyboard), qr=address, card=card
+    ) or await replace_with_card_photo(query, card, InlineKeyboardMarkup(keyboard)):
         return
     await edit_message_with_banner(
         query, "deposit", response_text, InlineKeyboardMarkup(keyboard), parse_mode="HTML"
@@ -8851,7 +8871,7 @@ async def show_deposit_address(
         [
             InlineKeyboardButton(
                 "\U0001F504 Refresh Balance",
-                callback_data=f"refresh_{network}"
+                callback_data=f"refresh_dep_{info['symbol']}_{network}"
             ),
             InlineKeyboardButton(
                 "\U0001F4E4 Withdraw",
@@ -9222,10 +9242,10 @@ async def refresh_deposit_balance(update: Update, context: ContextTypes.DEFAULT_
         f"Balance: {balance_str} {token}\n\n"
         f"*Address:*\n`{wallet['address']}`"
     )
+    card = address_card_spec(token, network_info["name"], wallet["address"], balance_str)
     if await replace_with_rich(
-        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"],
-        card=address_card_spec(token, network_info["name"], wallet["address"], balance_str)
-    ):
+        query, "deposit", text, InlineKeyboardMarkup(keyboard), "Markdown", qr=wallet["address"], card=card
+    ) or await replace_with_card_photo(query, card, InlineKeyboardMarkup(keyboard)):
         return
     await edit_message_with_banner(
         query, "deposit", text, InlineKeyboardMarkup(keyboard)
