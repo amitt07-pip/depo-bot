@@ -19,7 +19,7 @@ import contextvars
 from typing import Optional
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote, parse_qs
 
 try:
     import qrcode
@@ -1913,7 +1913,6 @@ def is_valid_address(address: str, network: str) -> bool:
     elif network == 'TRON':
         return address.startswith('T') and len(address) == 34
     elif network == 'SOLANA':
-        import re
         return len(address) >= 32 and len(address) <= 44 and re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', address)
     elif network == 'LTC':
         return (address.startswith('L') or address.startswith('M') or address.startswith('ltc1')) and len(address) >= 26
@@ -1942,6 +1941,10 @@ EXPLORER_DOMAIN_NETWORK = {
     "mempool.space": "BTC",
     "tonviewer.com": "TON",
     "tonscan.org": "TON",
+    "tonscan.com": "TON",
+    "dton.io": "TON",
+    "tonwhales.com": "TON",
+    "explorer.toncoin.org": "TON",
 }
 
 TX_PATH_KEYWORDS = {"tx", "transaction", "transactions"}
@@ -1987,6 +1990,20 @@ def parse_explorer_link(text: str):
         else:
             return None
 
+    if network == "TON":
+        tx_value = None
+        path = unquote(parsed.path or "")
+        m = re.search(r"/(?:tx|transaction|transactions)/(.+?)/?$", path, re.I)
+        if m:
+            tx_value = m.group(1)
+        else:
+            query = parse_qs(parsed.query or "")
+            if query.get("hash"):
+                tx_value = query["hash"][0].replace(" ", "+")
+        if tx_value:
+            parts = tx_value.split(":")
+            return ("tx", network, next((p for p in parts if is_ton_tx_hash(p)), parts[-1]))
+
     combined = (parsed.path or "") + "/" + (parsed.fragment or "")
     segments = [s for s in re.split(r"[/#?&=]", combined) if s]
 
@@ -2006,6 +2023,19 @@ def parse_explorer_link(text: str):
     return None
 
 
+def is_ton_tx_hash(value: str) -> bool:
+    """64-char hex or base64/base64url of 32 bytes (the forms TON explorers use)."""
+    v = (value or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", v):
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9+/_-]{43}=?", v):
+        return False
+    try:
+        return len(base64.urlsafe_b64decode(v.replace("+", "-").replace("/", "_") + "=" * (-len(v) % 4))) == 32
+    except Exception:
+        return False
+
+
 def detect_tx_hash(text: str):
     """Detect a raw transaction hash/signature.
 
@@ -2016,7 +2046,10 @@ def detect_tx_hash(text: str):
     if re.fullmatch(r"0x[0-9a-fA-F]{64}", t):
         return (["ETH", "BSC", "OPBNB", "POLYGON"], t)
     if re.fullmatch(r"[0-9a-fA-F]{64}", t):
-        return (["TRON", "LTC", "BTC"], t)
+        return (["TRON", "LTC", "BTC", "TON"], t)
+    # Base64 TON hash; 43-44 char strings that are pure base58 stay Solana addresses.
+    if is_ton_tx_hash(t) and (t.endswith("=") or re.search(r"[+/_\-0OIl]", t)):
+        return ("TON", t)
     if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,90}", t):
         return ("SOLANA", t)
     return None
@@ -2881,11 +2914,74 @@ def ton_hash_to_hex(value: str) -> str:
         return ""
     if re.fullmatch(r"[0-9a-fA-F]{64}", value):
         return value.lower()
-    padded = value + "=" * (-len(value) % 4)
+    padded = value.replace("-", "+").replace("_", "/") + "=" * (-len(value) % 4)
+    return base64.b64decode(padded).hex()
+
+
+def ton_friendly(address: str, wallet: bool = True) -> str:
+    """Raw ``0:hex`` -> user-friendly form (UQ... for wallets, EQ... for contracts)."""
     try:
-        return base64.b64decode(padded).hex()
+        from tonsdk.utils import Address
+        return Address(address).to_string(True, True, not wallet)
     except Exception:
-        return base64.urlsafe_b64decode(padded).hex()
+        return address
+
+
+def ton_jetton_symbol(symbol: str) -> str:
+    return (symbol or "TOKEN").replace("\u20ae", "T").strip().upper()
+
+
+TONAPI_KEY = os.getenv("TONAPI_KEY", "")
+_tonapi_lock = asyncio.Lock()
+_tonapi_last_call = 0.0
+
+
+async def tonapi_get(path: str, params: dict = None):
+    """GET tonapi.io v2 (parsed events, jettons). Returns None when the object doesn't exist."""
+    global _tonapi_last_call
+    headers = {"Authorization": f"Bearer {TONAPI_KEY}"} if TONAPI_KEY else {}
+    min_gap = 0.15 if TONAPI_KEY else 1.05
+    timeout = aiohttp.ClientTimeout(total=15)
+    last_error = None
+    for attempt in range(3):
+        async with _tonapi_lock:
+            wait = min_gap - (time.monotonic() - _tonapi_last_call)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _tonapi_last_call = time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"https://tonapi.io/v2/{path}", params=params, headers=headers) as resp:
+                    if resp.status in (400, 404):
+                        return None
+                    if resp.status >= 400:
+                        last_error = f"HTTP {resp.status}"
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    return await resp.json()
+        except Exception as e:
+            last_error = str(e)
+    raise RuntimeError(f"tonapi {path} failed: {last_error}")
+
+
+async def ton_jetton_holdings(address: str) -> list:
+    """Verified jettons (USDT, NOT, ...) held by a TON address, with USD value."""
+    data = await tonapi_get(f"accounts/{address}/jettons", {"currencies": "usd"})
+    holdings = []
+    for item in (data or {}).get("balances", []):
+        jetton = item.get("jetton") or {}
+        raw = int(item.get("balance") or 0)
+        if raw <= 0 or jetton.get("verification") != "whitelist":
+            continue
+        balance = Decimal(raw) / Decimal(10 ** int(jetton.get("decimals", 9)))
+        price = ((item.get("price") or {}).get("prices") or {}).get("USD")
+        holdings.append({
+            "symbol": ton_jetton_symbol(jetton.get("symbol")),
+            "balance": balance,
+            "usd_value": balance * Decimal(str(price)) if price else Decimal("0"),
+        })
+    holdings.sort(key=lambda h: h["usd_value"], reverse=True)
+    return holdings
 
 
 class WalletGenerator:
@@ -3535,6 +3631,8 @@ class TransactionChecker:
                 return await TransactionChecker.get_ltc_tx(tx_hash)
             elif net_type == "btc":
                 return await TransactionChecker.get_btc_tx(tx_hash)
+            elif net_type == "ton":
+                return await TransactionChecker.get_ton_tx(tx_hash)
             return {"error": f"Unsupported network type for {network}"}
         except Exception as e:
             logger.error(f"Error getting {network} tx {tx_hash}: {e}")
@@ -3566,6 +3664,67 @@ class TransactionChecker:
                 except Exception:
                     continue
         return None
+
+    @staticmethod
+    async def get_ton_tx(tx_hash: str) -> dict:
+        """TON transaction (or message) hash, hex or base64 -> parsed transfer via tonapi."""
+        try:
+            h = ton_hash_to_hex(tx_hash)
+        except Exception:
+            return {"error": "not_found"}
+        event = await tonapi_get(f"events/{h}")
+        if event is None:
+            tx = await tonapi_get(f"blockchain/messages/{h}/transaction")
+            if tx and tx.get("hash"):
+                h = tx["hash"]
+                event = await tonapi_get(f"events/{h}")
+        if not event:
+            return {"error": "not_found"}
+
+        actions = event.get("actions") or []
+        action = next((a for a in actions if a.get("type") in ("TonTransfer", "JettonTransfer")),
+                      actions[0] if actions else {})
+        kind = action.get("type")
+        body = action.get(kind) or {}
+
+        def who(account):
+            if not account or not account.get("address"):
+                return None
+            return ton_friendly(account["address"], account.get("is_wallet", True))
+
+        sender, receiver = who(body.get("sender")), who(body.get("recipient"))
+        amount, asset = None, "TON"
+        if kind == "TonTransfer":
+            amount = Decimal(int(body.get("amount") or 0)) / Decimal(10 ** 9)
+        elif kind == "JettonTransfer":
+            jetton = body.get("jetton") or {}
+            amount = Decimal(int(body.get("amount") or 0)) / Decimal(10 ** int(jetton.get("decimals", 9)))
+            asset = ton_jetton_symbol(jetton.get("symbol"))
+        else:
+            preview = action.get("simple_preview") or {}
+            m = re.match(r"^\s*([\d.,]+)\s*(.*)$", preview.get("value") or "")
+            if m:
+                amount = Decimal(m.group(1).replace(",", ""))
+                asset = ton_jetton_symbol(m.group(2) or "TON")
+            accounts = [who(a) for a in preview.get("accounts") or []]
+            sender = sender or (accounts[0] if accounts else None)
+            receiver = receiver or (accounts[1] if len(accounts) > 1 else None)
+
+        if event.get("in_progress"):
+            status = "Pending"
+        else:
+            status = "Success" if action.get("status", "ok") == "ok" else "Failed"
+        return {
+            "network": "TON",
+            "hash": h,
+            "from": sender,
+            "to": receiver,
+            "amount": f"{amount.normalize():f}" if amount is not None else None,
+            "asset": asset,
+            "timestamp": event.get("timestamp"),
+            "status": status,
+            "explorer_url": tx_explorer_url("TON", h),
+        }
 
     @staticmethod
     async def get_evm_tx(network: str, tx_hash: str) -> dict:
@@ -7204,6 +7363,22 @@ async def _gather_address_balances(address: str, detected):
         for entry in await fetch_solana_extras():
             balances.append(entry)
             total_usd += entry["usd_value"]
+    if "TON" in networks:
+        try:
+            jettons = await ton_jetton_holdings(address)
+        except Exception as e:
+            logger.error(f"Error listing TON jettons: {e}")
+            jettons = []
+        for h in jettons:
+            balances.append({
+                "network": "TON",
+                "network_name": NETWORKS["TON"]["name"],
+                "token": h["symbol"],
+                "balance": h["balance"],
+                "usd_value": h["usd_value"],
+                "explorer_url": address_explorer_url("TON", address),
+            })
+            total_usd += h["usd_value"]
 
     return balances, total_usd, errors
 
