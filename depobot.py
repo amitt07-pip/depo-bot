@@ -945,6 +945,8 @@ USER_ACCESS = {
     6643621069: [1, 2],
     7103743713: [2],
 }
+# Anyone can use the bot; set PUBLIC_BOT=0 to allow only USER_ACCESS and /add-ed users.
+PUBLIC_BOT = os.getenv("PUBLIC_BOT", "1").strip().lower() not in ("0", "false", "no", "off")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 
@@ -4772,6 +4774,8 @@ def load_authorized_users():
 
 def is_authorized(user_id: int, username: str = None) -> bool:
     """Check if user is authorized to use the bot."""
+    if PUBLIC_BOT:
+        return True
     if user_id in USER_ACCESS:
         return True
     if user_id in AUTHORIZED_USER_IDS:
@@ -7317,7 +7321,7 @@ async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Scan and fix any errors in the bot's database and state."""
     user_id = update.effective_user.id
-    if not is_authorized(user_id):
+    if not is_admin(user_id):
         await update.message.reply_text(
             "*You are not authorised to use the bot!*",
             parse_mode="Markdown"
@@ -11944,7 +11948,10 @@ async def background_sync_balances():
     while True:
         try:
             # Sync balances for all authorized users
-            for user_id in list(set(USER_ACCESS.keys()) | AUTHORIZED_USER_IDS):
+            users = set(USER_ACCESS.keys()) | AUTHORIZED_USER_IDS
+            if PUBLIC_BOT:
+                users |= {w["user_id"] for w in db.get_all_wallets_with_users()}
+            for user_id in list(users):
                 wallets = db.get_all_wallets(user_id)
                 if not wallets:
                     continue
