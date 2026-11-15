@@ -2191,6 +2191,7 @@ class WalletDatabase:
         old = self.get_wallet(user_id, network) if is_evm else None
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        self._retire_replaced(cursor, user_id, network, address, is_evm)
         cursor.execute(
             "INSERT OR REPLACE INTO wallets "
             "(user_id, network, address, encrypted_private_key) "
@@ -2220,6 +2221,35 @@ class WalletDatabase:
         rows = cursor.fetchall()
         conn.close()
         return [{"network": row[0], "address": row[1]} for row in rows]
+
+    @staticmethod
+    def _retired_table(cursor):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS retired_wallets ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+            "network TEXT NOT NULL, address TEXT NOT NULL, encrypted_private_key TEXT NOT NULL, "
+            "retired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+    def _retire_replaced(self, cursor, user_id: int, network: str, address: str, is_evm: bool):
+        """Keep the key of a wallet that is being replaced, so funds sent to the old
+        address later can still be recovered (scripts/recover_wallet.py)."""
+        cursor.execute("SELECT network, address, encrypted_private_key FROM wallets "
+                       "WHERE user_id = ? AND network = ?", (user_id, network))
+        rows = cursor.fetchall()
+        if is_evm and rows:
+            evm = [n for n, i in NETWORKS.items() if i.get("type") == "evm"]
+            cursor.execute(
+                "SELECT network, address, encrypted_private_key FROM wallets WHERE user_id = ? "
+                f"AND LOWER(address) = LOWER(?) AND network IN ({','.join('?' for _ in evm)})",
+                (user_id, rows[0][1], *evm))
+            rows = cursor.fetchall()
+        rows = [r for r in rows if r[1].lower() != address.lower()]
+        if rows:
+            self._retired_table(cursor)
+            cursor.executemany(
+                "INSERT INTO retired_wallets (user_id, network, address, encrypted_private_key) "
+                "VALUES (?, ?, ?, ?)", [(user_id, *r) for r in rows])
 
     def delete_all_wallets(self, user_id: int) -> int:
         conn = sqlite3.connect(self.db_path)
