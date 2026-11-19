@@ -717,7 +717,8 @@ async def send_rich_screen(bot, chat_id, banner_name, caption, keyboard,
         rich["media"] = media
     form.add_field("chat_id", str(chat_id))
     form.add_field("rich_message", json.dumps(rich))
-    form.add_field("protect_content", "true")
+    if PROTECT_CONTENT:
+        form.add_field("protect_content", "true")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -1258,6 +1259,8 @@ USER_ACCESS = {
     7103743713: [2],
 }
 # Anyone can use the bot; set PUBLIC_BOT=0 to allow only USER_ACCESS and /add-ed users.
+# Messages (cards, QR codes) can be forwarded and saved; set PROTECT_CONTENT=1 to block that.
+PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "0").strip().lower() in ("1", "true", "yes", "on")
 PUBLIC_BOT = os.getenv("PUBLIC_BOT", "1").strip().lower() not in ("0", "false", "no", "off")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "default_key_change_me_32bytes!")
 TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
@@ -12617,7 +12620,7 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .defaults(Defaults(protect_content=True))
+        .defaults(Defaults(protect_content=PROTECT_CONTENT))
         .post_init(start_transaction_monitor)
         .build()
     )
