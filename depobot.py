@@ -1259,6 +1259,12 @@ USER_ACCESS = {
     7103743713: [2],
 }
 # Anyone can use the bot; set PUBLIC_BOT=0 to allow only USER_ACCESS and /add-ed users.
+def dec_str(value) -> str:
+    """Decimal as plain fixed-point text (never 8.05E-10 style)."""
+    d = Decimal(str(value))
+    return f"{d.normalize():f}" if d else "0"
+
+
 # Messages (cards, QR codes) can be forwarded and saved; set PROTECT_CONTENT=1 to block that.
 PROTECT_CONTENT = os.getenv("PROTECT_CONTENT", "0").strip().lower() in ("1", "true", "yes", "on")
 PUBLIC_BOT = os.getenv("PUBLIC_BOT", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -3384,7 +3390,7 @@ class BalanceChecker:
             try:
                 raw, (decimals, symbol) = await asyncio.to_thread(evm_call, network, fetch)
                 return {
-                    "balance": str(Decimal(raw) / Decimal(10 ** decimals)),
+                    "balance": dec_str(Decimal(raw) / Decimal(10 ** decimals)),
                     "symbol": symbol,
                     "raw_balance": raw
                 }
@@ -3400,7 +3406,7 @@ class BalanceChecker:
             logger.error(f"Error getting {network} native balance: {e}")
             return {"balance": "0", "symbol": network_info["symbol"], "error": str(e)}
         return {
-            "balance": str(Web3.from_wei(raw, "ether")),
+            "balance": dec_str(Web3.from_wei(raw, "ether")),
             "symbol": network_info["symbol"],
             "raw_balance": raw
         }
@@ -3411,7 +3417,7 @@ class BalanceChecker:
         if "result" in data:
             lamports = data["result"]["value"]
             return {
-                "balance": str(Decimal(lamports) / Decimal(10 ** 9)),
+                "balance": dec_str(Decimal(lamports) / Decimal(10 ** 9)),
                 "symbol": "SOL",
                 "raw_balance": lamports
             }
@@ -3431,7 +3437,7 @@ class BalanceChecker:
                 if "data" in data and len(data["data"]) > 0:
                     balance = data["data"][0].get("balance", 0)
                     return {
-                        "balance": str(Decimal(balance) / Decimal(10 ** 6)),
+                        "balance": dec_str(Decimal(balance) / Decimal(10 ** 6)),
                         "symbol": "TRX",
                         "raw_balance": balance
                     }
@@ -3459,14 +3465,14 @@ class BalanceChecker:
                                 chain = data.get("chain_stats", {})
                                 balance_sat = chain.get("funded_txo_sum", 0) - chain.get("spent_txo_sum", 0)
                                 return {
-                                    "balance": str(Decimal(balance_sat) / Decimal(10 ** 8)),
+                                    "balance": dec_str(Decimal(balance_sat) / Decimal(10 ** 8)),
                                     "symbol": "LTC",
                                     "raw_balance": balance_sat
                                 }
                             if isinstance(data, dict) and "balance" in data:
                                 balance_satoshi = data.get("balance", 0)
                                 return {
-                                    "balance": str(Decimal(balance_satoshi) / Decimal(10 ** 8)),
+                                    "balance": dec_str(Decimal(balance_satoshi) / Decimal(10 ** 8)),
                                     "symbol": "LTC",
                                     "raw_balance": balance_satoshi
                                 }
@@ -3489,7 +3495,7 @@ class BalanceChecker:
                         chain = data.get("chain_stats", {})
                         balance_sat = chain.get("funded_txo_sum", 0) - chain.get("spent_txo_sum", 0)
                         return {
-                            "balance": str(Decimal(balance_sat) / Decimal(10 ** 8)),
+                            "balance": dec_str(Decimal(balance_sat) / Decimal(10 ** 8)),
                             "symbol": "BTC",
                             "raw_balance": balance_sat
                         }
@@ -3504,7 +3510,7 @@ class BalanceChecker:
             result = await toncenter_call("getAddressBalance", {"address": address})
             balance = int(result or 0)
             return {
-                "balance": str(Decimal(balance) / Decimal(10 ** 9)),
+                "balance": dec_str(Decimal(balance) / Decimal(10 ** 9)),
                 "symbol": "TON",
                 "raw_balance": balance
             }
@@ -3526,7 +3532,7 @@ class BalanceChecker:
                 TOKENS.get(symbol, {}).get("networks", {}).get("SOLANA", {}).get("decimals", 6)
             )
             return {
-                "balance": str(Decimal(raw) / Decimal(10 ** decimals)),
+                "balance": dec_str(Decimal(raw) / Decimal(10 ** decimals)),
                 "symbol": symbol,
                 "raw_balance": raw
             }
@@ -3551,7 +3557,7 @@ class BalanceChecker:
                             if token_address in token:
                                 balance = int(token[token_address])
                                 return {
-                                    "balance": str(Decimal(balance) / Decimal(10 ** 6)),
+                                    "balance": dec_str(Decimal(balance) / Decimal(10 ** 6)),
                                     "symbol": "USDT",
                                     "raw_balance": balance
                                 }
@@ -11083,7 +11089,7 @@ async def get_swap_holdings(user_id: int, pairs: dict) -> list:
         accounts = [a for a in held["accounts"] if a["mint"] == mint]
         raw = sum(a["amount"] for a in accounts)
         decimals = accounts[0]["decimals"] if accounts else TOKENS[asset]["networks"]["SOLANA"]["decimals"]
-        return {"balance": str(Decimal(raw) / Decimal(10 ** decimals))}
+        return {"balance": dec_str(Decimal(raw) / Decimal(10 ** decimals))}
 
     async def fetch(asset, network, address):
         if asset == NETWORKS[network]["symbol"]:

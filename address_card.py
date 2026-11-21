@@ -146,6 +146,10 @@ def render_address_card(symbol: str, network_name: str, address: str,
 
     # Balance
     if balance is not None:
+        try:
+            balance = _amount(balance)
+        except (TypeError, ValueError):
+            pass
         right = W - 96
         lab_font = _font("Inter.ttf", 22, b"SemiBold")
         _spaced(d, (right - _spaced_width(d, "BALANCE", lab_font, 5), 104), "BALANCE", lab_font, MUTED, 5)
@@ -203,7 +207,7 @@ def _amount(v) -> str:
         return f"{v:,.2f}"
     if v >= 1:
         return f"{v:,.4f}".rstrip("0").rstrip(".")
-    return f"{v:.6f}".rstrip("0").rstrip(".")
+    return f"{v:.8f}".rstrip("0").rstrip(".")
 
 
 def render_dashboard_card(name: str, total_usd, holdings, wallet_count: int,
