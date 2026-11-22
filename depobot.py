@@ -16,6 +16,7 @@ import re
 import secrets
 import inspect
 import contextvars
+import warnings
 from typing import Optional
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone, timedelta
@@ -31,6 +32,8 @@ from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, MessageEntity,
     CopyTextButton, Message
 )
+from telegram.warnings import PTBUserWarning
+warnings.filterwarnings("ignore", message=r".*per_message=False", category=PTBUserWarning)
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
