@@ -91,6 +91,14 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+class _ShutdownNoiseFilter(logging.Filter):
+    def filter(self, record):
+        return "Task was destroyed but it is pending" not in record.getMessage()
+
+
+logging.getLogger("asyncio").addFilter(_ShutdownNoiseFilter())
 import traceback
 
 from address_card import (render_address_card, render_deposit_card, render_withdraw_card, render_dashboard_card, render_portfolio_card,
@@ -13248,12 +13256,23 @@ async def background_sync_balances():
         await asyncio.sleep(300)  # 5 minutes between syncs to reduce RPC calls
 
 
+BACKGROUND_TASKS = set()
+
+
 async def start_transaction_monitor(application):
-    import asyncio
-    asyncio.create_task(transaction_monitor_loop(application))
+    BACKGROUND_TASKS.add(asyncio.create_task(transaction_monitor_loop(application)))
     logger.info("Transaction monitor background task created")
-    asyncio.create_task(background_sync_balances())
+    BACKGROUND_TASKS.add(asyncio.create_task(background_sync_balances()))
     logger.info("Background balance sync task created")
+
+
+async def stop_background_tasks(application):
+    """Cancel the monitor/sync loops and let their HTTP sessions close before exit."""
+    for task in BACKGROUND_TASKS:
+        task.cancel()
+    await asyncio.gather(*BACKGROUND_TASKS, return_exceptions=True)
+    BACKGROUND_TASKS.clear()
+    await asyncio.sleep(0.25)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -13286,6 +13305,7 @@ def main():
         .token(BOT_TOKEN)
         .defaults(Defaults(protect_content=PROTECT_CONTENT))
         .post_init(start_transaction_monitor)
+        .post_shutdown(stop_background_tasks)
         .build()
     )
 
