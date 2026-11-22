@@ -17,7 +17,7 @@ import secrets
 import inspect
 import contextvars
 from typing import Optional
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, unquote, parse_qs
 
@@ -996,6 +996,47 @@ def withdraw_card_spec(text: str, parse_mode, state: dict) -> dict:
             "status": status, "status_label": label}
 
 
+_AMOUNT_ERROR_TITLES = ("not enough balance", "invalid amount", "price unavailable")
+
+
+def _amount_unit_toggle(text, parse_mode, spec, ud):
+    """Amount pages get a button to switch between typing the coin amount and a USD amount."""
+    if ud is None:
+        return None
+    low = " ".join(_plain_lines(text, parse_mode)).lower()
+    coin_prompt = re.search(r"\benter (the )?amount", low) is not None
+    usd_prompt = "dollar amount" in low
+    if coin_prompt and not usd_prompt:
+        ud.pop("withdraw_usd_mode", None)
+    if not (coin_prompt or usd_prompt or spec["title"].lower() in _AMOUNT_ERROR_TITLES):
+        return None
+    symbol = spec.get("symbol") or "coin"
+    if ud.get("withdraw_usd_mode"):
+        return ikb(f"Enter in {symbol}", callback_data="wd_amt_coin", token=symbol, style="primary")
+    return ikb("Enter in USD", callback_data="wd_amt_usd", ui_name="money", style="primary")
+
+
+async def live_usd_price(symbol: str):
+    """USD price only when it is live (not the hard-coded fallback)."""
+    if symbol in ("USDT", "USDC"):
+        return Decimal("1")
+    try:
+        price = await PriceFetcher.get_price(symbol)
+    except Exception:
+        return None
+    cached = PriceFetcher._price_cache.get(symbol)
+    if price and price > 0 and cached and cached[0] == price:
+        return price
+    return None
+
+
+def _withdraw_unit(network: str, token: str):
+    if token and token in TOKENS:
+        decimals = TOKENS[token].get("networks", {}).get(network, {}).get("decimals") or 8
+        return TOKENS[token]["symbol"], min(int(decimals), 8)
+    return NETWORKS[network]["symbol"], 8
+
+
 async def withdraw_card_message(bot, chat_id, text, parse_mode, reply_markup):
     """Send a withdraw card (rich message with in-text buttons, or photo) instead of text."""
     state = WITHDRAW_CARD.get() or {}
@@ -1012,6 +1053,9 @@ async def withdraw_card_message(bot, chat_id, text, parse_mode, reply_markup):
             break
     if not rows and spec["step"] < 5 and spec["status"] != "muted":
         rows = [[InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")]]
+    unit_toggle = _amount_unit_toggle(text, parse_mode, spec, state.get("ud"))
+    if unit_toggle:
+        rows.insert(0, [unit_toggle])
     markup = InlineKeyboardMarkup(rows) if rows else None
     token = WITHDRAW_CARD.set(None)
     try:
@@ -1801,6 +1845,8 @@ CONVERT_FROM_ASSET, CONVERT_TO_ASSET, CONVERT_AMOUNT_AI = range(12, 15)
 WITHDRAW_QUICK_NETWORK = 15
 CONVERT_PROVIDER = 16
 CONVERT_DEST, CONVERT_DEST_ADDRESS = range(17, 19)
+WITHDRAW_MEMO = 19
+TON_MEMO_MAX_BYTES = 120
 
 pending_withdrawals = {}
 
@@ -5114,7 +5160,7 @@ class WithdrawalHandler:
         )
 
     @staticmethod
-    async def withdraw_ton(mnemonic: str, to_address: str, amount: str) -> dict:
+    async def withdraw_ton(mnemonic: str, to_address: str, amount: str, memo: str = None) -> dict:
         from tonsdk.utils import Address
         try:
             dest = Address(to_address)
@@ -5149,7 +5195,7 @@ class WithdrawalHandler:
                 dest_state = None
             dest_str = dest.to_string(True, True, dest_state == "active")
 
-            query = wallet.create_transfer_message(dest_str, nano, seqno)
+            query = wallet.create_transfer_message(dest_str, nano, seqno, payload=memo or None)
             boc = base64.b64encode(query["message"].to_boc(False)).decode()
             sent_at = int(time.time())
             sent = await toncenter_call("sendBocReturnHash", payload={"boc": boc})
@@ -5206,7 +5252,8 @@ class WithdrawalHandler:
         private_key: str,
         to_address: str,
         amount: str,
-        token_address: str = None
+        token_address: str = None,
+        memo: str = None
     ) -> dict:
         network = network.upper()
         network_info = NETWORKS.get(network)
@@ -5230,7 +5277,7 @@ class WithdrawalHandler:
         elif network_info["type"] == "btc":
             return await WithdrawalHandler.withdraw_btc(private_key, to_address, amount)
         elif network_info["type"] == "ton":
-            return await WithdrawalHandler.withdraw_ton(private_key, to_address, amount)
+            return await WithdrawalHandler.withdraw_ton(private_key, to_address, amount, memo)
 
         return {"success": False, "error": f"Unsupported network type: {network_info['type']}"}
 
@@ -10165,6 +10212,41 @@ async def receive_withdraw_amount(
             context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_AMOUNT
         amount = _fmt_amount(resolved)
+    elif context.user_data.get("withdraw_usd_mode"):
+        w_network = context.user_data.get("withdraw_network")
+        unit, places = _withdraw_unit(w_network, context.user_data.get("withdraw_token"))
+        try:
+            usd = Decimal(amount.replace("$", "").replace(",", "").strip())
+            if usd <= 0:
+                raise ValueError
+        except Exception:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="\u274c *Invalid Amount*\n\nReply with a dollar amount, e.g. `25`",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
+        price = await live_usd_price(unit)
+        if not price:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\u26a0\ufe0f *Price Unavailable*\n\n"
+                f"Couldn't get a live {unit} price. Enter the amount in {unit} instead.",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
+        coin = (usd / price).quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN)
+        if coin <= 0:
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"\u274c *Invalid Amount*\n\n${usd} is less than the smallest {unit} amount.",
+                parse_mode="Markdown"
+            )
+            context.user_data["withdraw_msg_id"] = msg.message_id
+            return WITHDRAW_AMOUNT
+        amount = _fmt_amount(coin)
 
     try:
         amount_decimal = Decimal(amount)
@@ -10207,6 +10289,7 @@ async def receive_withdraw_amount(
             return WITHDRAW_AMOUNT
 
     context.user_data["withdraw_amount"] = amount
+    context.user_data.pop("withdraw_usd_mode", None)
     address = context.user_data.get("withdraw_address")
     token_address = context.user_data.get("withdraw_contract") or context.user_data.get("withdraw_token_address")
     info = NETWORKS[network]
@@ -10220,47 +10303,10 @@ async def receive_withdraw_amount(
         icon = info["icon"]
 
     if address:
-        user_id = update.effective_user.id
-        pending_withdrawals[user_id] = {
-            "network": network,
-            "amount": amount,
-            "address": address,
-            "token": token,
-            "token_address": token_address
-        }
-        
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "\u2705 Confirm Withdrawal",
-                    callback_data="exec_withdraw"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "\u274c Cancel",
-                    callback_data="cancel_withdraw"
-                )
-            ]
-        ]
-        
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
-            f"Please review and confirm:\n\n"
-            f"{'='*30}\n"
-            f"{info['icon']} *Network:* {info['name']}\n"
-            f"{icon} *Asset:* {symbol}\n"
-            f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
-            f"\U0001F4CD *To:*\n`{address}`\n"
-            f"{'='*30}\n\n"
-            f"\u26a0\ufe0f *Warning:* This action cannot be undone!\n"
-            f"Please verify the address carefully.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        context.user_data["withdraw_msg_id"] = msg.message_id
-        return WITHDRAW_CONFIRM
+        if info["type"] == "ton":
+            context.user_data.pop("withdraw_memo", None)
+            return await _send_withdraw_memo_prompt(context, chat_id, address)
+        return await _send_withdraw_review(context, chat_id, update.effective_user.id, token_address)
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -10359,39 +10405,43 @@ async def receive_withdraw_address(
             return WITHDRAW_ADDRESS
 
     context.user_data["withdraw_address"] = address
+    context.user_data.pop("withdraw_memo", None)
+    if info["type"] == "ton":
+        return await _send_withdraw_memo_prompt(context, chat_id, address)
+    return await _send_withdraw_review(context, chat_id, update.effective_user.id, token_address)
 
-    user_id = update.effective_user.id
+
+async def _send_withdraw_review(context, chat_id: int, user_id: int, token_address=None):
+    """Review card (step 4) for the withdrawal in user_data, with Confirm / Cancel."""
+    ud = context.user_data
+    network, amount, address, token = (ud.get("withdraw_network"), ud.get("withdraw_amount"),
+                                       ud.get("withdraw_address"), ud.get("withdraw_token"))
+    info = NETWORKS[network]
+    memo = ud.get("withdraw_memo")
     pending_withdrawals[user_id] = {
         "network": network,
         "amount": amount,
         "address": address,
         "token": token,
-        "token_address": token_address
+        "token_address": token_address,
+        "memo": memo,
     }
-
     if token:
-        token_info = TOKENS[token]
-        symbol = token_info["symbol"]
-        icon = token_info["icon"]
+        symbol, icon = TOKENS[token]["symbol"], TOKENS[token]["icon"]
     else:
-        symbol = info["symbol"]
-        icon = info["icon"]
-
+        symbol, icon = info["symbol"], info["icon"]
+    value_line = ""
+    price = await live_usd_price(symbol)
+    if price:
+        value_line = f"\U0001F4B5 *Value:* `\u2248 ${Decimal(str(amount)) * price:,.2f}`\n"
+    memo_line = ""
+    if info["type"] == "ton":
+        shown = (memo or "None").replace("`", "'")
+        memo_line = f"\U0001F4AC *Memo:* `{shown}`\n"
     keyboard = [
-        [
-            InlineKeyboardButton(
-                "\u2705 Confirm Withdrawal",
-                callback_data="exec_withdraw"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "\u274c Cancel",
-                callback_data="cancel_withdraw"
-            )
-        ]
+        [InlineKeyboardButton("\u2705 Confirm Withdrawal", callback_data="exec_withdraw")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="cancel_withdraw")]
     ]
-
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"\U0001F4E4 *Withdrawal Confirmation*\n\n"
@@ -10400,16 +10450,128 @@ async def receive_withdraw_address(
         f"{info['icon']} *Network:* {info['name']}\n"
         f"{icon} *Asset:* {symbol}\n"
         f"\U0001F4B0 *Amount:* `{amount} {symbol}`\n"
+        f"{value_line}"
         f"\U0001F4CD *To:*\n`{address}`\n"
+        f"{memo_line}"
         f"{'='*30}\n\n"
         f"\u26a0\ufe0f *Warning:* This action cannot be undone!\n"
         f"Please verify the address carefully.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    context.user_data["withdraw_msg_id"] = msg.message_id
-
+    ud["withdraw_msg_id"] = msg.message_id
     return WITHDRAW_CONFIRM
+
+
+async def _send_withdraw_memo_prompt(context, chat_id: int, address: str, error: str = None):
+    keyboard = [
+        [ikb("No Memo - Skip", callback_data="wd_memo_skip", style="primary")],
+        [InlineKeyboardButton("\u274c Cancel", callback_data="cancel_withdraw")]
+    ]
+    head = f"\u26a0\ufe0f *{error}*" if error else "\U0001F4AC *Memo / Comment*"
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{head}\n\n"
+        f"*To:* `{format_address(address)}`\n"
+        f"*Max length:* `{TON_MEMO_MAX_BYTES} characters`\n\n"
+        "_Exchanges need a memo to credit TON, or funds are lost. "
+        "Reply with the memo, or tap No Memo._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+    return WITHDRAW_MEMO
+
+
+@withdraw_cards(3)
+async def receive_withdraw_memo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    memo = update.message.text.strip()
+    chat_id = update.message.chat_id
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    prev_msg_id = context.user_data.get("withdraw_msg_id")
+    if prev_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prev_msg_id)
+        except Exception:
+            pass
+    address = context.user_data.get("withdraw_address")
+    if not address or not context.user_data.get("withdraw_amount"):
+        return ConversationHandler.END
+    if len(memo.encode("utf-8")) > TON_MEMO_MAX_BYTES:
+        return await _send_withdraw_memo_prompt(context, chat_id, address, error="Memo Too Long")
+    context.user_data["withdraw_memo"] = memo
+    return await _send_withdraw_review(context, chat_id, update.effective_user.id,
+                                       context.user_data.get("withdraw_token_address"))
+
+
+@withdraw_cards(3)
+async def skip_withdraw_memo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    if not context.user_data.get("withdraw_address") or not context.user_data.get("withdraw_amount"):
+        return ConversationHandler.END
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    context.user_data.pop("withdraw_memo", None)
+    return await _send_withdraw_review(context, query.message.chat_id, query.from_user.id,
+                                       context.user_data.get("withdraw_token_address"))
+
+
+@withdraw_cards(2)
+async def toggle_withdraw_amount_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch the amount page between typing the coin amount and a USD amount."""
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    ud = context.user_data
+    network, token = ud.get("withdraw_network"), ud.get("withdraw_token")
+    if network not in NETWORKS:
+        await query.answer("Start the withdrawal again.", show_alert=True)
+        return ConversationHandler.END
+    unit, _ = _withdraw_unit(network, token)
+    token_net = TOKENS.get(token, {}).get("networks", {}).get(network, {}) if token else {}
+    is_native = not token or token_net.get("native", False)
+    balance = await get_withdrawable_balance(query.from_user.id, network, None if is_native else token)
+    if query.data == "wd_amt_usd":
+        price = await live_usd_price(unit)
+        if not price:
+            await query.answer(f"Live {unit} price unavailable right now. Enter the amount in {unit}.",
+                               show_alert=True)
+            return WITHDRAW_AMOUNT
+        await query.answer()
+        ud["withdraw_usd_mode"] = True
+        text = (
+            f"\U0001F4B5 *Amount in USD*\n\n"
+            f"*Price:* `1 {unit} = ${price:,.4f}`\n"
+            f"*Available:* `{_fmt_amount(balance)} {unit} (\u2248 ${balance * price:,.2f})`\n\n"
+            f"_Reply with the dollar amount (e.g., 25). It is converted to {unit} at the live price._"
+        )
+    else:
+        await query.answer()
+        ud.pop("withdraw_usd_mode", None)
+        text = (
+            f"\U0001F4E4 *Withdraw {unit}*\n\n"
+            f"*Available:* `{_fmt_amount(balance)} {unit}`\n\n"
+            f"\U0001F4DD *Step 1/3:* Enter the amount to withdraw:\n\n"
+            f"_Reply with the amount (e.g., 0.1), `max` or `half`_"
+        )
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    msg = await context.bot.send_message(
+        chat_id=query.message.chat_id, text=text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\u274c Cancel", callback_data="cancel_withdraw")]])
+    )
+    ud["withdraw_msg_id"] = msg.message_id
+    return WITHDRAW_AMOUNT
 
 
 @withdraw_cards(5)
@@ -10479,7 +10641,7 @@ async def execute_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             result = await WithdrawalHandler.withdraw(
-                network, private_key, address, amount
+                network, private_key, address, amount, memo=withdrawal.get("memo")
             )
 
         if result.get("success"):
@@ -12717,7 +12879,12 @@ def main():
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     receive_withdraw_amount
-                )
+                ),
+                CallbackQueryHandler(toggle_withdraw_amount_unit, pattern=r"^wd_amt_(usd|coin)$")
+            ],
+            WITHDRAW_MEMO: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_withdraw_memo),
+                CallbackQueryHandler(skip_withdraw_memo, pattern=r"^wd_memo_skip$")
             ],
             WITHDRAW_QUICK_NETWORK: [
                 MessageHandler(

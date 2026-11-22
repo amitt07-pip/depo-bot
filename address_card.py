@@ -184,7 +184,10 @@ def render_address_card(symbol: str, network_name: str, address: str,
     fy = 500
     d.polygon([(110, fy + 22), (124, fy - 2), (138, fy + 22)], fill=AMBER)
     d.text((124, fy + 14), "!", font=_font("Inter.ttf", 16, b"Bold"), fill=(255, 255, 255), anchor="mm")
-    warn = f"Only send {symbol} on {network_name} to this address"
+    if (network_name or "").strip().upper() in ("TON", "TONCOIN", "THE OPEN NETWORK"):
+        warn = f"No memo needed \u00b7 Only send {symbol} on {network_name}"
+    else:
+        warn = f"Only send {symbol} on {network_name} to this address"
     d.text((152, fy + 10), warn, font=_font("Inter.ttf", 22, b"Medium"), fill=SOFT, anchor="lm")
     if brand:
         d.text((W - 96, fy + 10), brand, font=_font("Inter.ttf", 24, b"Bold"), fill=TEXT, anchor="rm")
