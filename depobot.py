@@ -190,6 +190,7 @@ TOKEN_EMOJI = {
     "BTCB": "5388637433246003258",
     "WETH": "6314132993531187956",
     "TON": "6212998226086203185",      # KkPay
+    "GRAM": "6212998226086203185",     # TON was renamed GRAM
     # CryptoTop100 pack
     "XRP": "5951883705050992306",
     "ADA": "5951806636157832305",
@@ -1427,10 +1428,10 @@ NETWORKS = {
         "icon": "\U0001F7E0"
     },
     "TON": {
-        "name": "TON",
+        "name": "GRAM (prev. TON)",
         "rpc": "https://toncenter.com/api/v2",
         "rpc_fallbacks": [],
-        "symbol": "TON",
+        "symbol": "GRAM",
         "explorer": "https://tonviewer.com",
         "type": "ton",
         "icon": "\U0001F48E"
@@ -1793,8 +1794,8 @@ TOKENS = {
         }
     },
     "TON": {
-        "name": "Toncoin",
-        "symbol": "TON",
+        "name": "GRAM (prev. TON)",
+        "symbol": "GRAM",
         "icon": "\U0001F48E",
         "native": True,
         "networks": {
@@ -2191,6 +2192,7 @@ COINGECKO_IDS = {
     "LTC": "litecoin",
     "BTC": "bitcoin",
     "TON": "the-open-network",
+    "GRAM": "the-open-network",
     "USDT": "tether",
     "USDC": "usd-coin",
     "DAI": "dai", "WBTC": "wrapped-bitcoin", "BTCB": "binance-bitcoin", "WETH": "weth",
@@ -2215,6 +2217,7 @@ class PriceFetcher:
         "LTC": Decimal("100"),
         "BTC": Decimal("95000"),
         "TON": Decimal("5"),
+        "GRAM": Decimal("5"),
         "USDT": Decimal("1.0"),
         "USDC": Decimal("1.0"),
     }
@@ -3557,12 +3560,12 @@ class BalanceChecker:
             balance = int(result or 0)
             return {
                 "balance": dec_str(Decimal(balance) / Decimal(10 ** 9)),
-                "symbol": "TON",
+                "symbol": "GRAM",
                 "raw_balance": balance
             }
         except Exception as e:
             logger.error(f"Error getting TON balance: {e}")
-            return {"balance": "0", "symbol": "TON", "error": str(e)}
+            return {"balance": "0", "symbol": "GRAM", "error": str(e)}
 
     @staticmethod
     async def get_solana_token_balance(address: str, token_mint: str) -> dict:
@@ -3768,7 +3771,7 @@ class TransactionChecker:
             return ton_friendly(account["address"], account.get("is_wallet", True))
 
         sender, receiver = who(body.get("sender")), who(body.get("recipient"))
-        amount, asset = None, "TON"
+        amount, asset = None, "GRAM"
         if kind == "TonTransfer":
             amount = Decimal(int(body.get("amount") or 0)) / Decimal(10 ** 9)
         elif kind == "JettonTransfer":
@@ -3780,7 +3783,7 @@ class TransactionChecker:
             m = re.match(r"^\s*([\d.,]+)\s*(.*)$", preview.get("value") or "")
             if m:
                 amount = Decimal(m.group(1).replace(",", ""))
-                asset = ton_jetton_symbol(m.group(2) or "TON")
+                asset = ton_jetton_symbol(m.group(2) or "GRAM")
             accounts = [who(a) for a in preview.get("accounts") or []]
             sender = sender or (accounts[0] if accounts else None)
             receiver = receiver or (accounts[1] if len(accounts) > 1 else None)
@@ -5165,7 +5168,7 @@ class WithdrawalHandler:
         try:
             dest = Address(to_address)
         except Exception:
-            return {"success": False, "error": "Invalid TON address"}
+            return {"success": False, "error": "Invalid GRAM (TON) address"}
         try:
             nano = int((Decimal(str(amount)) * Decimal(10 ** 9)).to_integral_value())
         except Exception:
@@ -5184,7 +5187,7 @@ class WithdrawalHandler:
                 have = Decimal(balance) / Decimal(10 ** 9)
                 return {
                     "success": False,
-                    "error": f"Insufficient TON. Balance {have}, need {amount} + ~{TON_FEE_RESERVE} fee"
+                    "error": f"Insufficient GRAM. Balance {have}, need {amount} + ~{TON_FEE_RESERVE} fee"
                 }
 
             # Only bounce to deployed contracts; plain wallets that were never used
@@ -5228,7 +5231,7 @@ class WithdrawalHandler:
                 if not tx.get("out_msgs"):
                     return {
                         "success": False,
-                        "error": "Rejected by the TON network (not enough TON for amount + fees)",
+                        "error": "Rejected by the GRAM network (not enough GRAM for amount + fees)",
                         "tx_hash": tx_hash,
                     }
                 return {
@@ -7652,7 +7655,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Examples:\n"
             "`/balance 0x1234...` \u2013 Address balance (ETH/BSC/Polygon)\n"
             "`/balance T1234...` \u2013 Tron address balance\n"
-            "`/balance EQ...` or `/balance UQ...` \u2013 TON address balance\n"
+            "`/balance EQ...` or `/balance UQ...` \u2013 GRAM (prev. TON) address balance\n"
             "`/balance 0xabc...<64 hex>` \u2013 Transaction details\n"
             "`/balance https://bscscan.com/tx/0x...` \u2013 Transaction details",
             parse_mode="Markdown"
@@ -7686,7 +7689,7 @@ async def run_check(update: Update, query: str):
             "\u274c *Invalid Input*\n\n"
             "Could not detect an address or transaction from your input.\n"
             "Supported:\n"
-            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin, TON\n"
+            "\u2022 Address \u2013 EVM (0x...), Tron (T...), Solana, Litecoin, Bitcoin, GRAM (prev. TON)\n"
             "\u2022 Transaction hash or explorer link",
             parse_mode="Markdown"
         )
@@ -10398,7 +10401,7 @@ async def receive_withdraw_address(
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text="\u274c *Invalid Address*\n\n"
-                "Please enter a valid TON address",
+                "Please enter a valid GRAM (TON) address",
                 parse_mode="Markdown"
             )
             context.user_data["withdraw_msg_id"] = msg.message_id

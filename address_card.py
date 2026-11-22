@@ -1,5 +1,6 @@
 """Render a deposit-address card image (PNG) in the style of the bot's banners."""
 import io
+import re
 import os
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -7,7 +8,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _FONT_DIR = os.path.join(_ASSETS, "fonts")
 _TOKEN_DIR = os.path.join(_ASSETS, "tokens")
-_LOGO_ALIASES = {"POL": "matic", "TONCOIN": "ton"}
+_LOGO_ALIASES = {"POL": "matic", "TONCOIN": "ton", "GRAM": "ton"}
 
 
 def _token_logo(symbol: str, size: int):
@@ -24,7 +25,7 @@ TOKEN_COLORS = {
     "USDT": (38, 161, 123), "USDC": (39, 117, 202), "ETH": (98, 126, 234),
     "BNB": (243, 186, 47), "MATIC": (130, 71, 229), "POL": (130, 71, 229),
     "SOL": (153, 69, 255), "TRX": (235, 0, 41), "BTC": (247, 147, 26),
-    "LTC": (52, 93, 157), "TON": (0, 152, 234),
+    "LTC": (52, 93, 157), "TON": (0, 152, 234), "GRAM": (0, 152, 234),
     "DAI": (245, 172, 55), "WBTC": (240, 146, 66), "BTCB": (247, 147, 26), "WETH": (236, 72, 153),
     "LINK": (42, 90, 218), "UNI": (255, 0, 122), "AAVE": (182, 80, 158), "SHIB": (228, 96, 20),
     "PEPE": (60, 150, 60), "DOGE": (194, 166, 51), "XRP": (35, 41, 47), "ADA": (0, 51, 173),
@@ -184,8 +185,8 @@ def render_address_card(symbol: str, network_name: str, address: str,
     fy = 500
     d.polygon([(110, fy + 22), (124, fy - 2), (138, fy + 22)], fill=AMBER)
     d.text((124, fy + 14), "!", font=_font("Inter.ttf", 16, b"Bold"), fill=(255, 255, 255), anchor="mm")
-    if (network_name or "").strip().upper() in ("TON", "TONCOIN", "THE OPEN NETWORK"):
-        warn = f"No memo needed \u00b7 Only send {symbol} on {network_name}"
+    if re.search(r"\b(TON|GRAM|TONCOIN)\b", (network_name or "").upper()):
+        warn = f"No memo needed \u00b7 Only send {symbol} on GRAM (prev. TON)"
     else:
         warn = f"Only send {symbol} on {network_name} to this address"
     d.text((152, fy + 10), warn, font=_font("Inter.ttf", 22, b"Medium"), fill=SOFT, anchor="lm")
@@ -445,7 +446,7 @@ def _feature_art(img, name, box, accent):
     px0, py0, px1, py1 = box
     cx, cy = (px0 + px1) // 2, (py0 + py1) // 2 - 6
     if name == "tokens":
-        syms = ["BTC", "ETH", "USDT", "SOL", "BNB", "TON"]
+        syms = ["BTC", "ETH", "USDT", "SOL", "BNB", "GRAM"]
         size, gap = 86, 22
         gx = cx - (3 * size + 2 * gap) // 2
         gy = cy - (2 * size + gap) // 2
