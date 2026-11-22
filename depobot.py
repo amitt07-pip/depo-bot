@@ -2594,7 +2594,7 @@ class WalletDatabase:
         row = cursor.fetchone()
         conn.close()
         if row:
-            return {"address": row[0], "encrypted_private_key": row[1]}
+            return {"network": network, "address": row[0], "encrypted_private_key": row[1]}
         return None
 
     def save_wallet(
