@@ -8,7 +8,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 _FONT_DIR = os.path.join(_ASSETS, "fonts")
 _TOKEN_DIR = os.path.join(_ASSETS, "tokens")
-_LOGO_ALIASES = {"POL": "matic", "TONCOIN": "ton", "GRAM": "ton"}
+_LOGO_ALIASES = {"POL": "matic", "TONCOIN": "gram", "TON": "gram"}
 
 
 def _token_logo(symbol: str, size: int):
@@ -25,7 +25,7 @@ TOKEN_COLORS = {
     "USDT": (38, 161, 123), "USDC": (39, 117, 202), "ETH": (98, 126, 234),
     "BNB": (243, 186, 47), "MATIC": (130, 71, 229), "POL": (130, 71, 229),
     "SOL": (153, 69, 255), "TRX": (235, 0, 41), "BTC": (247, 147, 26),
-    "LTC": (52, 93, 157), "TON": (0, 152, 234), "GRAM": (0, 152, 234),
+    "LTC": (52, 93, 157), "TON": (48, 161, 245), "GRAM": (48, 161, 245),
     "DAI": (245, 172, 55), "WBTC": (240, 146, 66), "BTCB": (247, 147, 26), "WETH": (236, 72, 153),
     "LINK": (42, 90, 218), "UNI": (255, 0, 122), "AAVE": (182, 80, 158), "SHIB": (228, 96, 20),
     "PEPE": (60, 150, 60), "DOGE": (194, 166, 51), "XRP": (35, 41, 47), "ADA": (0, 51, 173),
