@@ -1859,6 +1859,7 @@ CONVERT_PROVIDER = 16
 CONVERT_DEST, CONVERT_DEST_ADDRESS = range(17, 19)
 WITHDRAW_MEMO = 19
 IMPORT_PHRASE, IMPORT_CONFIRM = range(20, 22)
+WITHDRAW_QUICK_ASSET = 22
 TON_MEMO_MAX_BYTES = 120
 
 pending_withdrawals = {}
@@ -7136,30 +7137,128 @@ async def get_withdrawable_balance(user_id: int, network: str, token: str = None
     return db.get_internal_balance(user_id, ledger_asset)
 
 
-async def _pick_withdraw_token_for_network(user_id: int, network: str):
-    """Pick the best token/asset to withdraw on a specific network.
+async def _withdraw_assets_on_network(user_id: int, network: str) -> list:
+    """Every asset the user holds on ``network``: [(token_key or None, balance, contract, symbol)]."""
+    native_symbol = NETWORKS.get(network, {}).get("symbol", get_ledger_asset(network))
+    tokens = contract_tokens(network)
+    balances = await asyncio.gather(
+        get_withdrawable_balance(user_id, network),
+        *(get_withdrawable_balance(user_id, network, t) for t in tokens),
+        return_exceptions=True
+    )
+    assets = []
+    for key, bal in zip([None] + tokens, balances):
+        if isinstance(bal, Exception) or not bal or bal <= 0:
+            continue
+        if key is None:
+            assets.append((None, bal, None, native_symbol))
+        else:
+            assets.append((key, bal, TOKENS[key]["networks"][network].get("address"),
+                           TOKENS[key].get("symbol", key)))
+    return assets
 
-    Returns (token_key, balance, token_address, symbol, is_native).
-    For native assets token_key is None.
-    """
-    network_info = NETWORKS.get(network, {})
-    native_asset = get_ledger_asset(network)
-    native_balance = await get_withdrawable_balance(user_id, network)
 
-    # Prefer stablecoins if the network supports them and the user has a balance
-    for token in ["USDT", "USDC"]:
-        token_info = TOKENS.get(token, {})
-        if network in token_info.get("networks", {}):
-            token_balance = await get_withdrawable_balance(user_id, network, token)
-            if token_balance > 0:
-                network_data = token_info["networks"][network]
-                contract = network_data.get("address") if not network_data.get("native") else None
-                return token, token_balance, contract, token_info.get("symbol", token), False
+async def _quick_withdraw_amount_screen(context, chat_id, address, network, asset):
+    token_key, balance, contract, symbol = asset
+    context.user_data["withdraw_network"] = network
+    context.user_data["withdraw_token"] = token_key
+    context.user_data["withdraw_contract"] = contract
+    context.user_data["withdraw_token_address"] = contract
+    context.user_data["withdraw_balance"] = str(balance)
+    network_name = NETWORKS.get(network, {}).get("name", network)
+    text = (
+        f"\U0001F4E4 *Quick Withdraw {symbol}*\n\n"
+        f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+        f"\U0001F310 Network: *{network_name}*\n"
+        f"\U0001F4B0 Balance: `{_fmt_amount(balance)} {symbol}`\n\n"
+        "Enter the amount to withdraw:"
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")]])
+    msg = await send_rich_screen(
+        context.bot, chat_id, "withdraw", text, keyboard, "Markdown"
+    ) or await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+    return WITHDRAW_AMOUNT
 
-    if native_balance > 0:
-        return None, native_balance, None, network_info.get("symbol", native_asset), True
 
-    return None, Decimal("0"), None, network_info.get("symbol", native_asset), True
+async def quick_withdraw_for_network(context, chat_id, user_id, address, network):
+    """After `/withdraw <address>`: pick the coin when the wallet holds more than one on that network."""
+    context.user_data["withdraw_network"] = network
+    network_name = NETWORKS.get(network, {}).get("name", network)
+    assets = await _withdraw_assets_on_network(user_id, network)
+    if not assets:
+        text = (
+            "\U0001F4E4 *Quick Withdraw*\n\n"
+            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+            f"\U0001F310 Network: *{network_name}*\n\n"
+            "\u274c No balance available on this network.\n"
+            "Please deposit funds first."
+        )
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(get_banner_path("withdraw"), "rb"),
+            caption=text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]])
+        )
+        return ConversationHandler.END
+    if len(assets) == 1:
+        return await _quick_withdraw_amount_screen(context, chat_id, address, network, assets[0])
+
+    context.user_data["withdraw_quick_assets"] = {(a[0] or "NATIVE"): a for a in assets}
+    text = (
+        "\U0001F4E4 *Choose Coin*\n\n"
+        f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
+        f"\U0001F310 Network: *{network_name}*\n\n"
+        + "\n".join(f"{sym}: `{_fmt_amount(bal)}`" for _k, bal, _c, sym in assets)
+        + "\n\nWhich coin do you want to send?"
+    )
+    rows, row = [], []
+    for key, _bal, _c, sym in assets:
+        row.append(InlineKeyboardButton(sym, callback_data=f"wd_qasset_{key or 'NATIVE'}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Cancel", callback_data="cancel_withdraw")])
+    keyboard = InlineKeyboardMarkup(rows)
+    msg = await send_rich_screen(
+        context.bot, chat_id, "withdraw", text, keyboard, "Markdown"
+    ) or await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=open(get_banner_path("withdraw"), "rb"),
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    context.user_data["withdraw_msg_id"] = msg.message_id
+    return WITHDRAW_QUICK_ASSET
+
+
+@withdraw_cards(1)
+async def quick_withdraw_asset_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    key = query.data[len("wd_qasset_"):]
+    asset = (context.user_data.get("withdraw_quick_assets") or {}).get(key)
+    address = context.user_data.get("withdraw_address")
+    network = context.user_data.get("withdraw_network")
+    if not asset or not address or not network:
+        await query.answer("This withdrawal expired. Start again with /withdraw.", show_alert=True)
+        return ConversationHandler.END
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    context.user_data.pop("withdraw_quick_assets", None)
+    return await _quick_withdraw_amount_screen(context, query.message.chat_id, address, network, asset)
 
 
 @withdraw_cards(1)
@@ -7218,50 +7317,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["withdraw_msg_id"] = msg.message_id
             return WITHDRAW_QUICK_NETWORK
         else:
-            context.user_data["withdraw_network"] = detected
-            network_info = NETWORKS.get(detected, {})
-            network_name = network_info.get("name", detected)
-
-            token_key, token_balance, token_address, symbol, is_native = await _pick_withdraw_token_for_network(user_id, detected)
-            context.user_data["withdraw_token"] = token_key
-            context.user_data["withdraw_contract"] = token_address
-
-            if token_balance > 0:
-                text = (
-                    f"\U0001F4E4 *Quick Withdraw {symbol}*\n\n"
-                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-                    f"\U0001F310 Network: *{network_name}*\n"
-                    f"\U0001F4B0 Balance: `{token_balance:.6f} {symbol}`\n\n"
-                    "Enter the amount to withdraw:"
-                )
-            else:
-                text = (
-                    "\U0001F4E4 *Quick Withdraw*\n\n"
-                    f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-                    f"\U0001F310 Network: *{network_name}*\n\n"
-                    "\u274c No balance available on this network.\n"
-                    "Please deposit funds first."
-                )
-                keyboard = [[InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]]
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=open(get_banner_path("withdraw"), "rb"),
-                    caption=text,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-                return ConversationHandler.END
-            
-            keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            msg = await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=open(get_banner_path("withdraw"), "rb"),
-                caption=text,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            context.user_data["withdraw_msg_id"] = msg.message_id
-            return WITHDRAW_AMOUNT
+            return await quick_withdraw_for_network(context, chat_id, user_id, address, detected)
 
     text = (
         "\U0001F4E4 *Withdraw*\n\n"
@@ -10589,52 +10645,7 @@ async def receive_withdraw_quick_network(
         context.user_data["withdraw_msg_id"] = msg.message_id
         return WITHDRAW_QUICK_NETWORK
     
-    context.user_data["withdraw_network"] = network
-    network_info = NETWORKS.get(network, {})
-    network_name = network_info.get("name", network)
-
-    token_key, token_balance, token_address, symbol, is_native = await _pick_withdraw_token_for_network(user_id, network)
-    context.user_data["withdraw_token"] = token_key
-    context.user_data["withdraw_contract"] = token_address
-
-    if token_balance > 0:
-        text = (
-            f"\U0001F4E4 *Quick Withdraw {symbol}*\n\n"
-            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-            f"\U0001F310 Network: *{network_name}*\n"
-            f"\U0001F4B0 Balance: `{token_balance:.6f} {symbol}`\n\n"
-            "Enter the amount to withdraw:"
-        )
-    else:
-        text = (
-            "\U0001F4E4 *Quick Withdraw*\n\n"
-            f"\U0001F4CD To: `{address[:8]}...{address[-6:]}`\n"
-            f"\U0001F310 Network: *{network_name}*\n\n"
-            "\u274c No balance available on this network.\n"
-            "Please deposit funds first."
-        )
-        keyboard = [[InlineKeyboardButton("\U0001F3E0 Home", callback_data="main_menu")]]
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=open(get_banner_path("withdraw"), "rb"),
-            caption=text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return ConversationHandler.END
-
-    keyboard = [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-    msg = await send_rich_screen(
-        context.bot, chat_id, "withdraw", text, InlineKeyboardMarkup(keyboard), "Markdown"
-    ) or await context.bot.send_photo(
-        chat_id=chat_id,
-        photo=open(get_banner_path("withdraw"), "rb"),
-        caption=text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    context.user_data["withdraw_msg_id"] = msg.message_id
-    return WITHDRAW_AMOUNT
+    return await quick_withdraw_for_network(context, chat_id, user_id, address, network)
 
 
 NATIVE_FEE_RESERVE = {
@@ -13401,6 +13412,9 @@ def main():
             WITHDRAW_MEMO: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_withdraw_memo),
                 CallbackQueryHandler(skip_withdraw_memo, pattern=r"^wd_memo_skip$")
+            ],
+            WITHDRAW_QUICK_ASSET: [
+                CallbackQueryHandler(quick_withdraw_asset_selected, pattern=r"^wd_qasset_[A-Z0-9]+$")
             ],
             WITHDRAW_QUICK_NETWORK: [
                 MessageHandler(
