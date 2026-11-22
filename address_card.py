@@ -106,14 +106,64 @@ def _canvas(accent, glow_box=(30, 20, 430, 420)):
     return img, d
 
 
-def _logo_or_badge(img, d, symbol, x, y, size):
+_NETWORKS = {  # network key / display name -> (logo symbol, short tag)
+    "ETH": ("ETH", "ETH"), "ETHEREUM": ("ETH", "ETH"),
+    "BSC": ("BNB", "BSC"), "BNB CHAIN": ("BNB", "BSC"), "BNB SMART CHAIN": ("BNB", "BSC"),
+    "OPBNB": ("BNB", "opBNB"), "POLYGON": ("MATIC", "Polygon"),
+    "SOLANA": ("SOL", "Solana"), "TRON": ("TRX", "Tron"),
+    "LTC": ("LTC", "LTC"), "LITECOIN": ("LTC", "LTC"), "BTC": ("BTC", "BTC"), "BITCOIN": ("BTC", "BTC"),
+    "TON": ("GRAM", "GRAM"), "GRAM": ("GRAM", "GRAM"), "GRAM (PREV. TON)": ("GRAM", "GRAM"),
+}
+_SAME_COIN = {"TON": "GRAM", "TONCOIN": "GRAM", "POL": "MATIC"}
+
+
+def network_tag(network) -> str:
+    """Short network label for small tags, e.g. 'BNB Chain' -> 'BSC'."""
+    if not network:
+        return ""
+    return _NETWORKS.get(str(network).strip().upper(), (None, str(network)))[1]
+
+
+def _network_badge(img, symbol, network, x, y, size):
+    """Small network logo on the coin logo's lower-right edge (skipped for the chain's own coin)."""
+    net_sym = _NETWORKS.get(str(network or "").strip().upper(), (None, None))[0]
+    coin = _SAME_COIN.get(symbol, symbol)
+    if not net_sym or net_sym == coin:
+        return
+    bs = max(16, int(size * 0.42))
+    logo = _token_logo(net_sym, bs)
+    if logo is None:
+        return
+    bx, by, ring = x + size - bs + bs // 6, y + size - bs + bs // 6, max(2, bs // 10)
+    k = 3
+    mask = Image.new("L", ((bs + 2 * ring) * k,) * 2, 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, (bs + 2 * ring) * k - 1, (bs + 2 * ring) * k - 1], fill=255)
+    img.paste((255, 255, 255), (bx - ring, by - ring), mask.resize(((bs + 2 * ring),) * 2, Image.LANCZOS))
+    img.paste(logo, (bx, by), logo)
+
+
+def _logo_or_badge(img, d, symbol, x, y, size, network=None):
     logo = _token_logo(symbol, size)
     if logo is not None:
         img.paste(logo, (x, y), logo)
-        return
-    d.ellipse([x, y, x + size, y + size], fill=TOKEN_COLORS.get(symbol, _DEFAULT_COLOR))
-    f = _fit(d, symbol, "SpaceGrotesk.ttf", b"Bold", size - 8, size // 3, 8)
-    d.text((x + size / 2, y + size / 2), symbol, font=f, fill=(255, 255, 255), anchor="mm")
+    else:
+        d.ellipse([x, y, x + size, y + size], fill=TOKEN_COLORS.get(symbol, _DEFAULT_COLOR))
+        f = _fit(d, symbol, "SpaceGrotesk.ttf", b"Bold", size - 8, size // 3, 8)
+        d.text((x + size / 2, y + size / 2), symbol, font=f, fill=(255, 255, 255), anchor="mm")
+    if network:
+        _network_badge(img, symbol, network, x, y, size)
+
+
+def _tag(d, x, y_mid, text, accent):
+    """Small rounded network tag; returns its width."""
+    if not text:
+        return 0
+    f = _font("Inter.ttf", 15, b"SemiBold")
+    w = d.textlength(text, font=f) + 16
+    tint = tuple(int(c * 0.12 + 255 * 0.88) for c in accent)
+    d.rounded_rectangle([x, y_mid - 11, x + w, y_mid + 11], radius=11, fill=tint)
+    d.text((x + 8, y_mid), text, font=f, fill=SOFT, anchor="lm")
+    return w
 
 
 def render_address_card(symbol: str, network_name: str, address: str,
@@ -133,6 +183,7 @@ def render_address_card(symbol: str, network_name: str, address: str,
         d.ellipse([cx0 + 8, cy0 + 8, cx0 + 2 * r - 8, cy0 + 2 * r - 8], outline=(255, 255, 255), width=3)
         coin_font = _fit(d, symbol, "SpaceGrotesk.ttf", b"Bold", 2 * r - 40, 54, 22)
         d.text((cx0 + r, cy0 + r), symbol, font=coin_font, fill=(255, 255, 255), anchor="mm")
+    _network_badge(img, symbol, network_name, cx0, cy0, 2 * r)
 
     # Title block
     x0 = cx0 + 2 * r + 34
@@ -295,7 +346,8 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
         bar = Image.new("RGB", (bx1 - bx0, 16), TRACK)
         bd = ImageDraw.Draw(bar)
         pos = 0.0
-        for sym, _, usd in holdings:
+        for h in holdings:
+            sym, usd = h[0], h[2]
             seg = (bx1 - bx0) * float(usd) / total
             bd.rectangle([int(pos), 0, int(pos + seg), 16], fill=TOKEN_COLORS.get(sym, _DEFAULT_COLOR))
             pos += seg
@@ -310,7 +362,7 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
     rows = holdings[:4]
     if len(holdings) > 4:
         rest = holdings[3:]
-        rows = holdings[:3] + [("OTHER", None, sum(float(h[2]) for h in rest))]
+        rows = holdings[:3] + [("OTHER", None, sum(float(h[2]) for h in rest), None)]
     sym_font = _font("Inter.ttf", 25, b"SemiBold")
     sub_font = _font("Inter.ttf", 19, b"Regular")
     usd_font = _font("SpaceGrotesk.ttf", 25, b"Bold")
@@ -320,15 +372,20 @@ def render_portfolio_card(heading: str, total_usd, holdings, chips, brand: str =
                font=_font("Inter.ttf", 26, b"SemiBold"), fill=TEXT, anchor="mm")
         d.text(((px0 + px1) / 2, (py0 + py1) / 2 + 46), empty_hint,
                font=sub_font, fill=MUTED, anchor="mm")
-    for sym, amt, usd in rows:
+    for h in rows:
+        sym, amt, usd = h[0], h[1], h[2]
+        net = h[3] if len(h) > 3 else None
         if sym == "OTHER":
             d.ellipse([px0 + 24, y + 6, px0 + 68, y + 50], fill=TRACK)
             d.text((px0 + 46, y + 28), "+", font=_font("Inter.ttf", 26, b"Bold"), fill=TEXT, anchor="mm")
             d.text((px0 + 84, y + 4), "Others", font=sym_font, fill=TEXT)
             d.text((px0 + 84, y + 34), f"{len(holdings) - 3} more", font=sub_font, fill=MUTED)
         else:
-            _logo_or_badge(img, d, sym, px0 + 24, y + 6, 44)
+            _logo_or_badge(img, d, sym, px0 + 24, y + 6, 44, net)
             d.text((px0 + 84, y + 4), sym, font=sym_font, fill=TEXT)
+            tag = network_tag(net)
+            _tag(d, px0 + 84 + d.textlength(sym, font=sym_font) + 10, y + 19, "" if tag == sym else tag,
+                 TOKEN_COLORS.get(sym, _DEFAULT_COLOR))
             d.text((px0 + 84, y + 34), _amount(amt), font=sub_font, fill=MUTED)
         pct = (float(usd) / total * 100) if total > 0 else 0
         d.text((px1 - 26, y + 4), _usd(float(usd)), font=usd_font, fill=TEXT, anchor="ra")
@@ -531,7 +588,7 @@ def render_transaction_card(network_name: str, status: str, amount, asset: str, 
     # Coin and amount
     x0, size = 96, 132
     if asset:
-        _logo_or_badge(img, d, asset, x0, 100, size)
+        _logo_or_badge(img, d, asset, x0, 100, size, network_name)
     else:
         d.ellipse([x0, 100, x0 + size, 100 + size], fill=TRACK)
     tx = x0 + size + 32
@@ -636,7 +693,7 @@ def render_breakdown_card(heading: str, address: str, total_usd, rows, brand: st
             d.text((cx + 48, cy + 4), "Others", font=sym_font, fill=TEXT)
             d.text((cx + 48, cy + 28), f"{amt} more", font=sub_font, fill=MUTED)
         else:
-            _logo_or_badge(img, d, sym.upper(), cx, cy + 4, 36)
+            _logo_or_badge(img, d, sym.upper(), cx, cy + 4, 36, net)
             d.text((cx + 48, cy + 2), sym, font=sym_font, fill=TEXT)
             d.text((cx + 48, cy + 28), net, font=sub_font, fill=MUTED)
             d.text((cx + w, cy + 28), _amount(amt), font=sub_font, fill=MUTED, anchor="ra")
@@ -699,7 +756,7 @@ def render_withdraw_card(title: str, step: int, rows=(), notes=(), symbol: str =
 
     x0, size = 96, 112
     if symbol:
-        _logo_or_badge(img, d, symbol, x0, 92, size)
+        _logo_or_badge(img, d, symbol, x0, 92, size, network_name)
     else:
         tint = tuple(int(c * 0.16 + 255 * 0.84) for c in accent)
         d.ellipse([x0, 92, x0 + size, 92 + size], fill=tint, outline=accent, width=3)
@@ -799,7 +856,7 @@ def render_deposit_card(symbol: str, amount, network_name: str, usd_value, balan
     img, d = _canvas(accent)
 
     x0, size = 96, 132
-    _logo_or_badge(img, d, symbol, x0, 100, size)
+    _logo_or_badge(img, d, symbol, x0, 100, size, network_name)
     tx = x0 + size + 32
     _spaced(d, (tx, 104), "DEPOSIT RECEIVED", _font("Inter.ttf", 22, b"SemiBold"), MUTED, 5)
     amount_s = f"+{_amount(amount)} {symbol}"

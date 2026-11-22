@@ -6635,17 +6635,18 @@ async def build_balance_screen(wallets: list, bot=None):
         *(wallet_holdings(w["network"], w["address"]) for w in wallets), return_exceptions=True
     )
     agg = {}
-    for result in per_wallet:
+    for w, result in zip(wallets, per_wallet):
         if isinstance(result, Exception):
             continue
+        net_name = NETWORKS.get(w["network"], {}).get("name", w["network"])
         for sym, amt, usd in result:
-            a, u, priced = agg.get(sym, (Decimal("0"), Decimal("0"), True))
-            agg[sym] = (a + amt, u + (usd or Decimal("0")), priced and usd is not None)
-    prices = await PriceFetcher.get_prices([s for s, v in agg.items() if not v[2] and v[0] > 0])
+            a, u, priced = agg.get((sym, net_name), (Decimal("0"), Decimal("0"), True))
+            agg[(sym, net_name)] = (a + amt, u + (usd or Decimal("0")), priced and usd is not None)
+    prices = await PriceFetcher.get_prices(list({k[0] for k, v in agg.items() if not v[2] and v[0] > 0}))
     holdings = []
-    for sym, (amt, usd, priced) in agg.items():
+    for (sym, net_name), (amt, usd, priced) in agg.items():
         value = usd if priced else amt * prices.get(sym, Decimal("0"))
-        holdings.append((sym, amt, value))
+        holdings.append((sym, amt, value, net_name))
     total = sum((h[2] for h in holdings), Decimal("0"))
     held = [h for h in holdings if h[1] > 0]
 
@@ -6672,9 +6673,9 @@ async def build_balance_screen(wallets: list, bot=None):
             f"{ui('cash')}  <b>Total</b>   <code>${total:,.2f}</code>   "
             f"{ui('wallet')}  <b>Wallets</b>   <code>{len(wallets)}</code>"
         )
-    lines = [f"{tok(sym)}  <b>{esc(sym)}</b>  <code>{esc(f'{amt.normalize():f}')}</code>"
+    lines = [f"{tok(sym)}  <b>{esc(sym)}</b> <i>{esc(net_name)}</i>  <code>{esc(f'{amt.normalize():f}')}</code>"
              + (f"  \u2248 ${value:,.2f}" if value > 0 else "")
-             for sym, amt, value in sorted(held, key=lambda h: h[2], reverse=True)]
+             for sym, amt, value, net_name in sorted(held, key=lambda h: h[2], reverse=True)]
     if lines:
         caption += "\n\n" + "\n".join(lines)
     brand = None
@@ -6746,14 +6747,15 @@ async def build_dashboard(user_id: int, name: str, bot=None):
             continue
         scanned.add(network)
         symbol = NETWORKS.get(network, {}).get("symbol", network) if asset == "NATIVE" else asset
-        amounts[symbol] = amounts.get(symbol, Decimal("0")) + amount
+        k = (symbol, NETWORKS.get(network, {}).get("name", network))
+        amounts[k] = amounts.get(k, Decimal("0")) + amount
     if not scanned and wallets:
         for asset, balance in (db.get_all_internal_balances(user_id) or {}).items():
-            amounts[asset] = amounts.get(asset, Decimal("0")) + Decimal(str(balance))
+            amounts[(asset, None)] = amounts.get((asset, None), Decimal("0")) + Decimal(str(balance))
     amounts = {k: v for k, v in amounts.items() if v > 0}
 
-    prices = await PriceFetcher.get_prices(amounts) if amounts else {}
-    holdings = [(sym, amt, amt * prices.get(sym, Decimal("0"))) for sym, amt in amounts.items()]
+    prices = await PriceFetcher.get_prices(list({k[0] for k in amounts})) if amounts else {}
+    holdings = [(sym, amt, amt * prices.get(sym, Decimal("0")), net) for (sym, net), amt in amounts.items()]
     total = sum((h[2] for h in holdings), Decimal("0"))
 
     caption = (
@@ -7978,9 +7980,10 @@ async def _check_address(update: Update, address: str, detected, message=None, b
 
         merged = {}
         for entry in balances:
-            amt, usd = merged.get(entry["token"], (Decimal("0"), Decimal("0")))
-            merged[entry["token"]] = (amt + entry["balance"], usd + entry["usd_value"])
-        holdings = [(sym, amt, usd) for sym, (amt, usd) in merged.items() if amt > 0]
+            k = (entry["token"], entry.get("network_name"))
+            amt, usd = merged.get(k, (Decimal("0"), Decimal("0")))
+            merged[k] = (amt + entry["balance"], usd + entry["usd_value"])
+        holdings = [(sym, amt, usd, net) for (sym, net), (amt, usd) in merged.items() if amt > 0]
         top = max(holdings, key=lambda h: h[2])[0] if holdings else None
         nets = detected if isinstance(detected, list) else [detected]
         chips = [NETWORKS.get(nets[0], {}).get("name", nets[0]) if len(nets) == 1 else f"{len(nets)} networks",
