@@ -99,7 +99,14 @@ def addresses_for(key: str) -> dict:
     out = {}
     k = key.strip()
     hexkey = k[2:] if k.lower().startswith("0x") else k
-    if re.fullmatch(r"[0-9a-fA-F]{64}", hexkey):
+    if k.startswith(getattr(d, "TON_SEED_PREFIX", "ed25519:")):
+        try:
+            w = d.ton_wallet_from_mnemonic(k)
+            out["TON"] = w.address.to_string(True, True, False)
+            out["TON (raw)"] = w.address.to_string(False)
+        except Exception:
+            pass
+    elif re.fullmatch(r"[0-9a-fA-F]{64}", hexkey):
         try:
             out["EVM"] = d.Account.from_key("0x" + hexkey).address
             out["TRON"] = d.TronPrivateKey(bytes.fromhex(hexkey)).public_key.to_base58check_address()

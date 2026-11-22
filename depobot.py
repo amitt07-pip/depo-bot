@@ -1847,6 +1847,7 @@ WITHDRAW_QUICK_NETWORK = 15
 CONVERT_PROVIDER = 16
 CONVERT_DEST, CONVERT_DEST_ADDRESS = range(17, 19)
 WITHDRAW_MEMO = 19
+IMPORT_PHRASE, IMPORT_CONFIRM = range(20, 22)
 TON_MEMO_MAX_BYTES = 120
 
 pending_withdrawals = {}
@@ -2661,9 +2662,73 @@ class WalletDatabase:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM wallets WHERE user_id = ?", (user_id,))
         count = cursor.rowcount
+        self._phrase_table(cursor)
+        cursor.execute("DELETE FROM user_phrases WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
         return count
+
+    @staticmethod
+    def _phrase_table(cursor):
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS user_phrases (user_id INTEGER PRIMARY KEY, "
+            "encrypted_phrase TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+    def get_phrase(self, user_id: int) -> Optional[str]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._phrase_table(cursor)
+        cursor.execute("SELECT encrypted_phrase FROM user_phrases WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.commit()
+        conn.close()
+        if not row:
+            return None
+        try:
+            return CryptoUtils.decrypt_private_key(row[0])
+        except Exception as e:
+            logger.error(f"Could not decrypt recovery phrase of user {user_id}: {e}")
+            return None
+
+    def phrase_user_ids(self) -> set:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._phrase_table(cursor)
+        cursor.execute("SELECT user_id FROM user_phrases")
+        ids = {r[0] for r in cursor.fetchall()}
+        conn.commit()
+        conn.close()
+        return ids
+
+    def apply_phrase(self, user_id: int, phrase: str, wallets: dict) -> list:
+        """Make the phrase's wallets ({network: (address, key)}) the user's wallets.
+        Replaced keys go to retired_wallets. Another account holding the same
+        wallets loses them (the phrase moved). Returns those accounts' ids."""
+        addrs = sorted({a.lower() for a, _ in wallets.values()})
+        marks = ",".join("?" for _ in addrs)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._phrase_table(cursor)
+        cursor.execute(
+            f"SELECT DISTINCT user_id FROM wallets WHERE user_id != ? AND LOWER(address) IN ({marks})",
+            (user_id, *addrs))
+        others = [r[0] for r in cursor.fetchall()]
+        for other in others:
+            cursor.execute(f"DELETE FROM wallets WHERE user_id = ? AND LOWER(address) IN ({marks})", (other, *addrs))
+            cursor.execute("DELETE FROM user_phrases WHERE user_id = ?", (other,))
+        conn.commit()
+        conn.close()
+        for network, (address, key) in wallets.items():
+            self.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(key))
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO user_phrases (user_id, encrypted_phrase) VALUES (?, ?)",
+            (user_id, CryptoUtils.encrypt_private_key(phrase)))
+        conn.commit()
+        conn.close()
+        return others
 
     def get_all_wallets_with_users(self) -> list:
         conn = sqlite3.connect(self.db_path)
@@ -2978,12 +3043,80 @@ def ton_raw_address(address: str) -> str:
     return Address(address).to_string(False).lower()
 
 
+TON_SEED_PREFIX = "ed25519:"
+PHRASE_WORDS = 12
+
+
 def ton_wallet_from_mnemonic(mnemonic: str):
     from tonsdk.contract.wallet import Wallets, WalletVersionEnum
+    if mnemonic.startswith(TON_SEED_PREFIX):
+        import nacl.signing
+        sk = nacl.signing.SigningKey(bytes.fromhex(mnemonic[len(TON_SEED_PREFIX):]))
+        pub = bytes(sk.verify_key)
+        return Wallets.ALL[WalletVersionEnum.v4r2](public_key=pub, private_key=bytes(sk) + pub, wc=0)
     _m, _pub, _priv, wallet = Wallets.from_mnemonics(
         mnemonic.split(), WalletVersionEnum.v4r2, 0
     )
     return wallet
+
+
+def _slip10_ed25519(seed: bytes, path: list) -> bytes:
+    import hmac
+    digest = hmac.new(b"ed25519 seed", seed, hashlib.sha512).digest()
+    key, chain = digest[:32], digest[32:]
+    for index in path:
+        digest = hmac.new(chain, b"\x00" + key + (index | 0x80000000).to_bytes(4, "big"), hashlib.sha512).digest()
+        key, chain = digest[:32], digest[32:]
+    return key
+
+
+def _bip39():
+    from eth_account.hdaccount.mnemonic import Mnemonic, Language
+    return Mnemonic(Language.ENGLISH)
+
+
+def new_recovery_phrase() -> str:
+    return _bip39().generate(PHRASE_WORDS)
+
+
+def normalize_phrase(text: str) -> str:
+    return " ".join(re.findall(r"[a-z]+", (text or "").lower()))
+
+
+def is_valid_phrase(phrase: str) -> bool:
+    try:
+        return len(phrase.split()) in (12, 15, 18, 21, 24) and _bip39().is_mnemonic_valid(phrase)
+    except Exception:
+        return False
+
+
+def derive_phrase_wallets(phrase: str) -> dict:
+    """{network: (address, private_key)} for every network, from a BIP39 phrase.
+    EVM, Tron and Solana use the standard paths (MetaMask/Trust/Phantom/TronLink)."""
+    from eth_account.hdaccount import seed_from_mnemonic, key_from_seed
+    seed = seed_from_mnemonic(phrase, "")
+    out = {}
+    for network, info in NETWORKS.items():
+        kind = info["type"]
+        if kind == "evm":
+            acct = Account.from_key(key_from_seed(seed, "m/44'/60'/0'/0/0"))
+            out[network] = (acct.address, acct.key.hex())
+        elif kind == "tron":
+            pk = TronPrivateKey(key_from_seed(seed, "m/44'/195'/0'/0/0"))
+            out[network] = (pk.public_key.to_base58check_address(), pk.hex())
+        elif kind == "btc":
+            key = key_from_seed(seed, "m/44'/0'/0'/0/0").hex()
+            out[network] = (WalletGenerator.btc_address_from_private_key(key), key)
+        elif kind == "ltc":
+            key = key_from_seed(seed, "m/44'/2'/0'/0/0").hex()
+            out[network] = (WalletGenerator.ltc_address_from_private_key(key), key)
+        elif kind == "solana":
+            kp = Keypair.from_seed(_slip10_ed25519(seed, [44, 501, 0, 0]))
+            out[network] = (str(kp.pubkey()), base64.b64encode(bytes(kp)).decode())
+        elif kind == "ton":
+            key = TON_SEED_PREFIX + _slip10_ed25519(seed, [44, 607, 0]).hex()
+            out[network] = (ton_wallet_from_mnemonic(key).address.to_string(True, True, False), key)
+    return out
 
 
 def ton_hash_to_hex(value: str) -> str:
@@ -5512,6 +5645,10 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "*Wallet Rescue*\n"
         "• `/rescue <wallet_address> <chain>` — balances of a bot EVM address on another chain\n"
         "• `/rescue <wallet_address> <chain> <token> <to_address> [amount|all]` — move funds sent on the wrong EVM chain (e.g. BEP20 to an ERC20 address)\n\n"
+        "*Recovery Phrases*\n"
+        "• `/migrate` — check which users still have old random-key wallets\n"
+        "• `/migrate confirm` — switch users with empty old wallets to a phrase and DM it\n"
+        "• `/migrate <user_id>` — switch one user even if the old wallets hold funds\n\n"
         "*Help*\n"
         "• `/admin_help` — show this message"
     )
@@ -6100,9 +6237,17 @@ def get_network_keyboard(action: str, include_tokens: bool = True):
     return InlineKeyboardMarkup(keyboard)
 
 
+def generate_menu_rows() -> list:
+    return [
+        [ikb("Generate All Wallets", callback_data="genall", ui_name="new", style="success")],
+        [ikb("Import Wallet", callback_data="import_phrase", ui_name="wallet", style="primary")],
+        [ikb("Back", callback_data="main_menu", ui_name="home")],
+    ]
+
+
 def get_generate_network_keyboard():
     """Keyboard for generate wallet - shows only networks (not token/network combos)."""
-    keyboard = []
+    keyboard = [[ikb("Generate All Wallets", callback_data="genall", ui_name="new", style="success")]]
     row = []
 
     for network_key, network_info in NETWORKS.items():
@@ -7144,18 +7289,19 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.message.chat_id
+    if context.args and context.args[0].lower() in GENERATE_ALL_WORDS:
+        return await generate_all_message(context, chat_id, user_id)
     network_names = [f"{info['name']} ({key})" for key, info in NETWORKS.items()]
     networks_str = ", ".join(network_names)
 
     text = (
         "\U0001F4B3 *Generate Wallet*\n\n"
         "Which network?\n\n"
-        f"_{networks_str}_"
+        f"_{networks_str}_\n\n"
+        "Or type *all* to create every wallet at once. All your wallets come from one recovery phrase."
     )
 
-    keyboard = [
-        [InlineKeyboardButton("Back", callback_data="main_menu")]
-    ]
+    keyboard = generate_menu_rows()
 
     msg = await context.bot.send_photo(
         chat_id=chat_id,
@@ -7216,7 +7362,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{h_html('convert', 'Convert')}\n"
         "<code>/convert</code>  <i>Swap between supported assets</i>\n\n"
         f"{h_html('card', 'Wallet Generation')}\n"
-        "<code>/generate</code>  <i>Create a new wallet for any network</i>\n\n"
+        "<code>/generate</code>  <i>Create a wallet (<code>/generate all</code> for every network)</i>\n"
+        "<code>/phrase</code>  <i>Show your recovery phrase</i>\n"
+        "<code>/import</code>  <i>Restore your wallets on this account from your phrase</i>\n\n"
     )
 
     await send_photo_with_banner(
@@ -8285,12 +8433,11 @@ async def show_generate_menu(
     text = (
         "\U0001F4B3 *Generate Wallet*\n\n"
         "Which network?\n\n"
-        f"_{networks_str}_"
+        f"_{networks_str}_\n\n"
+        "Or type *all* to create every wallet at once. All your wallets come from one recovery phrase."
     )
 
-    keyboard = [
-        [InlineKeyboardButton("Back", callback_data="main_menu")]
-    ]
+    keyboard = generate_menu_rows()
 
     msg = await context.bot.send_photo(
         chat_id=chat_id,
@@ -8320,6 +8467,9 @@ async def receive_generate_network(update: Update, context: ContextTypes.DEFAULT
             await context.bot.delete_message(chat_id, context.user_data["generate_msg_id"])
         except Exception:
             pass
+
+    if text.lower().strip(" .!") in GENERATE_ALL_WORDS:
+        return await generate_all_message(context, chat_id, user_id)
 
     network = detect_network_from_text(text)
 
@@ -8359,7 +8509,7 @@ async def receive_generate_network(update: Update, context: ContextTypes.DEFAULT
             caption=(
                 f"\u26a0\ufe0f *Warning*\n\n"
                 f"You already have a {info['name']} wallet.\n"
-                f"Generating a new one will replace it.\n\n"
+                f"{REPLACE_ALL_NOTE}\n\n"
                 f"Do you want to proceed?"
             ),
             parse_mode="Markdown",
@@ -8389,7 +8539,356 @@ async def confirm_generate_ai(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception:
         pass
     
-    return await do_generate_wallet_ai(update, context, chat_id, network, user_id)
+    return await do_generate_wallet_ai(update, context, chat_id, network, user_id, replace=True)
+
+
+GENERATE_ALL_WORDS = ("all", "all wallets", "all networks", "every", "everything")
+REPLACE_ALL_NOTE = (
+    "All your wallets come from one recovery phrase, so a new wallet means a new phrase "
+    "and new addresses on every network. Move your funds off the old addresses first."
+)
+PHRASE_SENT_NOTE = "\n\n\U0001F510 _Your recovery phrase was sent and pinned in this chat._"
+PHRASE_TITLES = {
+    "new": "Your Recovery Phrase",
+    "migrate": "Your Wallet Was Upgraded",
+    "import": "Wallet Imported",
+    "show": "Your Recovery Phrase",
+}
+PHRASE_INTRO = {
+    "new": "Your wallets on every network come from these 12 words. Write them down and keep them somewhere safe.",
+    "migrate": (
+        "Vex wallets now come from a recovery phrase, so you can restore them on any Telegram account. "
+        "Your wallets moved to new addresses made from the words below. "
+        "Don't send funds to your old addresses any more."
+    ),
+    "import": "Your wallets were restored from this phrase.",
+    "show": "These words are the key to all your Vex wallets.",
+}
+
+
+async def send_phrase_message(bot, user_id: int, phrase: str, reason: str = "show"):
+    """DM the user their recovery phrase and pin it. Returns the message or None."""
+    body = html.escape(phrase)
+    text = (
+        f"\U0001F510 <b>{PHRASE_TITLES[reason]}</b>\n\n{PHRASE_INTRO[reason]}\n\n{{phrase}}\n\n"
+        "To get the same wallets on another Telegram account, send <code>/import</code> there "
+        "and then this phrase.\n\n"
+        "\u26a0\ufe0f <b>Never share it.</b> Anyone with these words controls your funds. "
+        "Vex will never ask you for them."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [ikb("Copy Phrase", ui_name="copy", copy_text=CopyTextButton(phrase), style="success")],
+        [ikb("Wallets", callback_data="menu_wallets", ui_name="wallet")],
+    ])
+    msg = None
+    for wrap, markup in ((f"<tg-spoiler><code>{body}</code></tg-spoiler>", keyboard),
+                         (f"<code>{body}</code>", keyboard), (f"<code>{body}</code>", None)):
+        try:
+            msg = await bot.send_message(user_id, text.format(phrase=wrap), parse_mode="HTML",
+                                         reply_markup=markup)
+            break
+        except Exception as e:
+            logger.warning(f"Phrase message to {user_id} failed: {e}")
+    if msg:
+        try:
+            await bot.pin_chat_message(chat_id=user_id, message_id=msg.message_id, disable_notification=True)
+        except Exception as e:
+            logger.warning(f"Could not pin phrase message for {user_id}: {e}")
+    return msg
+
+
+async def create_phrase_wallets(bot, user_id: int, reason: str = "new", phrase: str = None):
+    """Give the user wallets on every network from a (new) recovery phrase and DM it."""
+    phrase = phrase or new_recovery_phrase()
+    others = db.apply_phrase(user_id, phrase, derive_phrase_wallets(phrase))
+    logger.info(f"User {user_id} wallets set from a recovery phrase ({reason})")
+    msg = await send_phrase_message(bot, user_id, phrase, reason) if bot else None
+    for other in others:
+        logger.info(f"Phrase wallets of user {other} moved to user {user_id}")
+        try:
+            await bot.send_message(
+                other,
+                "\U0001F510 *Wallets Moved*\n\n"
+                "Your Vex wallets were imported into another Telegram account with your recovery "
+                "phrase, so they were removed from this account.\n\n"
+                "If this wasn't you, someone has your phrase: send /import here with it and move "
+                "your funds to a new wallet right away.",
+                parse_mode="Markdown")
+        except Exception:
+            pass
+    return phrase, msg, others
+
+
+async def generate_user_wallet(bot, user_id: int, network: str, replace: bool = False) -> tuple:
+    """(address, new_phrase_created). New users and replacements get a new phrase for
+    every network; phrase users get the network derived from their phrase."""
+    phrase = db.get_phrase(user_id)
+    if replace or (not phrase and not db.get_all_wallets(user_id)):
+        await create_phrase_wallets(bot, user_id, "new")
+        return db.get_wallet(user_id, network)["address"], True
+    if not db.get_wallet(user_id, network):
+        if phrase:
+            address, key = derive_phrase_wallets(phrase)[network]
+            db.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(key))
+        else:
+            address, key = WalletGenerator.wallet_for_user(user_id, network)
+            enc = db.get_evm_wallet(user_id)["encrypted_private_key"] if key is None else CryptoUtils.encrypt_private_key(key)
+            db.save_wallet(user_id, network, address, enc)
+    return db.get_wallet(user_id, network)["address"], False
+
+
+def wallets_md(user_id: int) -> str:
+    groups = {}
+    for network, info in NETWORKS.items():
+        wallet = db.get_wallet(user_id, network)
+        if wallet:
+            groups.setdefault(wallet["address"], []).append(info["name"])
+    return "\n\n".join(f"*{', '.join(names)}*\n`{addr}`" for addr, names in groups.items())
+
+
+def wallets_ready_keyboard():
+    return InlineKeyboardMarkup([
+        [ikb("Deposit", callback_data="menu_deposit", ui_name="deposit"),
+         ikb("Wallets", callback_data="menu_wallets", ui_name="wallet")],
+        [ikb("Home", callback_data="main_menu", ui_name="home")],
+    ])
+
+
+async def generate_all_caption(bot, user_id: int) -> str:
+    if not db.get_phrase(user_id) and not db.get_all_wallets(user_id):
+        await create_phrase_wallets(bot, user_id, "new")
+        new_phrase = True
+    else:
+        new_phrase = False
+        for network in NETWORKS:
+            if not db.get_wallet(user_id, network):
+                await generate_user_wallet(bot, user_id, network)
+    return "\u2705 *All Wallets Ready*\n\n" + wallets_md(user_id) + (PHRASE_SENT_NOTE if new_phrase else "")
+
+
+async def generate_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    await edit_message_with_banner(query, "generate", "*Generating all wallets...*", None)
+    try:
+        caption = await generate_all_caption(context.bot, query.from_user.id)
+        await edit_message_with_banner(query, "generate", caption, wallets_ready_keyboard())
+    except Exception as e:
+        logger.error(f"Error generating all wallets: {e}")
+        await edit_message_with_banner(query, "generate", "*Error*\n\nCould not create your wallets. Try again.",
+                                       get_back_button("menu_generate"))
+    return ConversationHandler.END
+
+
+async def generate_all_message(context, chat_id: int, user_id: int):
+    msg = await context.bot.send_photo(
+        chat_id=chat_id, photo=open(get_banner_path("generate"), "rb"),
+        caption="*Generating all wallets...*", parse_mode="Markdown")
+    try:
+        caption = await generate_all_caption(context.bot, user_id)
+        await msg.edit_caption(caption=caption, parse_mode="Markdown", reply_markup=wallets_ready_keyboard())
+    except Exception as e:
+        logger.error(f"Error generating all wallets: {e}")
+        await msg.edit_caption(caption="\u274c *Error*\n\nCould not create your wallets. Try again.",
+                               parse_mode="Markdown", reply_markup=get_back_button("menu_generate"))
+    return ConversationHandler.END
+
+
+async def send_import_prompt(bot, chat_id: int, context, error: str = None):
+    caption = (
+        "\U0001F511 *Import Wallet*\n\n"
+        "Send your 12-word (or 24-word) Vex recovery phrase.\n\n"
+        "_Your message is deleted right away. The phrase's wallets replace the ones on this account._"
+    )
+    if error:
+        caption = f"\u26a0\ufe0f *Invalid Phrase*\n\n{error}\n\n" + caption
+    msg = await bot.send_photo(
+        chat_id=chat_id, photo=open(get_banner_path("generate"), "rb"), caption=caption,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[ikb("Cancel", callback_data="main_menu", ui_name="error", style="danger")]]))
+    context.user_data["import_msg_id"] = msg.message_id
+
+
+async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("*You are not authorised to use the bot!*", parse_mode="Markdown")
+        return ConversationHandler.END
+    chat_id = update.message.chat_id
+    if context.args:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        return await handle_import_text(context.bot, chat_id, user_id, " ".join(context.args), context)
+    await send_import_prompt(context.bot, chat_id, context)
+    return IMPORT_PHRASE
+
+
+async def import_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await send_import_prompt(context.bot, query.message.chat_id, context)
+    return IMPORT_PHRASE
+
+
+async def receive_import_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    text = update.message.text or ""
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    if "import_msg_id" in context.user_data:
+        try:
+            await context.bot.delete_message(chat_id, context.user_data.pop("import_msg_id"))
+        except Exception:
+            pass
+    return await handle_import_text(context.bot, chat_id, update.effective_user.id, text, context)
+
+
+async def handle_import_text(bot, chat_id: int, user_id: int, text: str, context):
+    phrase = normalize_phrase(text)
+    if not is_valid_phrase(phrase):
+        await send_import_prompt(bot, chat_id, context,
+                                 "That isn't a valid recovery phrase. Check the words and their order, then send it again.")
+        return IMPORT_PHRASE
+    current = {w["address"].lower() for w in db.get_all_wallets(user_id)}
+    incoming = {a.lower() for a, _ in derive_phrase_wallets(phrase).values()}
+    if current and not current <= incoming:
+        context.user_data["import_phrase_enc"] = CryptoUtils.encrypt_private_key(phrase)
+        await bot.send_photo(
+            chat_id=chat_id, photo=open(get_banner_path("generate"), "rb"),
+            caption=(
+                "\u26a0\ufe0f *Replace Your Wallets?*\n\n"
+                "Importing replaces the wallets on this account with the ones from the phrase.\n\n"
+                "Move your funds off your current addresses first, unless you have their phrase."
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                ikb("Yes, Import", callback_data="import_ok", ui_name="success", style="success"),
+                ikb("Cancel", callback_data="main_menu", ui_name="error", style="danger"),
+            ]]))
+        return IMPORT_CONFIRM
+    return await finish_import(bot, chat_id, user_id, phrase)
+
+
+async def import_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_callback_auth(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    enc = context.user_data.pop("import_phrase_enc", None)
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    if not enc:
+        return ConversationHandler.END
+    return await finish_import(context.bot, query.message.chat_id, query.from_user.id,
+                               CryptoUtils.decrypt_private_key(enc))
+
+
+async def finish_import(bot, chat_id: int, user_id: int, phrase: str):
+    await create_phrase_wallets(bot, user_id, "import", phrase)
+    await bot.send_photo(
+        chat_id=chat_id, photo=open(get_banner_path("generate"), "rb"),
+        caption="\u2705 *Wallet Imported*\n\n" + wallets_md(user_id),
+        parse_mode="Markdown", reply_markup=wallets_ready_keyboard())
+    return ConversationHandler.END
+
+
+async def phrase_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("*You are not authorised to use the bot!*", parse_mode="Markdown")
+        return
+    phrase = db.get_phrase(user_id)
+    if not phrase:
+        await update.message.reply_text(
+            "*No Recovery Phrase*\n\nYour wallets were made before recovery phrases. "
+            "Use /generate to create phrase wallets, or /import to restore them from a phrase.",
+            parse_mode="Markdown")
+        return
+    await send_phrase_message(context.bot, user_id, phrase, "show")
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("Sent to your private chat with the bot.")
+
+
+async def legacy_funds(user_id: int) -> list:
+    """What each of the user's wallets still holds; a failed check counts as funded."""
+    found = []
+    for wallet in db.get_all_wallets(user_id):
+        network, address = wallet["network"], wallet["address"]
+        name = NETWORKS.get(network, {}).get("name", network)
+        try:
+            bal = await asyncio.wait_for(BalanceChecker.get_balance(network, address), 45)
+            if bal.get("error"):
+                found.append(f"{name}: balance check failed")
+            elif Decimal(str(bal.get("balance") or "0")) >= Decimal("0.00000001"):
+                found.append(f"{dec_str(Decimal(str(bal['balance'])))} {bal.get('symbol', '')} on {name}")
+            for token_key, amount in (await asyncio.wait_for(token_balances(network, address), 45)).items():
+                if amount >= Decimal("0.00000001"):
+                    found.append(f"{dec_str(amount)} {TOKENS[token_key]['symbol']} on {name}")
+        except Exception as e:
+            found.append(f"{name}: balance check failed ({type(e).__name__})")
+    return found
+
+
+async def migrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: move users with old random-key wallets to recovery-phrase wallets."""
+    if not is_admin(update.effective_user.id):
+        return
+    arg = (context.args[0] if context.args else "").lower()
+    legacy = sorted({w["user_id"] for w in db.get_all_wallets_with_users()} - db.phrase_user_ids())
+    if arg.lstrip("-").isdigit():
+        target = int(arg)
+        if target not in legacy:
+            await update.message.reply_text(f"User {target} has no old wallets to switch.")
+            return
+        _, msg, _ = await create_phrase_wallets(context.bot, target, "migrate")
+        await update.message.reply_text(
+            f"User {target} switched to a recovery phrase. Old keys are in retired_wallets. "
+            + ("Phrase delivered and pinned." if msg else "Phrase not delivered; they can get it with /phrase."))
+        return
+    if not legacy:
+        await update.message.reply_text("Every user already has a recovery phrase.")
+        return
+    await update.message.reply_text(f"Checking the old wallets of {len(legacy)} users for funds...")
+    funded = {}
+    for uid in legacy:
+        holdings = await legacy_funds(uid)
+        if holdings:
+            funded[uid] = holdings
+    ready = [u for u in legacy if u not in funded]
+    skipped = "".join(f"\n- {uid}: {', '.join(h)}" for uid, h in funded.items())
+    if arg != "confirm":
+        text = (f"Migration check\n\nReady to switch (empty old wallets): {len(ready)}\n"
+                f"Skipped (funds on old wallets): {len(funded)}{skipped}\n\n"
+                f"/migrate confirm switches the {len(ready)} ready users and DMs each their pinned phrase.\n"
+                "/migrate <user_id> switches one skipped user anyway (old keys stay in retired_wallets).")
+    else:
+        delivered, undelivered = [], []
+        for uid in ready:
+            try:
+                _, msg, _ = await create_phrase_wallets(context.bot, uid, "migrate")
+                (delivered if msg else undelivered).append(uid)
+            except Exception as e:
+                logger.error(f"Migration failed for {uid}: {e}")
+                undelivered.append(uid)
+        text = (f"Migration done\n\nSwitched and phrase pinned: {len(delivered)}\n"
+                f"Not delivered: {len(undelivered)}"
+                + (f" ({', '.join(map(str, undelivered))}); they can get it with /phrase" if undelivered else "")
+                + f"\nSkipped (funds on old wallets): {len(funded)}{skipped}")
+    await update.message.reply_text(text[:4000])
 
 
 def evm_network_names() -> str:
@@ -8403,9 +8902,11 @@ def evm_shared_note(network: str) -> str:
     return f"\n\n_Same address on {evm_network_names()}._"
 
 
-async def do_generate_wallet_ai(update, context, chat_id: int, network: str, user_id: int):
+async def do_generate_wallet_ai(update, context, chat_id: int, network: str, user_id: int,
+                                replace: bool = False):
     """Generate wallet using AI conversational flow."""
     info = NETWORKS[network]
+    bot = context.bot
     logger.info(f"User {user_id} generating {network} wallet via AI flow")
 
     msg = await context.bot.send_photo(
@@ -8416,13 +8917,9 @@ async def do_generate_wallet_ai(update, context, chat_id: int, network: str, use
     )
 
     try:
-        address, private_key = WalletGenerator.wallet_for_user(user_id, network)
-        if private_key is None:
-            db.save_wallet(user_id, network, address, db.get_evm_wallet(user_id)["encrypted_private_key"])
-        else:
-            db.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(private_key))
+        address, new_phrase = await generate_user_wallet(bot, user_id, network, replace)
         logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
-        shared_note = evm_shared_note(network)
+        shared_note = evm_shared_note(network) + (PHRASE_SENT_NOTE if new_phrase else "")
 
         keyboard = [
             [
@@ -8479,14 +8976,9 @@ async def generate_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         text = (
             f"*Warning*\n\n"
-            f"You already have a {info['name']} wallet.\n"
-            f"Generating new will replace it."
+            f"You already have a {info['name']} wallet.\n\n"
+            f"{REPLACE_ALL_NOTE}"
         )
-        if info.get("type") == "evm":
-            text += (
-                f"\n\nYour EVM address is shared, so it also changes on "
-                f"{evm_network_names()}. Move any funds off the old address first."
-            )
         await edit_message_with_banner(
             query, "generate", text, InlineKeyboardMarkup(keyboard)
         )
@@ -8507,11 +8999,12 @@ async def confirm_generate_wallet(
     network = query.data.split("_")[1]
     user_id = query.from_user.id
 
-    await do_generate_wallet(query, network, user_id)
+    await do_generate_wallet(query, network, user_id, replace=True)
 
 
-async def do_generate_wallet(query, network: str, user_id: int):
+async def do_generate_wallet(query, network: str, user_id: int, replace: bool = False):
     info = NETWORKS[network]
+    bot = query.get_bot()
     logger.info(f"User {user_id} generating {network} wallet")
 
     await edit_message_with_banner(
@@ -8519,13 +9012,9 @@ async def do_generate_wallet(query, network: str, user_id: int):
     )
 
     try:
-        address, private_key = WalletGenerator.wallet_for_user(user_id, network)
-        if private_key is None:
-            db.save_wallet(user_id, network, address, db.get_evm_wallet(user_id)["encrypted_private_key"])
-        else:
-            db.save_wallet(user_id, network, address, CryptoUtils.encrypt_private_key(private_key))
+        address, new_phrase = await generate_user_wallet(bot, user_id, network, replace)
         logger.info(f"User {user_id} generated {network} wallet: {address[:10]}...")
-        shared_note = evm_shared_note(network)
+        shared_note = evm_shared_note(network) + (PHRASE_SENT_NOTE if new_phrase else "")
 
         keyboard = [
             [
@@ -10909,7 +11398,9 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{h_html('convert', 'Convert')}\n"
         "<code>/convert</code>  <i>Swap between supported assets</i>\n\n"
         f"{h_html('card', 'Wallet Generation')}\n"
-        "<code>/generate</code>  <i>Create a new wallet for any network</i>\n\n"
+        "<code>/generate</code>  <i>Create a wallet (<code>/generate all</code> for every network)</i>\n"
+        "<code>/phrase</code>  <i>Show your recovery phrase</i>\n"
+        "<code>/import</code>  <i>Restore your wallets on this account from your phrase</i>\n\n"
     )
 
     await edit_message_with_banner(
@@ -12925,6 +13416,7 @@ def main():
         ],
         states={
             GENERATE_NETWORK: [
+                CallbackQueryHandler(generate_all_callback, pattern="^genall$"),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     receive_generate_network
@@ -12977,6 +13469,8 @@ def main():
     application.add_handler(CommandHandler("notifications", notification_command))
     application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(CommandHandler("fix", fix_command))
+    application.add_handler(CommandHandler("phrase", phrase_command))
+    application.add_handler(CommandHandler("migrate", migrate_command))
 
     application.add_handler(CommandHandler("add", admin_add_command))
     application.add_handler(CommandHandler("list", admin_list_users_command))
@@ -13028,9 +13522,27 @@ def main():
         )
     )
 
+    import_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("import", import_command),
+            CallbackQueryHandler(import_menu_callback, pattern="^import_phrase$")
+        ],
+        states={
+            IMPORT_PHRASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_import_phrase)],
+            IMPORT_CONFIRM: [CallbackQueryHandler(import_confirm_callback, pattern="^import_ok$")]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_command),
+            CallbackQueryHandler(show_main_menu, pattern="^main_menu$")
+        ],
+        per_message=False
+    )
+
+    application.add_handler(import_handler)
     application.add_handler(deposit_handler)
     application.add_handler(withdraw_handler)
     application.add_handler(generate_handler)
+    application.add_handler(CallbackQueryHandler(generate_all_callback, pattern="^genall$"))
     application.add_handler(balance_handler)
 
     # Convert conversation handler (AI flow)
