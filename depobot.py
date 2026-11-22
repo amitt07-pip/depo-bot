@@ -485,9 +485,9 @@ def auto_button_style(text: str, data=None):
     Blue: convert, explorer, balance, wallets."""
     label = text or ""
     data = data if isinstance(data, str) else ""
-    if data.startswith(("cancel", "rescue:no:", "notif_stop")) or _STOP_RE.search(label):
+    if data.startswith(("cancel", "rescue:no:", "recover:no:", "notif_stop")) or _STOP_RE.search(label):
         return "danger"
-    if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "notif_resume")) or _CONFIRM_RE.search(label):
+    if data.startswith(("confirm", "exec_withdraw", "rescue:ok:", "recover:ok:", "notif_resume")) or _CONFIRM_RE.search(label):
         return "success"
     if data.startswith(("menu_withdraw", "withdraw_", "qp_wd_")) or _OUT_RE.search(label):
         return "danger"
@@ -2668,6 +2668,20 @@ class WalletDatabase:
             cursor.executemany(
                 "INSERT INTO retired_wallets (user_id, network, address, encrypted_private_key) "
                 "VALUES (?, ?, ?, ?)", [(user_id, *r) for r in rows])
+
+    def old_account_keys(self, user_id: int) -> list:
+        """Every key an account ever had: current wallets plus retired ones.
+        [(network, address, encrypted_private_key)]"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        self._retired_table(cursor)
+        cursor.execute("SELECT network, address, encrypted_private_key FROM wallets WHERE user_id = ?", (user_id,))
+        rows = cursor.fetchall()
+        cursor.execute("SELECT network, address, encrypted_private_key FROM retired_wallets "
+                       "WHERE user_id = ? ORDER BY id DESC", (user_id,))
+        rows += cursor.fetchall()
+        conn.close()
+        return rows
 
     def delete_all_wallets(self, user_id: int) -> int:
         conn = sqlite3.connect(self.db_path)
@@ -5657,6 +5671,9 @@ async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "*Wallet Rescue*\n"
         "• `/rescue <wallet_address> <chain>` — balances of a bot EVM address on another chain\n"
         "• `/rescue <wallet_address> <chain> <token> <to_address> [amount|all]` — move funds sent on the wrong EVM chain (e.g. BEP20 to an ERC20 address)\n\n"
+        "*Lost Accounts*\n"
+        "• `/recover <old_user_id>` — what an old account still holds (current and retired wallets)\n"
+        "• `/recover <old_user_id> <new_user_id|address>` — send all of it to a new user's wallets or an address\n\n"
         "*Recovery Phrases*\n"
         "• `/migrate` — check which users still have old random-key wallets\n"
         "• `/migrate confirm` — switch users with empty old wallets to a phrase and DM it\n"
@@ -6091,6 +6108,191 @@ async def rescue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+
+
+pending_recoveries = {}
+RECOVER_USAGE = (
+    "<b>Recover an old account</b>\n\n"
+    "See what an old account still holds (current and retired wallets):\n"
+    "<code>/recover &lt;old_user_id&gt;</code>\n\n"
+    "Send all of it to a user's wallets (same networks) or to one address:\n"
+    "<code>/recover &lt;old_user_id&gt; &lt;new_user_id|address&gt;</code>"
+)
+
+
+async def _recover_scan(old_user_id: int) -> list:
+    """Funded assets on every key the old account had. Tokens come before native coins."""
+    keys, seen = [], set()
+    for network, address, enc in db.old_account_keys(old_user_id):
+        if network not in NETWORKS:
+            continue
+        nets = EVM_NETWORK_KEYS if NETWORKS[network]["type"] == "evm" else [network]
+        for net in nets:
+            k = (net, address.lower() if NETWORKS[net]["type"] == "evm" else address)
+            if k not in seen:
+                seen.add(k)
+                keys.append((net, address, enc))
+
+    async def one(net, address, enc, token):
+        try:
+            info = (await BalanceChecker.get_token_balance(token, net, address) if token
+                    else await BalanceChecker.get_balance(net, address))
+            bal = Decimal(str(info.get("balance") or "0")) if not info.get("error") else Decimal(0)
+        except Exception as e:
+            logger.warning(f"Recover scan {net} {token or 'native'} failed: {e}")
+            bal = Decimal(0)
+        tnet = TOKENS[token]["networks"][net] if token else {}
+        return {"network": net, "address": address, "enc": enc, "token": token,
+                "contract": tnet.get("address"), "decimals": tnet.get("decimals"),
+                "symbol": TOKENS[token].get("symbol", token) if token else NETWORKS[net]["symbol"],
+                "balance": bal}
+
+    jobs = [one(n, a, e, t) for n, a, e in keys for t in contract_tokens(n) + [None]]
+    found = [r for r in await asyncio.gather(*jobs) if r["balance"] > 0]
+    return sorted(found, key=lambda r: r["token"] is None)
+
+
+def _recover_lines(assets: list) -> str:
+    return "\n".join(
+        f"\u2022 <b>{esc(_fmt_amount(a['balance']))} {esc(a['symbol'])}</b> on {esc(NETWORKS[a['network']]['name'])}"
+        f" \u2014 <code>{esc(format_address(a['address']))}</code>" for a in assets)
+
+
+def _recover_destinations(dest: str):
+    """(user_id, None) for a Telegram user, (None, {network: address}) for an address."""
+    if dest.isdigit():
+        return int(dest), None
+    nets = detect_network_from_address(dest)
+    if not nets:
+        return None, None
+    return None, {n: dest for n in (nets if isinstance(nets, list) else [nets])}
+
+
+async def recover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: move what a lost (pre-phrase) account still holds to a new user or address."""
+    if not update.message or not is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(RECOVER_USAGE, parse_mode="HTML")
+        return
+    old_user_id = int(args[0])
+    if not db.old_account_keys(old_user_id):
+        await update.message.reply_text(f"<b>No wallets found for user</b> <code>{old_user_id}</code>.", parse_mode="HTML")
+        return
+    wait = await update.message.reply_text("<b>Checking balances...</b>", parse_mode="HTML")
+    assets = await _recover_scan(old_user_id)
+    if not assets:
+        await wait.edit_text(f"<b>User</b> <code>{old_user_id}</code> <b>has no funds on any of its wallets.</b>", parse_mode="HTML")
+        return
+    header = f"<b>Old account</b> <code>{old_user_id}</code> <b>holds:</b>\n\n{_recover_lines(assets)}"
+    if len(args) < 2:
+        await wait.edit_text(header + "\n\nTo move it: <code>/recover " + str(old_user_id) +
+                             " &lt;new_user_id|address&gt;</code>", parse_mode="HTML")
+        return
+    dest = args[1].strip()
+    new_user_id, addresses = _recover_destinations(dest)
+    if new_user_id is None and addresses is None:
+        await wait.edit_text("<b>Invalid destination.</b> Use a Telegram user ID or a wallet address.", parse_mode="HTML")
+        return
+    if new_user_id == old_user_id:
+        await wait.edit_text("<b>The new user must be different from the old one.</b>", parse_mode="HTML")
+        return
+    movable = [a for a in assets if new_user_id or a["network"] in addresses]
+    if not movable:
+        await wait.edit_text(header + "\n\n<b>That address can't receive any of these networks.</b>", parse_mode="HTML")
+        return
+    recover_id = hashlib.sha256(f"{time.time()}{old_user_id}{dest}".encode()).hexdigest()[:12]
+    pending_recoveries[recover_id] = {"old": old_user_id, "new_user": new_user_id,
+                                      "addresses": addresses, "created": time.time()}
+    to_text = f"user <code>{new_user_id}</code>'s wallets" if new_user_id else f"<code>{esc(dest)}</code>"
+    skipped = len(assets) - len(movable)
+    await wait.edit_text(
+        header + f"\n\n<b>Send everything to</b> {to_text}?"
+        + (f"\n<i>{skipped} asset(s) are on networks that address can't receive and will stay.</i>" if skipped else "")
+        + "\n<i>Native coins are sent last, minus the network fee.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Confirm", callback_data=f"recover:ok:{recover_id}")],
+            [InlineKeyboardButton("Cancel", callback_data=f"recover:no:{recover_id}")],
+        ])
+    )
+
+
+async def _recover_send(asset: dict, to_address: str, amount: Decimal) -> dict:
+    key = CryptoUtils.decrypt_private_key(asset["enc"])
+    net, kind, amt = asset["network"], NETWORKS[asset["network"]]["type"], _fmt_amount(amount)
+    if asset["token"] and kind == "evm":
+        return await WithdrawalHandler.withdraw_evm(net, key, to_address, amt, asset["contract"])
+    if asset["token"] and kind == "solana":
+        return await WithdrawalHandler.withdraw_solana_token(key, to_address, amt, asset["contract"], decimals=asset["decimals"] or 6)
+    if asset["token"] and kind == "tron":
+        return await WithdrawalHandler.withdraw_tron_token(key, to_address, amt, asset["contract"], decimals=asset["decimals"] or 6)
+    return await WithdrawalHandler.withdraw(net, key, to_address, amt)
+
+
+async def recover_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    _, action, recover_id = query.data.split(":", 2)
+    pending = pending_recoveries.pop(recover_id, None)
+    if action == "no":
+        await query.edit_message_text("<b>Recovery cancelled.</b>", parse_mode="HTML")
+        return
+    if not pending or time.time() - pending["created"] > 600:
+        await query.edit_message_text("<b>This recovery expired. Run /recover again.</b>", parse_mode="HTML")
+        return
+    await query.edit_message_text("<b>Recovering... this can take a minute.</b>", parse_mode="HTML")
+    old, new_user = pending["old"], pending["new_user"]
+    lines, sent_any = [], False
+    for asset in await _recover_scan(old):
+        net, sym = asset["network"], asset["symbol"]
+        label = f"{_fmt_amount(asset['balance'])} {sym} on {NETWORKS[net]['name']}"
+        try:
+            if new_user:
+                to_address, _ = await generate_user_wallet(context.bot, new_user, net)
+            else:
+                to_address = pending["addresses"].get(net)
+            if not to_address:
+                continue
+            amount = asset["balance"]
+            if not asset["token"]:
+                live = await BalanceChecker.get_balance(net, asset["address"])
+                reserve = await native_fee_reserve(net)
+                amount = Decimal(str(live.get("balance") or "0")) - (reserve or Decimal(0))
+                if reserve is None or amount <= 0:
+                    lines.append(f"\u26a0\ufe0f {esc(label)}: too little left to pay the fee")
+                    continue
+                places = min(int(asset["decimals"] or (18 if NETWORKS[net]["type"] == "evm" else 9)), 9)
+                from decimal import ROUND_DOWN
+                amount = amount.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN)
+            logger.info(f"Owner recover: {amount} {sym} on {net} from user {old} to {to_address[:10]}...")
+            result = await _recover_send(asset, to_address, amount)
+        except Exception as e:
+            result = {"success": False, "error": str(e)}
+        if result.get("success"):
+            sent_any = True
+            tx = result.get("tx_hash") or ""
+            url = result.get("explorer_url") or (tx_explorer_url(net, tx) if tx else "")
+            link = f' <a href="{esc(url)}">tx</a>' if url else ""
+            lines.append(f"\u2705 {esc(_fmt_amount(amount))} {esc(sym)} on {esc(NETWORKS[net]['name'])}{link}")
+        else:
+            logger.error(f"Owner recover failed for {label}: {result.get('error')}")
+            lines.append(f"\u274c {esc(label)}: {esc(get_friendly_error(result.get('error')))}")
+    await query.edit_message_text(
+        f"<b>Recovery of</b> <code>{old}</code>\n\n" + ("\n".join(lines) or "Nothing to move."),
+        parse_mode="HTML", disable_web_page_preview=True)
+    if new_user and sent_any:
+        try:
+            await context.bot.send_message(
+                new_user,
+                "\U0001F4E5 <b>Funds Recovered</b>\n\nThe balance of your old Vex account was sent to "
+                "your wallets here. It shows in /balance once the network confirms it.",
+                parse_mode="HTML")
+        except Exception:
+            pass
 
 def get_friendly_error(error) -> str:
     error_str = str(error) if error else ""
@@ -10657,6 +10859,17 @@ NATIVE_FEE_RESERVE = {
 }
 
 
+async def native_fee_reserve(network: str):
+    """Native coin to keep aside for the network fee (None if the gas price can't be read)."""
+    if NETWORKS[network]["type"] == "evm":
+        try:
+            gas_price = await asyncio.to_thread(evm_call, network, lambda w3: w3.eth.gas_price)
+            return Decimal(gas_price * 21000) * Decimal("1.5") / Decimal(10 ** 18)
+        except Exception:
+            return None
+    return NATIVE_FEE_RESERVE.get(NETWORKS[network]["type"], Decimal("0"))
+
+
 async def resolve_withdraw_keyword_amount(user_id: int, network: str, token: str, keyword: str):
     """Turn ``all``/``half`` into an amount, keeping native coins' network fee aside."""
     if not network or network not in NETWORKS:
@@ -10668,14 +10881,9 @@ async def resolve_withdraw_keyword_amount(user_id: int, network: str, token: str
     decimals = token_net.get("decimals") or (18 if info["type"] == "evm" else 9)
 
     if is_native:
-        if info["type"] == "evm":
-            try:
-                gas_price = await asyncio.to_thread(evm_call, network, lambda w3: w3.eth.gas_price)
-                reserve = Decimal(gas_price * 21000) * Decimal("1.5") / Decimal(10 ** 18)
-            except Exception:
-                return None
-        else:
-            reserve = NATIVE_FEE_RESERVE.get(info["type"], Decimal("0"))
+        reserve = await native_fee_reserve(network)
+        if reserve is None:
+            return None
         spendable = balance - reserve
     else:
         spendable = balance
@@ -13516,6 +13724,8 @@ def main():
     application.add_handler(CommandHandler("get_link", get_link_command))
     application.add_handler(CallbackQueryHandler(get_link_callback, pattern=r"^getlink:-?\d+$"))
     application.add_handler(CommandHandler("rescue", rescue_command))
+    application.add_handler(CommandHandler("recover", recover_command))
+    application.add_handler(CallbackQueryHandler(recover_callback, pattern=r"^recover:(ok|no):[0-9a-f]+$"))
     application.add_handler(CommandHandler("deleteall", deleteall_command))
     application.add_handler(CallbackQueryHandler(deleteall_callback, pattern=r"^delall:(start|no|ok:[0-9a-f]+|sure:[0-9a-f]+)$"))
     application.add_handler(CallbackQueryHandler(rescue_callback, pattern=r"^rescue:(ok|no):[0-9a-f]+$"))
