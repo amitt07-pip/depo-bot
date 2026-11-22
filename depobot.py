@@ -10474,8 +10474,7 @@ async def _send_withdraw_memo_prompt(context, chat_id: int, address: str, error:
         text=f"{head}\n\n"
         f"*To:* `{format_address(address)}`\n"
         f"*Max length:* `{TON_MEMO_MAX_BYTES} characters`\n\n"
-        "_Exchanges need a memo to credit TON, or funds are lost. "
-        "Reply with the memo, or tap No Memo._",
+        "_Exchanges need a memo or funds are lost. Reply with it, or tap No Memo._",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
